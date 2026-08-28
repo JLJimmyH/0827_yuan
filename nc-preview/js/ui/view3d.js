@@ -35,11 +35,13 @@
   const TOP_RGB = [222, 216, 206];       // 頂面暖灰（與 view2d.js 一致；要和背景 #fbfbfb 分得開）
   const DEEP_RGB = [14, 34, 104];        // 深處深藍
   const FIXTURE_RGB = [196, 160, 120];   // 治具土黃（3D 只用在色階上限之上）
+  const CUT_RGB = [188, 178, 164];       // 剖開之後看到的斷面（背面）色：一塊實心的料，不是被光打反的殼
   const C = {
     bg: '#fbfbfb',
     rapid: '#9a9a9a',
     highlight: '#ff2d55',
     stockLine: '#4a4a4a',
+    section: '#ff9500',   // 剖面平面（與 view2d 的剖面指示線同色）
     axisX: '#d62728',
     axisY: '#2ca02c',
     axisZ: '#1f77b4',
@@ -898,8 +900,62 @@
     return b;
   }
 
+  /**
+   * 剖面平面：在 axis = value 的位置鋪一片半透明矩形，四周加一圈外框線。
+   * 這片東西的用途只有一個——讓人在 3D 上看得到「旁邊那張剖面圖是從哪裡切下去的」。
+   * 尺寸取場景包絡再往外放一點，免得剛好貼齊工件邊緣看不出是一個平面。
+   * @param {{min:{x,y,z},max:{x,y,z}}} b 場景包絡（sceneBounds 的回傳）
+   * @param {'x'|'y'} axis
+   * @returns {{fill:Object, edge:Object}|null}
+   */
+  function buildSectionPlane(b, axis, value, opts) {
+    opts = opts || {};
+    if (!b || (axis !== 'x' && axis !== 'y') || !Number.isFinite(value)) return null;
+    const pad = opts.pad != null ? opts.pad : 0.08;
+    const ex = Math.max((b.max.x - b.min.x) * pad, 1);
+    const ey = Math.max((b.max.y - b.min.y) * pad, 1);
+    const ez = Math.max((b.max.z - b.min.z) * pad, 1);
+    const z0 = b.min.z - ez, z1 = b.max.z + ez;
+    let q;
+    if (axis === 'x') {
+      const y0 = b.min.y - ey, y1 = b.max.y + ey;
+      q = [[value, y0, z0], [value, y1, z0], [value, y1, z1], [value, y0, z1]];
+    } else {
+      const x0 = b.min.x - ex, x1 = b.max.x + ex;
+      q = [[x0, value, z0], [x1, value, z0], [x1, value, z1], [x0, value, z1]];
+    }
+    const rgb = hexRgb(opts.color || C.section);
+    const fp = [], fc = [];
+    for (const i of [0, 1, 2, 0, 2, 3]) { fp.push(q[i][0], q[i][1], q[i][2]); fc.push(rgb[0], rgb[1], rgb[2]); }
+    const ep = [], ec = [];
+    for (let i = 0; i < 4; i++) {
+      const a = q[i], c = q[(i + 1) % 4];
+      ep.push(a[0], a[1], a[2], c[0], c[1], c[2]);
+      ec.push(rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
+    }
+    return {
+      fill: { positions: new Float32Array(fp), colors: new Float32Array(fc), vertexCount: 6 },
+      edge: { positions: new Float32Array(ep), colors: new Float32Array(ec), vertexCount: 8 },
+    };
+  }
+
+  /**
+   * 剖切平面 [nx, ny, nz, d]：著色器丟掉 `dot(pos, n) > d` 的片段。
+   * 法線朝**相機那一側**——不管把工件轉到哪個角度，被切掉的永遠是擋住斷面的那半邊，
+   * 所以拖剖面滑桿的時候一定看得到剛切出來的那個面。
+   * @param {'x'|'y'} axis
+   * @param {number[]} eye 相機位置
+   */
+  function clipPlaneFor(axis, value, eye) {
+    if ((axis !== 'x' && axis !== 'y') || !Number.isFinite(value)) return null;
+    const k = axis === 'x' ? 0 : 1;
+    const sign = (eye && eye[k] < value) ? -1 : 1;
+    return axis === 'x' ? [sign, 0, 0, sign * value] : [0, sign, 0, sign * value];
+  }
+
   const view3dUtil = {
-    TOOL_COLORS, TOP_RGB, DEEP_RGB, FIXTURE_RGB, PICK_PX, ARC_TOL, COLORS: C,
+    TOOL_COLORS, TOP_RGB, DEEP_RGB, FIXTURE_RGB, CUT_RGB, PICK_PX, ARC_TOL, COLORS: C,
+    buildSectionPlane, clipPlaneFor,
     toolColor, hexRgb, mat4, mat4Mul, mat4Perspective, mat4LookAt, projectPoint, distPointSeg2D,
     resolveDownsample, downsampleHeights, buildMesh, buildMeshAsync, planChunks,
     updateHeights, canUpdateHeights, arcSteps, arcPoints, buildPathLines, buildStockLines, buildAxesLines, sceneBounds,
@@ -915,10 +971,10 @@
     'attribute vec3 aNor;',
     'uniform mat4 uMVP;',
     'varying vec3 vNor;',
-    'varying float vZ;',
+    'varying vec3 vWorld;',
     'void main() {',
     '  vNor = aNor;',
-    '  vZ = aPos.z;',
+    '  vWorld = aPos;',
     '  gl_Position = uMVP * vec4(aPos, 1.0);',
     '}',
   ].join('\n');
@@ -929,7 +985,7 @@
     'precision mediump float;',
     '#endif',
     'varying vec3 vNor;',
-    'varying float vZ;',
+    'varying vec3 vWorld;',
     'uniform vec3 uLight;',
     'uniform vec3 uTop;',
     'uniform vec3 uWall;',
@@ -937,19 +993,29 @@
     'uniform vec3 uDeep;',
     'uniform vec3 uFixture;',
     'uniform vec2 uZRange;',   // x = zTop, y = zBottom
+    'uniform vec4 uClip;',     // xyz = 法線、w = 門檻；dot(pos, n) > w 的片段丟掉
+    'uniform float uClipOn;',
+    'uniform vec3 uCut;',      // 剖開之後看到的斷面色
     'void main() {',
+    '  bool cutting = uClipOn > 0.5;',
+    '  if (cutting && dot(vWorld, uClip.xyz) > uClip.w) discard;',
     '  vec3 n = normalize(vNor);',
+    // 剖切時要關背面剔除才看得到內部；那些背面翻過來當成斷面打光，不然會是一層黑殼
+    '  bool back = cutting && !gl_FrontFacing;',
+    '  if (back) n = -n;',
     '  float up = n.z;',
     '  vec3 face = mix(uBottom, uTop, step(0.0, up));',
     '  vec3 base = mix(uWall, face, smoothstep(0.30, 0.72, abs(up)));',
     '  float span = max(uZRange.x - uZRange.y, 1e-4);',
-    '  float f = clamp((uZRange.x - vZ) / span, 0.0, 1.0);',
+    '  float f = clamp((uZRange.x - vWorld.z) / span, 0.0, 1.0);',
     '  f = pow(f, 0.6);',
     // 垂直壁只吃 55% 的色階，免得整塊料看起來泡在藍色裡；頂面維持與 2D 俯視相同的深淺對應
     '  float ramp = f * mix(0.48, 0.88, smoothstep(0.30, 0.72, abs(up)));',
     '  vec3 col = mix(base, uDeep, ramp);',
     // 高於素材頂面的格＝治具，換成土黃（與 view2d 的 depthColor 一致）
-    '  col = mix(col, uFixture, step(uZRange.x + 1e-4, vZ));',
+    '  col = mix(col, uFixture, step(uZRange.x + 1e-4, vWorld.z));',
+    // 斷面（背面）偏向素色的「一塊實心料」，但保留一點深淺，還看得出哪裡切得深
+    '  if (back) col = mix(col, uCut, 0.75);',
     '  float d = max(dot(n, uLight), 0.0);',
     '  float bk = max(dot(n, -uLight), 0.0);',
     '  float lit = 0.42 + 0.62 * d + 0.10 * bk;',
@@ -1076,6 +1142,8 @@
       ML.uTop = gl.getUniformLocation(mp, 'uTop'); ML.uWall = gl.getUniformLocation(mp, 'uWall');
       ML.uBottom = gl.getUniformLocation(mp, 'uBottom'); ML.uDeep = gl.getUniformLocation(mp, 'uDeep');
       ML.uFixture = gl.getUniformLocation(mp, 'uFixture'); ML.uZRange = gl.getUniformLocation(mp, 'uZRange');
+      ML.uClip = gl.getUniformLocation(mp, 'uClip'); ML.uClipOn = gl.getUniformLocation(mp, 'uClipOn');
+      ML.uCut = gl.getUniformLocation(mp, 'uCut');
       LL.aPos = gl.getAttribLocation(lp, 'aPos'); LL.aColor = gl.getAttribLocation(lp, 'aColor');
       LL.uMVP = gl.getUniformLocation(lp, 'uMVP'); LL.uOffset = gl.getUniformLocation(lp, 'uOffset');
       LL.uViewport = gl.getUniformLocation(lp, 'uViewport'); LL.uTint = gl.getUniformLocation(lp, 'uTint');
@@ -1105,6 +1173,9 @@
       meshInfo: { vertices: 0, triangles: 0, downsample: 1, chunks: 0 },
       path: null, pathBuf: null,
       stockBuf: null, axesBuf: null,
+      // 剖面：axis 為 null 時整組不畫。clip = 把靠相機那半邊切掉，直接看斷面。
+      section: { axis: null, value: 0, clip: false },
+      sectionFillBuf: null, sectionEdgeBuf: null,
       zRange: [0, -10],
       building: false, buildToken: 0, buildProgress: 1,
       pickCb: null, progressCb: null,
@@ -1300,6 +1371,16 @@
       const span = b ? Math.max(b.max.x - b.min.x, b.max.y - b.min.y, 10) : 50;
       S.axesBuf = makeLineBuf(buildAxesLines(Math.max(5, span * 0.14)));
     }
+    function rebuildSection() {
+      freeLineBuf(S.sectionFillBuf); freeLineBuf(S.sectionEdgeBuf);
+      S.sectionFillBuf = S.sectionEdgeBuf = null;
+      const sec = S.section;
+      if (!sec.axis) return;
+      const plane = buildSectionPlane(sceneBounds(S.data), sec.axis, sec.value);
+      if (!plane) return;
+      S.sectionFillBuf = makeLineBuf(plane.fill);
+      S.sectionEdgeBuf = makeLineBuf(plane.edge);
+    }
 
     // ---- 相機 ------------------------------------------------------------
     function eyePos() {
@@ -1389,13 +1470,20 @@
       gl.uniform3f(ML.uDeep, DEEP_RGB[0] / 255, DEEP_RGB[1] / 255, DEEP_RGB[2] / 255);
       gl.uniform3f(ML.uFixture, FIXTURE_RGB[0] / 255, FIXTURE_RGB[1] / 255, FIXTURE_RGB[2] / 255);
       gl.uniform2f(ML.uZRange, S.zRange[0], S.zRange[1]);
+      const clip = S.section.clip ? clipPlaneFor(S.section.axis, S.section.value, eyePos()) : null;
+      gl.uniform1f(ML.uClipOn, clip ? 1 : 0);
+      gl.uniform4f(ML.uClip, clip ? clip[0] : 0, clip ? clip[1] : 0, clip ? clip[2] : 0, clip ? clip[3] : 1e9);
+      gl.uniform3f(ML.uCut, CUT_RGB[0] / 255, CUT_RGB[1] / 255, CUT_RGB[2] / 255);
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1.2, 2.0);
       // 背面剔除：所有四邊形（頂面／裙邊／外壁／底面）都是逆時針朝外，見 test 的「繞向一致」那條。
       // 少畫一半的片段，貫穿孔的孔底與底面重疊時也不會 z-fighting（從上看只留朝上的那面）。
-      gl.enable(gl.CULL_FACE);
-      gl.frontFace(gl.CCW);
-      gl.cullFace(gl.BACK);
+      // 剖切時例外——切開之後看到的正是內部的背面，剔掉就變成一個空殼。
+      if (!clip) {
+        gl.enable(gl.CULL_FACE);
+        gl.frontFace(gl.CCW);
+        gl.cullFace(gl.BACK);
+      } else gl.disable(gl.CULL_FACE);
       for (const c of S.meshChunks) {
         gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo);
         gl.vertexAttribPointer(ML.aPos, 3, gl.FLOAT, false, 0, 0);
@@ -1455,6 +1543,29 @@
       gl.disableVertexAttribArray(LL.aPos);
       gl.disableVertexAttribArray(LL.aColor);
     }
+    /**
+     * 剖面平面。畫在最後、而且不寫深度：它是一片參考用的玻璃，
+     * 讓人一眼看出旁邊那張 2D 剖面是從哪一刀切下去的，不該擋住它後面的路徑。
+     */
+    function drawSection() {
+      if (!S.sectionFillBuf || !S.sectionEdgeBuf) return;
+      gl.useProgram(lineProg);
+      gl.uniformMatrix4fv(LL.uMVP, false, S.mvp);
+      gl.uniform2f(LL.uViewport, S.size.w, S.size.h);
+      gl.uniform2f(LL.uOffset, 0, 0);
+      gl.uniform1f(LL.uUseTint, 0);
+      gl.depthMask(false);
+      gl.uniform1f(LL.uAlpha, S.section.clip ? 0.1 : 0.16);
+      bindLineBuf(S.sectionFillBuf);
+      gl.drawArrays(gl.TRIANGLES, 0, S.sectionFillBuf.count);
+      gl.uniform1f(LL.uAlpha, 0.9);
+      bindLineBuf(S.sectionEdgeBuf);
+      gl.drawArrays(gl.LINES, 0, S.sectionEdgeBuf.count);
+      gl.depthMask(true);
+      gl.disableVertexAttribArray(LL.aPos);
+      gl.disableVertexAttribArray(LL.aColor);
+    }
+
     function drawSimpleLines(buf, alpha) {
       if (!buf) return;
       gl.useProgram(lineProg);
@@ -1488,6 +1599,7 @@
       drawSimpleLines(S.axesBuf, 1);
       drawPaths();
       drawHighlight();
+      drawSection();
       stepInertia();
       updateHud();
     }
@@ -1525,6 +1637,10 @@
       else if (S.meshInfo.triangles) parts.push('<span class="tag">' + (S.meshInfo.triangles / 1000).toFixed(0) + ' k 三角</span>');
       if (S.meshInfo.downsample > 1) parts.push('<span class="tag warn">已降採樣顯示（1/' + S.meshInfo.downsample + '）</span>');
       if (S.snapshotIndex != null) parts.push('<span class="tag">模擬到第 ' + (S.snapshotIndex + 1) + ' 把刀</span>');
+      if (S.section.axis) {
+        const at = S.section.axis.toUpperCase() + ' = ' + (Math.round(S.section.value * 100) / 100);
+        parts.push('<span class="tag">' + (S.section.clip ? '剖切 ' : '剖面 ') + at + '</span>');
+      }
       const html = parts.join('');
       if (d._html !== html) { d.innerHTML = html; d._html = html; }
     }
@@ -1700,7 +1816,7 @@
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;
         S.needFit = true;
-        rebuildPath(); rebuildStock(); rebuildAxes();
+        rebuildPath(); rebuildStock(); rebuildAxes(); rebuildSection();
         updateZRange(S.data.sim ? S.data.sim.floorZ : NaN, NaN);
         rebuildMesh();
         fit(false);
@@ -1741,6 +1857,24 @@
       getVisible() {
         return { rapid: S.visible.rapid, feed: S.visible.feed, stock: S.visible.stock, surface: S.visible.surface, rotary: S.visible.rotary, tools: S.visible.tools ? new Set(S.visible.tools) : null };
       },
+      /**
+       * 剖面標示。`axis` 給 'x'／'y' 就在那個位置畫一片半透明的平面，
+       * `clip:true` 再把靠相機那半邊切掉——旁邊的 2D 剖面圖畫的就是這個斷面。
+       * `axis:null`（或不給）關掉整組。
+       * @param {{axis?:'x'|'y'|null, value?:number, clip?:boolean}|null} o
+       */
+      setSection(o) {
+        o = o || {};
+        const axis = (o.axis === 'x' || o.axis === 'y') ? o.axis : null;
+        const value = Number.isFinite(o.value) ? Number(o.value) : S.section.value;
+        const clip = 'clip' in o ? !!o.clip : S.section.clip;
+        const changed = axis !== S.section.axis || value !== S.section.value;
+        S.section = { axis, value, clip };
+        if (changed) rebuildSection();
+        requestRender();
+        return api;
+      },
+      getSection() { return { axis: S.section.axis, value: S.section.value, clip: S.section.clip }; },
       highlightLine(n) { S.hlLine = n == null ? null : Number(n); requestRender(); return api; },
       highlightTool(t) { S.hlTool = t == null ? null : Number(t); requestRender(); return api; },
       onPick(cb) { S.pickCb = typeof cb === 'function' ? cb : null; return api; },
@@ -1801,7 +1935,8 @@
         S.hud = null;
         freeMesh();
         freeLineBuf(S.pathBuf); freeLineBuf(S.stockBuf); freeLineBuf(S.axesBuf);
-        S.pathBuf = S.stockBuf = S.axesBuf = null;
+        freeLineBuf(S.sectionFillBuf); freeLineBuf(S.sectionEdgeBuf);
+        S.pathBuf = S.stockBuf = S.axesBuf = S.sectionFillBuf = S.sectionEdgeBuf = null;
         S.path = null;
         try { gl.deleteProgram(meshProg); gl.deleteProgram(lineProg); } catch (e) { /* 忽略 */ }
         // 刻意不呼叫 WEBGL_lose_context.loseContext()：同一個 canvas 的 context 一旦弄丟就再也建不回來，

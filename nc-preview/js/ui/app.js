@@ -242,6 +242,8 @@
       modalHost: $('modalHost'), modalLineLabel: $('modalLineLabel'),
       viewCanvas: $('viewCanvas'),
       viewHost: $('viewHost'), view3dHost: $('view3dHost'), viewCanvas3d: $('viewCanvas3d'),
+      viewSplit: $('viewSplit'), viewSplitBar: $('viewSplitBar'),
+      chkSplit: $('chkSplit'), chkClip: $('chkClip'), lblSplit: $('lblSplit'), lblClip: $('lblClip'),
       btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'), rotaryBanner: $('rotaryBanner'),
       btnModeUnroll: $('btnModeUnroll'), chkRotary: $('chkRotary'), lblRotary: $('lblRotary'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
@@ -272,6 +274,8 @@
       simCache: {},        // 上一輪完整分析的 SimResult（依情境），編輯途中沿用免得成品圖整片消失
       simStale: false,     // 目前畫面上的 heightmap 是不是上一輪的（HUD 會標「更新中」）
       rotary: null,        // 第四軸裝夾參數（跟著程式走，見 ROTARY_KEY）；null = 用推估值
+      // 視圖版面偏好（機台層級，跟著 SETTINGS_KEY 一起存）。ratio = 並排時左邊 2D 佔的比例。
+      viewPref: { split: true, clip: true, ratio: 0.5 },
     };
 
     // ---- 還原設定 ----
@@ -283,6 +287,12 @@
         if (o && o.settings) state.settings = Object.assign(U.defaultSettings(), o.settings);
         if (o && o.scenario) state.scenario = o.scenario;
         if (o && o.cell > 0) state.cell = o.cell;
+        if (o && o.view) {
+          const v = o.view;
+          if ('split' in v) state.viewPref.split = !!v.split;
+          if ('clip' in v) state.viewPref.clip = !!v.clip;
+          if (v.ratio > 0.15 && v.ratio < 0.85) state.viewPref.ratio = Number(v.ratio);
+        }
       } catch (e) { /* 壞掉就用預設 */ }
     })();
     /** 這支程式存過的第四軸設定（沒有就 null） */
@@ -324,7 +334,7 @@
       const s = Object.assign({}, state.settings);
       delete s.magazine;
       delete s.rotary;
-      store.set(SETTINGS_KEY, JSON.stringify({ settings: s, scenario: state.scenario, cell: state.cell }));
+      store.set(SETTINGS_KEY, JSON.stringify({ settings: s, scenario: state.scenario, cell: state.cell, view: state.viewPref }));
     }
 
     // ---- 還原刀庫設定（機台層級，與程式號無關）----
@@ -347,9 +357,10 @@
     const view = ui.createView2D(el.viewCanvas);
     const P = ui.panels;
 
-    // 3D 視圖：第一次切到 3D 才建（WebGL context 很貴）。建不起來就把按鈕標成不可用並說明原因。
+    // 3D 視圖：要用到才建（WebGL context 很貴）。建不起來就把按鈕標成不可用並說明原因。
     let view3d = null;
     let view3dFailed = false;
+    let view3dFresh = false;   // 剛建好、還沒餵過資料（refresh 的 eachView 之後就不用再餵）
     let viewMode = 'top';
     function ensureView3D() {
       if (view3d || view3dFailed) return view3d;
@@ -359,6 +370,7 @@
       } catch (e) { view3d = null; }
       if (!view3d) { view3dFailed = true; return null; }
       view3d.onPick((line) => { if (line > 0) selectLine(line, { scroll: true }); });
+      view3dFresh = true;
       return view3d;
     }
     /** 對所有已建立的視圖做同一件事（3D 沒建就只做 2D） */
@@ -642,6 +654,7 @@
         rotary: rotaryOptOf(run),
       };
       eachView((v) => v.setData(viewData));
+      if (view3d) view3dFresh = false;   // eachView 已經餵過了，applyViewLayout 不必再重建一次
       syncRotaryUI(run);
       syncSectionRange(res.stock);
       syncSnapshotSlider(simForView, run.ops, state.simStale);
@@ -872,23 +885,24 @@
         ? `第四軸展開圖：把圓柱工件的表面攤平（橫軸＝X 軸向位置，縱軸＝${rot.axis} 角度）。分度孔的角度等不等分，這張圖一眼就看得出來。`
         : '這支程式沒有用到第四軸（或 A 從頭到尾沒轉過），展開圖沒有東西可以畫';
 
-      // 四軸時所有視圖必須是同一套座標，不然兩張圖會互相矛盾。
-      // 剖面 X 轉得過去（A 繞 X 轉，X 不受影響）→ 變成圓棒橫截面，與 3D／展開圖一致。
-      // 俯視與剖面 Y 的投影面會跟著工件轉，轉過去之後畫出來的東西沒有意義 → 停用。
-      const NO_ROTARY_MODES = { top: '俯視', sectionY: '剖面 Y' };
+      // 四軸時所有視圖必須是同一套座標，不然兩張圖會互相矛盾——三張都畫在**工件座標**上：
+      // 剖面 X = 圓棒橫截面、剖面 Y = 沿軸向的縱剖面、俯視 = 從上方看那根圓棒。
+      // 圓棒的高度圖攤成直角座標之後（view2d 的 cylToCartesian）這三張都算得出來，
+      // 所以按鈕不再停用，只是把說明換成四軸的版本（早期版本沒有圓棒模擬才必須停用）。
+      const ROTARY_MODE_TIP = {
+        top: '第四軸：從上方看那根圓棒（工件座標）。棒身以外是空的，分度孔排不排得齊看得出來。',
+        sectionX: '第四軸：圓棒橫截面（工件座標）。這一刀切在哪個 X，孔就從圓周指向中心。',
+        sectionY: '第四軸：沿軸向的縱剖面（工件座標）。這個 Y 上圓棒被削成什麼厚度。',
+      };
       for (const b of document.querySelectorAll('.app-seg__btn')) {
         const m = b.dataset.mode;
-        if (!NO_ROTARY_MODES[m]) continue;
-        b.disabled = on;
-        b.title = on
-          ? `第四軸程式不適用：工件會轉，${NO_ROTARY_MODES[m]}的投影面跟著工件跑，畫出來的東西沒有意義。請用「剖面 X」（圓棒橫截面）、3D 或展開圖。`
-          : '';
+        if (!ROTARY_MODE_TIP[m]) continue;
+        b.disabled = false;
+        b.title = on ? ROTARY_MODE_TIP[m] : '';
       }
       // 「工件轉動軌跡」只有四軸才有意義
       show(el.lblRotary, on);
       if (!on && el.chkRotary.checked) { el.chkRotary.checked = false; applyVisible(); }
-      // 停用時如果正停在那個模式，換到還能看的那一張
-      if (on && (viewMode === 'top' || viewMode === 'sectionY')) setViewMode('sectionX');
       if (!on && viewMode === 'unroll') setViewMode('top');
     }
 
@@ -906,14 +920,14 @@
       const sim = rot.mode === 'simultaneous';
       el.rotaryBanner.textContent = sim
         ? `有 ${rot.axis} 軸同動切削，這幾段沒有預演`
-        : `有 ${rot.axis} 軸分度 ${rot.angles.length} 個角度 → 請看「展開圖」`;
+        : `有 ${rot.axis} 軸分度 ${rot.angles.length} 個角度 → 圓棒素材`;
       el.rotaryBanner.title = (sim
         ? `第 ${rot.simLines.slice(0, 8).join('、')} 行是 ${rot.axis} 軸與 XYZ 同時進給的四軸插補，實際刀路是繞著旋轉中心展開的曲面，本工具畫不出來。\n`
-        : `這支程式把工件轉到 ${rot.angles.map((v) => rot.axis + fmt(v)).join('、')} 這幾個角度加工。\n\n`
+        : `這支程式把工件轉到 ${rot.angles.map((v) => rot.axis + fmt(v)).join('、')} 這幾個角度加工，素材當成圓棒模擬。\n\n`
           + '【展開圖】把圓棒表面攤平，各角度分開畫——分度對不對看這張。\n'
-          + '【俯視／剖面／3D】沒有把工件轉過去，各角度會疊在同一面上，不要當成品看。\n')
+          + '【俯視／剖面 X／剖面 Y／3D】都畫在工件座標上（圓棒），成品與殘料看得出來。\n')
         + '仍然有效：G 碼語法、模態、刀長／刀徑補正、固定循環參數、進給轉速、換刀順序、逐行的孔位與深度。\n'
-        + '不要採信：素材殘料、碰撞結果、加工時間（高度圖是 2.5D 的，工件一轉就對不上）。\n'
+        + '仍然表現不了：側凹——橫向穿孔的內壁、鳩尾槽那種（貫穿孔的兩個開口有，中間的孔道沒有）。\n'
         + '點一下看錯誤清單裡的 R37。';
     }
 
@@ -939,6 +953,7 @@
       }
       view.setSection(v);
       el.secVal.textContent = (mode === 'sectionY' ? 'Y' : 'X') + fmt(v, 2);
+      syncSection3D();
     }
 
     function syncSnapshotSlider(sim, ops, stale) {
@@ -1217,20 +1232,66 @@
       }
       if (!hit) return false;
       viewMode = mode;
-      const is3d = mode === '3d';
-      show(el.viewHost, !is3d);
-      show(el.view3dHost, is3d);
-      el.rngSection.disabled = is3d || mode === 'unroll' || !state.result;
-      if (is3d) {
-        // 建好之後要把目前的資料餵給它（它是在切過來的這一刻才誕生的）
-        feedView3D();
-        view3d.resize();
-        view3d.fit();
-      } else {
+      el.rngSection.disabled = mode === '3d' || mode === 'unroll' || !state.result;
+      if (mode !== '3d') {
         view.setMode(mode);
         if (state.result) syncSectionRange(state.result.stock);
       }
+      applyViewLayout({ fit3d: true });
       return true;
+    }
+
+    /**
+     * 依「目前模式 + 並排開關」決定左右兩塊誰出現。
+     *
+     * 並排的重點是右邊那張 3D 會跟著左邊的剖面滑桿動：拉滑桿的時候，
+     * 3D 上會出現一片橘色的剖面，開了「3D 剖切」還會把擋住斷面的那半邊切掉——
+     * 左邊那張斷面圖到底是從哪裡切下來的，這樣一眼就對得起來。
+     * 3D 模式本身不並排（左邊沒有東西好放），展開圖也不並排（那不是剖面）。
+     */
+    function applyViewLayout(opts) {
+      opts = opts || {};
+      const is3d = viewMode === '3d';
+      const want = !is3d && state.viewPref.split;
+      const v3 = (is3d || want) ? ensureView3D() : view3d;
+      const show3d = is3d || (want && !!v3);
+      const split = !is3d && show3d;
+      show(el.viewHost, !is3d);
+      show(el.view3dHost, show3d);
+      if (el.viewSplit) {
+        el.viewSplit.classList.toggle('is-split', split);
+        el.viewSplit.style.setProperty('--view-split', (state.viewPref.ratio * 100).toFixed(2) + '%');
+      }
+      // WebGL 開不起來就沒有右半邊可以並排，勾了也沒用——直接把開關關掉並說明原因
+      if (want && !v3) {
+        el.chkSplit.checked = false;
+        el.chkSplit.disabled = true;
+        el.lblSplit.title = '這個瀏覽器／裝置開不了 WebGL，沒有 3D 可以並排';
+      }
+      show(el.lblClip, split);
+      if (show3d && v3) {
+        // 只有剛建好的才補餵資料——setData 會整組重建網格，每按一次模式鈕就重建太貴了
+        // （平常的資料更新走 refresh() 的 eachView）
+        if (view3dFresh) feedView3D();
+        v3.resize();
+        if (opts.fit3d && is3d) v3.fit();
+      }
+      syncSection3D();
+    }
+
+    /** 把左邊那張剖面的位置轉成 3D 的剖面平面；不是剖面模式就關掉 */
+    function syncSection3D() {
+      if (!view3d) return;
+      const m = view.getMode();
+      const isSection = m === 'sectionX' || m === 'sectionY';
+      // 俯視也有一條剖面指示線（最近用過的那一軸），3D 跟著標同一個位置，但不剖開——
+      // 左邊畫的是俯視，右邊卻切一半，兩張圖會對不起來。
+      const axis = isSection ? (m === 'sectionX' ? 'x' : 'y')
+        : (m === 'top' ? view.getSectionAxis() : null);
+      const on = axis && viewMode !== '3d' && viewMode !== 'unroll' && el.view3dHost && !el.view3dHost.classList.contains('nc-hidden');
+      view3d.setSection(on
+        ? { axis, value: Number(el.rngSection.value), clip: isSection && state.viewPref.clip }
+        : { axis: null });
     }
 
     /** 3D 視圖剛建立時補餵目前的資料 */
@@ -1238,6 +1299,7 @@
       if (!view3d || !state.result) return;
       const sr = currentScenario();
       if (!sr) return;
+      view3dFresh = false;
       const sim = sr.sim || state.simCache[state.scenario] || null;
       view3d.setData({
         segments: sr.geometry.segments,
@@ -1260,8 +1322,57 @@
       const v = Number(el.rngSection.value);
       view.setSection(v);
       el.secVal.textContent = (view.getMode() === 'sectionY' ? 'Y' : 'X') + fmt(v, 2);
+      syncSection3D();
     });
-    el.btnFit.addEventListener('click', () => { if (viewMode === '3d' && view3d) view3d.fit(); else view.fit(); });
+    el.chkSplit.addEventListener('change', () => {
+      state.viewPref.split = el.chkSplit.checked;
+      persistSettings();
+      applyViewLayout({ fit3d: true });
+    });
+    el.chkClip.addEventListener('change', () => {
+      state.viewPref.clip = el.chkClip.checked;
+      persistSettings();
+      syncSection3D();
+    });
+    el.btnFit.addEventListener('click', () => {
+      if (viewMode !== '3d') view.fit();
+      if (view3d && el.view3dHost && !el.view3dHost.classList.contains('nc-hidden')) view3d.fit();
+    });
+
+    // ---- 並排時中間那條分隔線可以拖 ----
+    (function initSplitDrag() {
+      const bar = el.viewSplitBar;
+      if (!bar || !el.viewSplit || typeof bar.addEventListener !== 'function') return;
+      let dragging = false;
+      const ratioAt = (clientX) => {
+        const r = el.viewSplit.getBoundingClientRect();
+        if (!(r.width > 0)) return state.viewPref.ratio;
+        return Math.min(0.82, Math.max(0.18, (clientX - r.left) / r.width));
+      };
+      const setRatio = (v) => {
+        state.viewPref.ratio = v;
+        el.viewSplit.style.setProperty('--view-split', (v * 100).toFixed(2) + '%');
+      };
+      bar.addEventListener('pointerdown', (ev) => {
+        dragging = true;
+        bar.classList.add('is-dragging');
+        if (ev.pointerId != null && bar.setPointerCapture) { try { bar.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ } }
+        if (ev.preventDefault) ev.preventDefault();
+      });
+      bar.addEventListener('pointermove', (ev) => { if (dragging) setRatio(ratioAt(ev.clientX)); });
+      const stop = () => {
+        if (!dragging) return;
+        dragging = false;
+        bar.classList.remove('is-dragging');
+        persistSettings();
+        // canvas 的像素尺寸靠各自的 ResizeObserver 跟上，這裡再踢一次確保放手後立刻對齊
+        view.render();
+        if (view3d) view3d.resize();
+      };
+      bar.addEventListener('pointerup', stop);
+      bar.addEventListener('pointercancel', stop);
+      bar.addEventListener('dblclick', () => { setRatio(0.5); persistSettings(); if (view3d) view3d.resize(); });
+    })();
     el.stockBanner.addEventListener('click', () => selectTab('stock'));
     el.rotaryBanner.addEventListener('click', () => selectTab('diag'));
     el.rngSnapshot.addEventListener('input', () => {
@@ -1370,7 +1481,13 @@
         settingsPanel.update({ settings: state.settings, scenario: state.scenario, cell: state.cell });
       }
       const loaded = p.sample ? loadSample(p.sample) : false;
-      if (p.mode) setViewMode(p.mode);
+      // 並排／剖切：截圖時常常要把右半邊關掉，所以也吃網址參數（split=0、clip=0）
+      for (const [key, pref, box] of [['split', 'split', el.chkSplit], ['clip', 'clip', el.chkClip]]) {
+        if (p[key] === undefined || p[key] === '') continue;
+        state.viewPref[pref] = p[key] !== '0' && p[key] !== 'off' && p[key] !== 'false';
+        box.checked = state.viewPref[pref];
+      }
+      if (p.mode) setViewMode(p.mode); else applyViewLayout({ fit3d: true });
       if (p.tab) selectTab(p.tab);
       if (p.section !== undefined && p.section !== '' && Number.isFinite(Number(p.section))) {
         sectionTouched = true;
@@ -1378,6 +1495,7 @@
         el.rngSection.value = String(v);
         view.setSection(v);
         el.secVal.textContent = (view.getMode() === 'sectionY' ? 'Y' : 'X') + fmt(v, 2);
+        syncSection3D();
       }
       return loaded;
     }
@@ -1386,6 +1504,8 @@
 
     // ---- 起始狀態 ----
     el.selScenario.value = state.scenario;
+    el.chkSplit.checked = state.viewPref.split;
+    el.chkClip.checked = state.viewPref.clip;
     if (!applyHash()) {
       const first = (ui.samples || [])[0];
       if (first) loadSample(sampleId(first));

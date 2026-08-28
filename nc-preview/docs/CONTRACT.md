@@ -162,11 +162,40 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 ## 8. UI（`js/ui/*.js`）
 
 - `editor.js` — `NC.ui.createEditor(container) → Editor`：textarea + 左側 gutter（行號、錯誤標記）+ 右側行旁資訊欄（每行執行後 `G0/G1 · G90/91 · G41 D · F · Z`，由 app 提供 `lineInfo(line) → string`）；`setText(text)`, `getText()`, `onChange(cb)`（300 ms debounce）, `setDiagnostics(diags)`, `setLineInfo(fn)`, `highlightLine(n)`, `scrollToLine(n)`, `onCursorLine(cb)`, `getSelectionLines() → [a,b]`, `replaceLines(a,b,text)`。捲動同步：gutter/info 欄用同一個 scrollTop。折疊功能本版不做。
-- `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY')`, `setSection(v)`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。
+- `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY'|'unroll')`, `setSection(v)`, `getSectionAxis() → 'x'|'y'|null`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。第四軸的三張圖（俯視／剖面 X／剖面 Y）改畫在工件座標上，見 §13.7。
 - `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, onChange})`、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
 - `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）與設定；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌四支程式文字，由整合者用腳本產生）。
-- `index.html` — 版面：頂列工具列；左 45% 編輯器（上）+ 模態面板（下）；右 55% 視圖（上，含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選）+ 分頁面板（刀具表 / 錯誤清單 / 作業摘要 / 素材與設定）。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
+- `index.html` — 版面：頂列工具列；左 45% 編輯器（上）+ 模態面板（下）；右 55% 視圖（上，含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選）+ 分頁面板（刀具表 / 錯誤清單 / 作業摘要 / 素材與設定）。視圖區本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
 - 不依賴任何外部資源（無 CDN、無 Google Fonts）。
+
+### 8.1 視圖區：左 2D／右 3D 並排
+
+現場的原話是「切剖面的時候要知道現在是裁切哪一塊出來」。單獨一張剖面圖答不了這件事——
+看得到斷面，但看不出那一刀落在工件的哪裡。所以視圖區固定是一個左右並排的容器：
+
+```
+┌─────────────── .app-pane--view ───────────────┐
+│ 工具列：模式 · 剖面滑桿 · 並排 3D · 3D 剖切 · 全覽 │
+├──────────────┬─┬──────────────────────────────┤
+│ #viewHost    │▮│ #view3dHost                  │
+│ 2D（俯視／剖面│ │ 3D 成品 + 那一刀的剖面平面     │
+│ ／展開圖）    │ │ 開「剖切」就把擋住斷面那半邊切掉 │
+└──────────────┴─┴──────────────────────────────┘
+    #viewSplitBar（拖曳；雙擊回到一半一半）
+```
+
+- 版面全部在 CSS：`.app-view-split.is-split` 才會出現分隔線，左半邊寬度是 `--view-split`。
+  兩塊的 `width:100%` 由 flex-basis 蓋掉（列方向的 flex 容器裡 flex-basis 勝過 width）。
+- **模式 `3d` 不並排**（左邊沒有東西好放），**`unroll` 不剖切**（展開圖不是剖面）。
+- 3D 的剖面由 `view3d.setSection({axis, value, clip})` 控制，位置就是剖面滑桿的值；
+  俯視模式也會標平面（跟著 2D 那條剖面指示線），但**不剖開**——左邊畫的是俯視、
+  右邊卻切一半的話，兩張圖對不起來。
+- **切掉的永遠是相機那一側**（`clipPlaneFor` 依 `eyePos()` 決定法線方向），所以不管把工件
+  轉到哪個角度，斷面一定朝著人。剖切時關掉背面剔除，背面在著色器裡翻過來、混上 `uCut`
+  當斷面色——不這樣做會看到一層被光打反的空殼。
+- 並排／剖切／左右比例存在 `SETTINGS_KEY` 的 `view` 欄（機台層級的版面偏好，
+  不是 `Settings`，不進 core）。網址參數 `split=0`、`clip=0` 可以關掉，方便截圖。
+- WebGL 開不起來時 `ensureView3D()` 回 null，並排開關自動取消勾選並停用，2D 照常。
 
 ## 9. 測試載入器
 
@@ -359,8 +388,12 @@ API：`point(p, aDeg, center)`、`samples(seg, opts)`（A 有轉時依 `STEP_DEG
 | 視圖 | 四軸下的處理 | 為什麼 |
 |---|---|---|
 | 剖面 X | **改畫圓棒橫截面**：段轉到工件座標、素材從方塊換成圓、加迴轉中心十字 | A 繞 X 轉，**X 不受旋轉影響**，所以「哪些段落在這個 X 位置」的判斷完全不用改，只要把 (Y,Z) 換掉。轉完就和 3D／展開圖同一套座標 |
+| 剖面 Y | **改畫圓棒縱剖面**：沿軸向切一刀，畫這個 Y 上材料的上下緣（`cylToCartesian` 的包絡），外加虛線的原始厚度 | Y 是轉過的，所以段要逐取樣點篩（不能像剖面 X 那樣用端點）。這一張看得出銑槽多深、貫穿孔穿到哪 |
+| 俯視 | **改畫從上方看的圓棒**：高度圖攤成 `(X,Y)→Z`，色階吃「離軸心多遠」，棒身以外透明 | 分度孔排不排得齊、槽銑在哪一段，從上面看最直觀。色階不能吃 Z——棒子本身是圓的，會被畫成一大片漸層，槽反而看不見 |
 | 3D、展開圖 | 工件座標（見下） | — |
-| 俯視、剖面 Y | **停用按鈕**（app 層 `syncRotaryUI`） | 這兩個投影面會跟著工件轉，轉過去畫出來的東西沒有意義；留著就是製造矛盾 |
+
+早期版本沒有圓棒模擬，俯視與剖面 Y 只能停用（投影面跟著工件轉，畫出來沒有意義）。
+有了 §13.10 的圓棒高度圖之後這兩張都算得出來，**按鈕不再停用**，只是換成四軸版的說明文字。
 
 **轉動期間的移動要另外分一類，而且預設不畫**（現場原話：「你的 3D 路徑東西不會動」「我們刀子不可能轉彎」）。
 在工件座標系裡，分度那段 G0 會變成一條繞著工件的大圓弧——那是刀**相對於工件**的軌跡，
@@ -462,6 +495,20 @@ hover 改顯示「離中心多遠、切進去多深」——那才是圓棒上�
 
 **剖面 X** 有模擬結果時畫「這個 X 位置實際被挖成什麼樣」（`cylProfile`），
 外加一圈虛線的原始外圓當參考，一眼看出切掉多少。這和三軸剖面用 `sectionProfile` 是同一個做法。
+
+**俯視與剖面 Y** 走 `view2d.cylToCartesian(sim, heightArr)`：把 `(X, 弧長)→半徑` 攤成
+直角座標的**上下包絡** `(X, Y) → {上緣 Z, 下緣 Z, 上緣的半徑}`。做法是每一個 X 欄的橫截面
+就是一圈點圍成的封閉多邊形，把相鄰兩點的邊沿 Y 掃一次，每個 Y 格記最高與最低的 Z。
+掃描時**只填 y 真的落在那條邊上的格（ceil/floor，不是 round）**——四捨五入會把圓周最上／
+最下那一排的邊拉到格心、拉出圓外，算出來的半徑大於外圓，整片會被色階當成治具塗成土黃色
+（有回歸測試釘住「半徑處處不超過外圓」）。沒掃到的格是 `NaN` = 這裡沒有材料，
+`buildHeightImage` 畫成全透明；填 floorZ 的話棒身以外會變成一片最深的藍，看起來像被挖穿。
+
+俯視的色階吃的是**離軸心多遠**（`cart.radius`），不是 Z：拿 Z 當色階，整根棒子會因為
+本身是圓的而變成一大片漸層，真正切出來的槽反而淹沒在裡面。
+
+只取上下包絡、不是每一段材料：分度銑槽與鑽孔用包絡畫出來就是對的，貫穿孔在模擬裡兩側
+都被挖到軸心、包絡自然收成很薄的一片，讀起來也對。表現不了的仍然是側凹。
 
 **兩個踩過的坑（都有回歸測試釘住）：**
 

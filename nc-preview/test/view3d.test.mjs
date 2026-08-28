@@ -730,3 +730,45 @@ test('buildCylinderMesh：兩端封口的法線分別朝 ∓X', () => {
   assert.equal(m.normals[capA * 3], -1, 'xMin 端法線朝 -X');
   assert.equal(m.normals[capB * 3], 1, 'xMax 端法線朝 +X');
 });
+
+// ---------------------------------------------------------------------------
+// 剖面：3D 上的那片平面 + 剖切
+// ---------------------------------------------------------------------------
+const BOUNDS = { min: { x: -10, y: -20, z: -5 }, max: { x: 30, y: 20, z: 0 } };
+
+test('buildSectionPlane：整片頂點都落在剖面上，外框是四條線', () => {
+  const p = V.buildSectionPlane(BOUNDS, 'x', 12);
+  assert.equal(p.fill.vertexCount, 6, '兩個三角形');
+  assert.equal(p.edge.vertexCount, 8, '四條線 = 八個頂點');
+  for (let i = 0; i < p.fill.vertexCount; i++) assert.equal(p.fill.positions[i * 3], 12, 'X 全部等於剖面位置');
+  for (let i = 0; i < p.edge.vertexCount; i++) assert.equal(p.edge.positions[i * 3], 12);
+  // 平面要比工件大一點，不然貼齊邊緣看不出那是一個面
+  let maxY = -Infinity;
+  for (let i = 0; i < p.fill.vertexCount; i++) maxY = Math.max(maxY, p.fill.positions[i * 3 + 1]);
+  assert.ok(maxY > BOUNDS.max.y, '往外放一點');
+
+  const q = V.buildSectionPlane(BOUNDS, 'y', -3);
+  for (let i = 0; i < q.fill.vertexCount; i++) assert.equal(q.fill.positions[i * 3 + 1], -3, 'Y 全部等於剖面位置');
+});
+
+test('buildSectionPlane：軸或位置不合法回 null', () => {
+  assert.equal(V.buildSectionPlane(BOUNDS, 'z', 0), null);
+  assert.equal(V.buildSectionPlane(BOUNDS, 'x', NaN), null);
+  assert.equal(V.buildSectionPlane(null, 'x', 0), null);
+});
+
+test('clipPlaneFor：切掉的永遠是相機那一側，斷面才看得到', () => {
+  // 相機在 +X 側 → 丟掉 x > value
+  const a = V.clipPlaneFor('x', 5, [100, 0, 0]);
+  assert.deepEqual(a, [1, 0, 0, 5]);
+  assert.ok(6 * a[0] > a[3], 'x=6（相機側）被丟掉');
+  assert.ok(!(4 * a[0] > a[3]), 'x=4 留著');
+  // 相機在 -X 側 → 反過來
+  const b = V.clipPlaneFor('x', 5, [-100, 0, 0]);
+  assert.deepEqual(b, [-1, 0, 0, -5]);
+  assert.ok(4 * b[0] > b[3], 'x=4（這時候才是相機側）被丟掉');
+  assert.ok(!(6 * b[0] > b[3]), 'x=6 留著');
+  // Y 軸同理
+  assert.deepEqual(V.clipPlaneFor('y', -2, [0, 50, 0]), [0, 1, 0, -2]);
+  assert.equal(V.clipPlaneFor('z', 0, [0, 0, 1]), null);
+});

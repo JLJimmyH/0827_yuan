@@ -99,6 +99,9 @@
               <span class="app-slider__value" id="secVal">—</span>
             </label>
 
+            <label class="nc-check" id="lblSplit" title="左邊 2D、右邊 3D 並排。拉剖面滑桿時右邊會顯示現在是從哪裡切下去的。"><input type="checkbox" id="chkSplit" checked> 並排 3D</label>
+            <label class="nc-check" id="lblClip" title="把 3D 上擋住斷面的那半邊切掉，直接看斷面——和左邊那張剖面圖是同一刀。"><input type="checkbox" id="chkClip" checked> 3D 剖切</label>
+
             <button type="button" class="nc-btn nc-btn-small" id="btnFit" title="重設縮放，把整個工件放進畫面">全覽</button>
           </div>
 
@@ -125,14 +128,16 @@
           </div>
         </div>
 
-        <div class="app-pane__body">
+        <!-- 左 2D／右 3D 並排；中間那條可以拖 -->
+        <div class="app-pane__body app-view-split" id="viewSplit">
           <div class="nc-view2d" id="viewHost"><canvas id="viewCanvas"></canvas></div>
+          <div class="app-view-split__bar" id="viewSplitBar" role="separator" aria-orientation="vertical" title="拖曳調整左右比例（雙擊回到一半一半）"></div>
           <div class="nc-view3d nc-hidden" id="view3dHost"><canvas id="viewCanvas3d"></canvas></div>
         </div>
 
         <div class="app-view-foot">
           <span class="nc-view2d-scale">頂面 <i></i> 深處</span>
-          <span class="app-view-foot__hint">滾輪縮放 · 拖曳平移 · 雙擊全覽 · 點路徑跳到該行</span>
+          <span class="app-view-foot__hint">滾輪縮放 · 拖曳平移 · 雙擊全覽 · 點路徑跳到該行（右側 3D：拖曳旋轉）</span>
         </div>
       </div>
 

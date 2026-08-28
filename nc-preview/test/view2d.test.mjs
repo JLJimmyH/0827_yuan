@@ -518,3 +518,107 @@ test('沒有第四軸時剖面 X 維持原本行為（方塊素材、Z 基準線
   assert.ok(!texts(c).some((t) => /圓棒橫截面/.test(t)));
   assert.ok(c.ctx.ops.some((o) => o.op === 'fillRect'), '三軸剖面的素材仍是方塊');
 });
+
+// ---------------------------------------------------------------------------
+// 第四軸：圓棒攤成直角座標 → 俯視與剖面 Y
+// ---------------------------------------------------------------------------
+/** 未加工的圓棒模擬格（形狀與 simulation.createCylinder 相同） */
+function cylSim(opts) {
+  opts = opts || {};
+  const R = opts.radius || 25;
+  const cell = opts.cell || 1;
+  const xMin = 0, xMax = opts.xMax || 40;
+  const nx = Math.ceil((xMax - xMin) / cell - 1e-9) + 1;
+  const circumference = 2 * Math.PI * R;
+  const ny = Math.max(16, Math.round(circumference / cell));
+  const cellY = circumference / ny;
+  return {
+    cylinder: true, cell, cellX: cell, cellY, wrapY: true, nx, ny,
+    origin: { x: xMin, y: 0 }, height: new Float32Array(nx * ny).fill(R),
+    floorZ: 0, topZ: R, radius: R, center: { y: 0, z: 0 }, circumference, snapshots: [],
+  };
+}
+
+test('cylToCartesian：未加工的圓棒攤平後，半徑處處等於外圓、棒身以外是 NaN', () => {
+  const sim = cylSim();
+  const cart = U.cylToCartesian(sim);
+  assert.equal(cart.nx, sim.nx);
+  assert.ok(cart.ny >= 2 * sim.radius / cart.cell, '縱向要蓋得住整個直徑');
+  let material = 0, empty = 0;
+  for (let i = 0; i < cart.radius.length; i++) {
+    const r = cart.radius[i];
+    if (!Number.isFinite(r)) { empty++; continue; }
+    material++;
+    // 攤平是用多邊形的弦逼近圓，只會比外圓小一點點，絕不會大——大了會被當成治具塗成土黃
+    assert.ok(r <= sim.radius + 1e-6, `半徑 ${r} 不該超過外圓 ${sim.radius}`);
+    assert.ok(r > sim.radius - cart.cell, `半徑 ${r} 掉太多`);
+  }
+  assert.ok(material > 0 && empty > 0, '棒身內外都要有');
+  // 上下對稱：同一格的上緣與下緣互為相反數（中心在 Z0）
+  const midIy = Math.round((0 - cart.origin.y) / cart.cell);
+  const o = midIy * cart.nx + Math.floor(cart.nx / 2);
+  assert.ok(Math.abs(cart.height[o] - sim.radius) < 1e-6);
+  // 下緣落在弦上（θ=π 剛好不是取樣點），只會比外圓小一點點
+  assert.ok(Math.abs(cart.bottom[o] + sim.radius) < 0.05, String(cart.bottom[o]));
+});
+
+test('cylToCartesian：頂面銑平之後，那一帶的半徑跟著掉下來', () => {
+  const sim = cylSim();
+  const flat = 20;
+  // θ ≈ 0（正上方）附近的一圈格子挖到 R=20
+  for (const iy of [0, 1, 2, sim.ny - 1, sim.ny - 2]) {
+    for (let ix = 0; ix < sim.nx; ix++) sim.height[iy * sim.nx + ix] = flat;
+  }
+  const cart = U.cylToCartesian(sim);
+  const iy0 = Math.round((0 - cart.origin.y) / cart.cell);   // Y = 0 = 正上方那一條
+  const o = iy0 * cart.nx + Math.floor(cart.nx / 2);
+  assert.ok(Math.abs(cart.radius[o] - flat) < 0.5, `銑平處半徑應該接近 ${flat}，得到 ${cart.radius[o]}`);
+  assert.ok(Math.abs(cart.height[o] - flat) < 0.5, '上表面 Z 也跟著降到銑平的高度');
+  // 側邊（Y 接近 ±R）沒被碰到，仍然是外圓
+  const iySide = Math.round((sim.radius - 1 - cart.origin.y) / cart.cell);
+  const os = iySide * cart.nx + Math.floor(cart.nx / 2);
+  assert.ok(cart.radius[os] > sim.radius - 1, '沒切到的地方要維持外圓');
+});
+
+test('cylToCartesian：非圓柱的 sim 回 null', () => {
+  assert.equal(U.cylToCartesian(makeData().sim), null);
+  assert.equal(U.cylToCartesian(null), null);
+});
+
+test('buildHeightImage：NaN 的格畫成全透明（棒身以外不是「挖很深」）', () => {
+  const sim = { nx: 2, ny: 1, cell: 1, origin: { x: 0, y: 0 }, height: new Float32Array([0, NaN]) };
+  const img = U.buildHeightImage(sim, sim.height, 0, -10);
+  assert.equal(img.data[3], 255, '有材料的格不透明');
+  assert.equal(img.data[7], 0, '沒有材料的格 alpha = 0');
+});
+
+test('四軸俯視：畫的是攤平後的圓棒，HUD 標明是工件座標', () => {
+  const d = rotaryData();
+  d.sim = cylSim();
+  const { c, view } = makeView(d);
+  view.setMode('top').fit(false).render();
+  assert.ok(c.ctx.ops.some((o) => o.op === 'drawImage'), '要把攤平後的高度圖畫出來');
+  assert.ok(texts(c).some((t) => /圓棒俯視（工件座標）/.test(t)), 'HUD 要說明這是圓棒俯視');
+  assert.ok(texts(c).some((t) => /Y（工件）/.test(t)), '縱軸要標明是工件座標');
+});
+
+test('四軸剖面 Y：畫成沿軸向的縱剖面，HUD 標明是縱剖面', () => {
+  const d = rotaryData();
+  d.sim = cylSim();
+  const { c, view } = makeView(d);
+  view.setMode('sectionY').setSection(0).fit(false).render();
+  assert.ok(texts(c).some((t) => /圓棒縱剖面/.test(t)), 'HUD 要說明這是縱剖面');
+  assert.ok(texts(c).some((t) => /^X$/.test(t)), '橫軸是 X（軸向）');
+  assert.ok(c.ctx.ops.some((o) => o.op === 'fill' && o.fill === 'rgba(70,120,210,0.28)'), '材料要填色');
+});
+
+test('剖面軸：俯視時回報最近用過的那一軸，沒用過是 null', () => {
+  const { view } = makeView(makeData());
+  assert.equal(view.getSectionAxis(), null);
+  view.setMode('sectionY');
+  assert.equal(view.getSectionAxis(), 'y');
+  view.setMode('top');
+  assert.equal(view.getSectionAxis(), 'y', '俯視沿用最近的剖面軸（剖面指示線就畫在那裡）');
+  view.setMode('sectionX');
+  assert.equal(view.getSectionAxis(), 'x');
+});

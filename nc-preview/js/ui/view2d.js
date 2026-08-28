@@ -9,6 +9,8 @@
  *       路徑（rapid 灰虛線、feed 依刀具色 12 色循環、compensated 實線、programmed 細線、drill 短線＋孔標記）、
  *       目前高亮行（粗亮色）、高亮刀具（其他淡化）。
  * 剖面：sectionX / sectionY 畫該位置的高度折線、素材輪廓、投影路徑與標尺。
+ * 第四軸：俯視／剖面 X／剖面 Y 三張都改畫在工件座標上（圓棒），高度圖先用 cylToCartesian
+ *        從 (X, 弧長)→半徑 攤成 (X, Y)→Z 的上下包絡，三張圖與 3D／展開圖同一套座標。
  * 互動：滾輪縮放（以滑鼠為中心）、拖曳平移、雙擊 fit、hover 顯示工件座標與該格深度、點擊最近的段 → onPick。
  * 純邏輯（色階、影像、剖面、挑選、fit 變換）另掛在 NC.ui.view2dUtil，方便在 Node 測。
  */
@@ -78,6 +80,8 @@
 
   /**
    * 把 heightmap 轉成 RGBA 影像資料（列已上下翻轉：影像第 0 列 = 工件 Y 最大那列）。
+   * 高度是 NaN 的格 = 這裡沒有材料（圓棒攤成直角座標之後，四個角就是空的），畫成全透明；
+   * 填 floorZ 會變成一片最深的藍，看起來像被挖穿。
    * @returns {{width:number,height:number,data:Uint8ClampedArray}}
    */
   function buildHeightImage(sim, heightArr, zTop, zBottom) {
@@ -96,6 +100,7 @@
       for (let ix = 0; ix < nx; ix++) {
         const h = arr[iy * nx + ix];
         const o = (row * nx + ix) * 4;
+        if (!Number.isFinite(h)) continue;   // 沒有材料 → alpha 維持 0
         if (h > zTop + 1e-6) {
           data[o] = FIXTURE_RGB[0]; data[o + 1] = FIXTURE_RGB[1]; data[o + 2] = FIXTURE_RGB[2];
         } else {
@@ -125,7 +130,85 @@
     const ix = Math.round((x - sim.origin.x) / sim.cell);
     const iy = Math.round((y - sim.origin.y) / sim.cell);
     if (ix < 0 || iy < 0 || ix >= sim.nx || iy >= sim.ny) return null;
-    return arr[iy * sim.nx + ix];
+    const h = arr[iy * sim.nx + ix];
+    return Number.isFinite(h) ? h : null;
+  }
+
+  /**
+   * 圓棒高度圖 → 直角座標的上下包絡（俯視與剖面 Y 用）。
+   *
+   * 圓棒模擬記的是 `(X, 弧長) → 半徑`；俯視要的是 `(X, Y) → Z`、剖面 Y 要的是某個 Y 上的
+   * 材料高低。兩者其實是同一件事：每一個 X 欄的橫截面就是一圈點 `(y, z)` 圍成的封閉多邊形，
+   * 把相鄰兩點連成的邊沿 Y 掃描一次，每個 Y 格記下**最高**與**最低**的 Z，就同時得到
+   * 「從上面看是什麼」與「這一刀切下去的斷面」。沒有掃到的格 = 這裡沒有材料 → NaN。
+   *
+   * 只取上下包絡（不是每一段材料）：分度銑槽、鑽孔這些用包絡畫出來就是對的；
+   * 貫穿孔在模擬裡兩側都會被挖到軸心，包絡自然收成很薄的一片，讀起來也對。
+   * 真正表現不了的還是側凹——那是高度圖本身的限制（見 CONTRACT §13.10）。
+   *
+   * @param {Object} sim  cylinder=true 的 SimResult
+   * @param {Float32Array} [heightArr] 要用的高度（預設 sim.height）
+   * 另外附一份 `radius`＝上表面那一點離軸心多遠。圓棒的「深」是**離軸心多近**，不是 Z 低——
+   * 拿 Z 當色階的話，整根棒子會因為本身是圓的而被畫成一大片漸層，切出來的槽反而看不見。
+   *
+   * @returns {{nx:number,ny:number,cell:number,origin:{x:number,y:number},
+   *            height:Float32Array,bottom:Float32Array,radius:Float32Array,
+   *            floorZ:number,topZ:number}|null}
+   */
+  function cylToCartesian(sim, heightArr) {
+    if (!sim || !sim.cylinder || !(sim.radius > 0)) return null;
+    const arr = heightArr || sim.height;
+    if (!arr) return null;
+    const R = sim.radius;
+    const cy = (sim.center && sim.center.y) || 0;
+    const cz = (sim.center && sim.center.z) || 0;
+    const cell = sim.cellX || sim.cell;
+    const nx = sim.nx, nSeg = sim.ny, cellY = sim.cellY;
+    const ny = Math.max(2, Math.ceil((2 * R) / cell) + 1);
+    const originY = cy - ((ny - 1) * cell) / 2;
+    const top = new Float32Array(nx * ny).fill(NaN);
+    const bottom = new Float32Array(nx * ny).fill(NaN);
+    for (let ix = 0; ix < nx; ix++) {
+      let ay = 0, az = 0;
+      for (let j = 0; j <= nSeg; j++) {
+        const jj = j === nSeg ? 0 : j;            // 繞回第 0 圈，封閉多邊形
+        let rr = arr[jj * nx + ix];
+        if (!(rr > 0)) rr = 0;                    // r ≤ 0 = 鑽穿了，收到軸心
+        const th = (j * cellY) / R;
+        const by = cy + rr * Math.sin(th);
+        const bz = cz + rr * Math.cos(th);
+        if (j > 0) {
+          // 把這條邊掃進 Y 格。**只填 y 真的落在這條邊上的格**（ceil/floor，不是 round）：
+          // 四捨五入會把邊拉到格心，圓周最上／最下那一排（邊幾乎平行 Z）會被拉出圓外，
+          // 算出來的半徑就大於外圓，整片被當成治具塗成土黃色。
+          let i0 = Math.ceil((Math.min(ay, by) - originY) / cell - 1e-9);
+          let i1 = Math.floor((Math.max(ay, by) - originY) / cell + 1e-9);
+          if (i0 < 0) i0 = 0;
+          if (i1 > ny - 1) i1 = ny - 1;
+          const dy = by - ay;
+          const flat = Math.abs(dy) <= 1e-9;
+          for (let iy = i0; iy <= i1; iy++) {
+            const yy = originY + iy * cell;
+            let zHi, zLo;
+            if (flat) { zHi = Math.max(az, bz); zLo = Math.min(az, bz); }   // 邊平行 Z：整段落在同一格
+            else { zHi = zLo = az + (bz - az) * clamp((yy - ay) / dy, 0, 1); }
+            const o = iy * nx + ix;
+            if (!(top[o] >= zHi)) top[o] = zHi;   // NaN >= z 為 false → 第一次直接寫入
+            if (!(bottom[o] <= zLo)) bottom[o] = zLo;
+          }
+        }
+        ay = by; az = bz;
+      }
+    }
+    const radius = new Float32Array(nx * ny).fill(NaN);
+    for (let iy = 0; iy < ny; iy++) {
+      const dy = originY + iy * cell - cy;
+      for (let ix = 0; ix < nx; ix++) {
+        const o = iy * nx + ix;
+        if (Number.isFinite(top[o])) radius[o] = Math.hypot(dy, top[o] - cz);
+      }
+    }
+    return { nx, ny, cell, origin: { x: sim.origin.x, y: originY }, height: top, bottom, radius, floorZ: cz - R, topZ: cz + R };
   }
 
   /**
@@ -262,7 +345,7 @@
 
   NC.ui.view2dUtil = {
     TOOL_COLORS, PAD, PICK_PX, toolColor, depthColor, buildHeightImage, simExtent, heightAt, sectionProfile, niceStep,
-    distPointSeg2D, arcDistance, segDistance2D, pickSegment, topBounds, sectionBounds, fitTransform,
+    distPointSeg2D, arcDistance, segDistance2D, pickSegment, topBounds, sectionBounds, fitTransform, cylToCartesian,
   };
 
   // ---------------------------------------------------------------------------
@@ -306,6 +389,9 @@
       drag: null,
       needFit: true,
       imageCache: null,
+      cylCache: null,           // 圓棒高度圖攤成直角座標的結果（俯視／剖面 Y 用）
+      workCache: null,          // 段換算到工件座標的取樣（四軸的俯視／剖面共用）
+      cssSized: null,           // canvas 尺寸是否由 CSS 決定（null = 還沒探測）
       toolRadius: new Map(),
       compLines: new Set(),
       byLine: new Map(),
@@ -331,6 +417,27 @@
       return null;
     }
 
+    /**
+     * canvas 的版面尺寸是不是由 width/height **屬性**決定的（也就是沒有 CSS 尺寸）？
+     * 是的話，下面把屬性乘上 devicePixelRatio 會讓版面跟著放大、下一次再乘一次…愈滾愈大，
+     * 所以要把 CSS 尺寸釘成內聯樣式。有 CSS 尺寸（css/view2d.css 的 width:100%）的
+     * **絕對不能釘**：內聯樣式會蓋掉 CSS，拖分隔線／縮視窗時 canvas 就永遠停在第一次量到的大小。
+     * 與 view3d.js 的同名函式同一套做法，只在第一次量得到尺寸時探測一次。
+     */
+    function detectCssSized(w, h) {
+      if (S.cssSized != null) return S.cssSized;
+      const old = canvas.width;
+      try {
+        canvas.width = old + 16;
+        S.cssSized = canvas.clientWidth === w;   // 改了屬性版面沒變 → 尺寸來自 CSS
+      } catch (e) { S.cssSized = true; }
+      canvas.width = old;
+      if (!S.cssSized && canvas.style && !canvas.style.width) {
+        canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+      }
+      return S.cssSized;
+    }
+
     /** 同步 canvas 像素尺寸與 devicePixelRatio；回傳是否有有效尺寸 */
     function syncSize() {
       const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
@@ -339,9 +446,8 @@
         // 尚未排版：退而用既有像素尺寸
         w = canvas.width / (S.dpr || 1); h = canvas.height / (S.dpr || 1);
         if (!(w > 0 && h > 0)) return false;
-      } else if (canvas.style && !canvas.style.width) {
-        // 沒有 CSS 尺寸時釘住 CSS 尺寸，避免 width 屬性改動後 clientWidth 跟著漲
-        canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+      } else {
+        detectCssSized(w, h);
       }
       const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
       if (canvas.width !== pw) canvas.width = pw;
@@ -364,6 +470,7 @@
       S.compLines = new Set();
       S.byLine = new Map();
       S.unrollCache = null;
+      S.workCache = null;
       for (const s of S.data.segments) {
         if (s.path === 'compensated') S.compLines.add(s.line);
         let arr = S.byLine.get(s.line);
@@ -388,6 +495,12 @@
     /** 色階範圍 [zTop, zBottom] */
     function depthRange() {
       const { sim, stock } = S.data;
+      // 圓棒：頂＝表面（軸心 + 半徑）、底＝軸心。用方料的 stock.min/max.z 會把整根棒子
+      // 壓進一個對不上的色階（那個包絡盒是給下游規則用的，不是給色階用的）。
+      if (rotaryOn() && sim && sim.cylinder && sim.radius > 0) {
+        const cz = (sim.center && sim.center.z) || 0;
+        return [cz + sim.radius, cz - sim.radius];
+      }
       let zTop = stock ? stock.max.z : null;
       let zBottom = stock ? stock.min.z : null;
       if (sim) {
@@ -399,21 +512,25 @@
       return [zTop, zBottom];
     }
 
-    /** 取得（快取的）heightmap 離屏 canvas */
-    function heightImage() {
-      const sim = S.data.sim;
-      if (!sim || !S.heightArr) return null;
-      const [zTop, zBottom] = depthRange();
+    /**
+     * 取得（快取的）heightmap 離屏 canvas。
+     * `grid`/`arr` 不給就用目前的模擬格與高度；四軸俯視傳的是 `cylToCartesian()` 攤好的那一份。
+     */
+    function heightImage(grid, arr, range) {
+      grid = grid || S.data.sim;
+      arr = arr || S.heightArr;
+      if (!grid || !arr) return null;
+      const [zTop, zBottom] = range || depthRange();
       const c = S.imageCache;
-      if (c && c.arr === S.heightArr && c.zTop === zTop && c.zBottom === zBottom) return c.canvas;
-      const img = buildHeightImage(sim, S.heightArr, zTop, zBottom);
+      if (c && c.arr === arr && c.zTop === zTop && c.zBottom === zBottom) return c.canvas;
+      const img = buildHeightImage(grid, arr, zTop, zBottom);
       const off = makeCanvas(img.width, img.height);
       if (!off) return null;
       const octx = off.getContext('2d');
       const id = octx.createImageData(img.width, img.height);
       id.data.set(img.data);
       octx.putImageData(id, 0, 0);
-      S.imageCache = { arr: S.heightArr, zTop, zBottom, canvas: off };
+      S.imageCache = { arr, zTop, zBottom, canvas: off };
       return off;
     }
 
@@ -513,12 +630,18 @@
         return `X ${fmt(hh)}  A ${fmt(vv / angK())}°`;
       }
       if (rotaryOn()) {
-        // 圓棒橫截面：現場真正想知道的是「離軸心多遠、切進去多深」
+        // 圓棒上真正有意義的量是「離軸心多遠、切進去多深」，不是 Z 面高度
         const c = S.data.rotaryCenter || { y: 0, z: 0 };
-        const rr = Math.hypot(hh - (c.y || 0), vv - (c.z || 0));
         const rad = rotaryRadius();
-        return `Y ${fmt(hh)}  Z ${fmt(vv)}　離中心 ${fmt(rr)}`
-          + (rad > 0 ? `　（表面 R${fmt(rad)}，深 ${fmt(rad - rr)}）` : '');
+        const depth = (rr) => `　離中心 ${fmt(rr)}` + (rad > 0 ? `　（表面 R${fmt(rad)}，深 ${fmt(rad - rr)}）` : '');
+        if (S.mode === 'sectionX') return `Y ${fmt(hh)}  Z ${fmt(vv)}` + depth(Math.hypot(hh - (c.y || 0), vv - (c.z || 0)));
+        if (S.mode === 'sectionY') return `X ${fmt(hh)}  Z ${fmt(vv)}` + depth(Math.hypot(S.section - (c.y || 0), vv - (c.z || 0)));
+        // 俯視：查攤平後那一點的表面 Z 與離軸心多遠
+        const cart = cylCart();
+        const zs = cart ? heightAt(cart, cart.height, hh, vv) : null;
+        const rr = cart ? heightAt(cart, cart.radius, hh, vv) : null;
+        return `X ${fmt(hh)}  Y ${fmt(vv)}`
+          + (zs == null ? '' : `　表面 Z ${fmt(zs)}`) + (rr == null ? '' : depth(rr));
       }
       if (S.mode === 'top') { t = `X ${fmt(hh)}  Y ${fmt(vv)}`; wx = hh; wy = vv; }
       else {
@@ -535,8 +658,7 @@
       const [px, py, , ph] = plotRect();
       const scen = SCENARIO_LABEL[S.data.scenario] || S.data.scenario;
       let modeText;
-      if (S.mode === 'top') modeText = '俯視';
-      else if (S.mode === 'unroll') {
+      if (S.mode === 'unroll') {
         const u = unrollData();
         let rad = '';
         if (u && u.radius) rad = `　工件半徑 R${fmt(u.radius.radius)}${u.radius.source === 'user' ? '' : '（推估）'}`;
@@ -545,8 +667,12 @@
         modeText = `展開圖（圓柱表面攤平）${rad}${ctr}`;
       } else if (rotaryOn()) {
         const r = rotaryRadius();
-        modeText = `圓棒橫截面　X = ${fmt(S.section)}${r > 0 ? `　（外圓 R${fmt(r)}）` : ''}`;
-      } else modeText = `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
+        const rad = r > 0 ? `　（外圓 R${fmt(r)}）` : '';
+        modeText = S.mode === 'sectionX' ? `圓棒橫截面　X = ${fmt(S.section)}${rad}`
+          : S.mode === 'sectionY' ? `圓棒縱剖面　Y = ${fmt(S.section)}${rad}`
+            : `圓棒俯視（工件座標）${rad}`;
+      } else if (S.mode === 'top') modeText = '俯視';
+      else modeText = `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
       let head = `${modeText} · ${scen}`;
       if (S.snapshotIndex != null) head += ` · 快照 ${S.snapshotIndex}`;
       if (S.hlTool != null) head += ` · 只看 T${S.hlTool}`;
@@ -562,6 +688,45 @@
     }
 
     // ---- 俯視 --------------------------------------------------------------
+    /**
+     * 四軸的俯視：從上方看那根圓棒（工件座標）。
+     * 圓棒的高度圖是 (X, 弧長) → 半徑，先用 cylToCartesian 攤成 (X, Y) → Z 再照一般色階畫；
+     * 攤不出材料的格是透明的，所以四個角看得到底色，一眼分得出哪裡是棒身、哪裡是空的。
+     */
+    function drawStockTopRotary() {
+      const V = curView();
+      const cart = cylCart();
+      const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      const cy = c.y || 0;
+      const r = rotaryRadius();
+      let x0, x1;
+      if (cart) {
+        const e = simExtent(cart);
+        x0 = e.minX; x1 = e.maxX;
+        // 色階吃的是「離軸心多遠」：沒切過的地方一律是表面色，切下去才變深
+        const img = heightImage(cart, cart.radius, [r, 0]);
+        if (img) {
+          const [sx, sy] = toScreen(e.minX, e.maxY);
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(img, sx, sy, cart.nx * cart.cell * V.scale, cart.ny * cart.cell * V.scale);
+          ctx.imageSmoothingEnabled = true;
+        }
+      } else if (S.data.stock) {
+        x0 = S.data.stock.min.x; x1 = S.data.stock.max.x;
+        const rr0 = rectW(x0, cy - r, x1, cy + r);
+        ctx.fillStyle = C.stockFill; ctx.fillRect(rr0[0], rr0[1], rr0[2], rr0[3]);
+      } else return;
+      if (!(r > 0)) return;
+      ctx.lineWidth = 1.5; ctx.setLineDash([]);
+      const rr = rectW(x0, cy - r, x1, cy + r);
+      ctx.strokeStyle = C.stockLine; ctx.strokeRect(rr[0], rr[1], rr[2], rr[3]);
+      // 母線（軸心在俯視上的投影）：分度孔排不排得齊，看這條線
+      const [, my] = toScreen(0, cy);
+      ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(rr[0], my); ctx.lineTo(rr[0] + rr[2], my); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     function drawStockTop() {
       const { sim, stock } = S.data;
       const V = curView();
@@ -678,13 +843,66 @@
       ctx.fillStyle = C.highlight; ctx.beginPath(); ctx.arc(ex, ey, 3.5, 0, TAU); ctx.fill();
     }
 
+    /** 俯視（四軸）：段換算到工件座標之後畫成折線；A0 的孔仍然是一個點，照樣畫孔標記 */
+    function drawSegmentsTopRotary() {
+      const drawn = new Set();
+      for (const w of workSamples()) {
+        const seg = w.seg;
+        if (!isVisible(seg)) continue;
+        const pw = w.pts;
+        if (!pw || pw.length < 2) continue;
+        const isRapid = seg.kind === 'rapid';
+        const dim = S.hlTool != null && seg.tool !== S.hlTool;
+        const [ax, ay] = toScreen(pw[0].x, pw[0].y);
+        const [bx, by] = toScreen(pw[pw.length - 1].x, pw[pw.length - 1].y);
+        ctx.globalAlpha = dim ? 0.12 : (seg.path === 'programmed' && S.compLines.has(seg.line) ? 0.55 : 1);
+        if (pw.length === 2 && Math.hypot(bx - ax, by - ay) < 0.75) {
+          if (seg.kind === 'drill') drawHoleMarker(seg, ax, ay, drawn);
+          else if (!isRapid) { ctx.fillStyle = toolColor(seg.tool); ctx.beginPath(); ctx.arc(ax, ay, 2.5, 0, TAU); ctx.fill(); }
+          continue;
+        }
+        ctx.strokeStyle = isRapid ? C.rapid : toolColor(seg.tool);
+        ctx.lineWidth = isRapid ? 1 : (seg.path === 'compensated' ? 2 : (seg.kind === 'drill' ? 1.5 : 1));
+        ctx.setLineDash(isRapid ? [4, 3] : []);
+        ctx.beginPath();
+        for (let i = 0; i < pw.length; i++) { const [sx, sy] = toScreen(pw[i].x, pw[i].y); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+    }
+
+    function drawHighlightTopRotary() {
+      if (S.hlLine == null) return;
+      const hits = workSamples().filter((w) => w.seg.line === S.hlLine && w.pts && w.pts.length >= 2);
+      if (!hits.length) return;
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      for (const pass of [{ w: 7, color: C.halo }, { w: 3, color: C.highlight }]) {
+        ctx.strokeStyle = pass.color; ctx.fillStyle = pass.color; ctx.lineWidth = pass.w;
+        for (const w of hits) {
+          const pw = w.pts;
+          const [ax, ay] = toScreen(pw[0].x, pw[0].y);
+          const [bx, by] = toScreen(pw[pw.length - 1].x, pw[pw.length - 1].y);
+          ctx.beginPath();
+          if (pw.length === 2 && Math.hypot(bx - ax, by - ay) < 0.75) { ctx.arc(ax, ay, pass.w * 0.9, 0, TAU); ctx.fill(); }
+          else {
+            for (let i = 0; i < pw.length; i++) { const [sx, sy] = toScreen(pw[i].x, pw[i].y); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+            ctx.stroke();
+          }
+        }
+      }
+      const last = hits[hits.length - 1].pts;
+      const [ex, ey] = toScreen(last[last.length - 1].x, last[last.length - 1].y);
+      ctx.fillStyle = C.highlight; ctx.beginPath(); ctx.arc(ex, ey, 3.5, 0, TAU); ctx.fill();
+    }
+
     function renderTop() {
-      if (S.visible.stock) drawStockTop();
+      const rot = rotaryOn();
+      if (S.visible.stock) { if (rot) drawStockTopRotary(); else drawStockTop(); }
       drawGrid();
       drawOriginTop();
       drawSectionIndicator();
-      drawSegmentsTop();
-      drawHighlightTop();
+      if (rot) { drawSegmentsTopRotary(); drawHighlightTopRotary(); }
+      else { drawSegmentsTop(); drawHighlightTop(); }
     }
 
     // ---- 展開圖（第四軸）----------------------------------------------------
@@ -923,35 +1141,82 @@
      * 這樣剖面 X、3D、展開圖三張圖用的是同一套座標，不會互相矛盾。
      * 剖面 Y 與俯視在四軸下沒有意義（工件轉了，那兩個投影面跟著工件跑），由 app 停用。
      */
-    function rotaryOn() {
-      if (S.mode !== 'sectionX') return false;
+    /** 這支程式是四軸，而且 geometry.rotary 可用 → 工件座標的視圖要換算 */
+    function rotaryData() {
       const R = NC.geometry && NC.geometry.rotary;
       return !!(S.data.rotaryOn && R && typeof R.samples === 'function');
     }
+    /**
+     * 目前這張圖畫在工件座標上嗎？
+     * 四軸的俯視、剖面 X、剖面 Y 都是——素材是圓棒、段要繞軸心轉回工件上，
+     * 三張圖與 3D／展開圖用同一套座標，不會互相矛盾（CONTRACT §13.7）。
+     */
+    function rotaryOn() {
+      return rotaryData() && (S.mode === 'top' || S.mode === 'sectionX' || S.mode === 'sectionY');
+    }
     function rotaryRadius() {
+      const sim = S.data.sim;
+      if (sim && sim.cylinder && sim.radius > 0) return sim.radius;
       const u = unrollData();
       return (u && u.radius && u.radius.radius > 0) ? u.radius.radius : 0;
     }
 
+    /** 段換算到工件座標的取樣折線（四軸的俯視／剖面共用；段或迴轉中心變了才重算） */
+    function workSamples() {
+      const R = NC.geometry && NC.geometry.rotary;
+      if (!R || typeof R.samples !== 'function') return [];
+      const segs = S.data.segments || [];
+      const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      const cy = c.y || 0, cz = c.z || 0;
+      const cache = S.workCache;
+      if (cache && cache.segs === segs && cache.cy === cy && cache.cz === cz) return cache.val;
+      const val = [];
+      for (const seg of segs) {
+        if (seg.refReturn) continue;
+        val.push({ seg, pts: R.samples(seg, { center: { y: cy, z: cz } }) });
+      }
+      S.workCache = { segs, cy, cz, val };
+      return val;
+    }
+
+    /** 圓棒攤成直角座標的上下包絡（四軸的俯視／剖面 Y 用），依高度陣列快取 */
+    function cylCart() {
+      const sim = S.data.sim;
+      if (!sim || !sim.cylinder || !S.heightArr) return null;
+      const c = S.cylCache;
+      if (c && c.arr === S.heightArr) return c.val;
+      const val = cylToCartesian(sim, S.heightArr);
+      S.cylCache = { arr: S.heightArr, val };
+      return val;
+    }
+
     function projectedSegments() {
       const ha = hAxis(), ca = cutAxis(), v = S.section;
-      const cell = S.data.sim ? S.data.sim.cell : 0.5;
+      const sim = S.data.sim;
+      const cell = sim ? (sim.cellX || sim.cell) : 0.5;
       const rot = rotaryOn();
-      const R = rot ? NC.geometry.rotary : null;
-      const center = S.data.rotaryCenter || { y: 0, z: 0 };
       const out = [];
+      if (rot) {
+        for (const w of workSamples()) {
+          const seg = w.seg;
+          const band = Math.max(cell, 0.25) / 2 + (S.toolRadius.get(seg.tool) || 0) + 1e-6;
+          // X 不受 A 旋轉影響 → 剖面 X 可以先用整段的端點篩掉，省一堆逐點比較。
+          // 剖面 Y 的 Y 是轉過的，只能逐取樣點判斷。
+          if (ca === 'x' && (Math.abs(seg.from.x - v) > band || Math.abs(seg.to.x - v) > band)) continue;
+          const pw = w.pts;
+          for (let i = 0; i + 1 < pw.length; i++) {
+            const a = pw[i], b = pw[i + 1];
+            if (ca !== 'x' && (Math.abs(a[ca] - v) > band || Math.abs(b[ca] - v) > band)) continue;
+            out.push({ from: { x: a[ha], y: a.z }, to: { x: b[ha], y: b.z }, seg });
+          }
+        }
+        return out;
+      }
       for (const seg of S.data.segments) {
         if (seg.refReturn) continue;
-        if (seg.arc && !rot) continue;   // 四軸時圓弧也要畫（samples 會細分）
+        if (seg.arc) continue;
         const band = Math.max(cell, 0.25) / 2 + (S.toolRadius.get(seg.tool) || 0) + 1e-6;
         if (Math.abs(seg.from[ca] - v) > band || Math.abs(seg.to[ca] - v) > band) continue;
-        if (rot) {
-          const pw = R.samples(seg, { center });
-          for (let i = 0; i + 1 < pw.length; i++) {
-            out.push({ from: { x: pw[i].y, y: pw[i].z }, to: { x: pw[i + 1].y, y: pw[i + 1].z }, seg });
-          }
-          continue;
-        }
         out.push({ from: { x: seg.from[ha], y: seg.from.z }, to: { x: seg.to[ha], y: seg.to.z }, seg });
       }
       return out;
@@ -1014,11 +1279,67 @@
       ctx.setLineDash([]);
     }
 
+    /**
+     * 第四軸的剖面 Y：沿軸向切一刀，看這個 Y 上圓棒被削成什麼厚度。
+     * 資料同樣來自 cylToCartesian 的上下包絡；材料不連續的地方（切穿了）自動斷開成好幾塊，
+     * 不會把兩段之間的空氣也塗成材料。虛線是原始圓棒在這個 Y 上本來的厚度，用來比對切掉多少。
+     */
+    function drawStockSectionRotaryY() {
+      const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      const cy = c.y || 0, cz = c.z || 0;
+      const r = rotaryRadius();
+      const cart = cylCart();
+      let x0 = null, x1 = null;
+      if (cart) { const e = simExtent(cart); x0 = e.minX; x1 = e.maxX; }
+      else if (S.data.stock) { x0 = S.data.stock.min.x; x1 = S.data.stock.max.x; }
+      // 原始外形（這個 Y 上圓棒的半厚 = √(R² − d²)）
+      const d = Math.abs(S.section - cy);
+      if (r > 0 && x0 != null && d <= r) {
+        const t = Math.sqrt(Math.max(0, r * r - d * d));
+        const rr = rectW(x0, cz - t, x1, cz + t);
+        if (!cart) { ctx.fillStyle = C.stockFill; ctx.fillRect(rr[0], rr[1], rr[2], rr[3]); }
+        ctx.strokeStyle = C.stockLine; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+        ctx.strokeRect(rr[0], rr[1], rr[2], rr[3]);
+        ctx.setLineDash([]);
+      }
+      if (cart) {
+        const iy = Math.round((S.section - cart.origin.y) / cart.cell);
+        if (iy >= 0 && iy < cart.ny) {
+          let run = [];
+          const flush = () => {
+            if (run.length >= 2) {
+              ctx.beginPath();
+              for (let i = 0; i < run.length; i++) { const [sx, sy] = toScreen(run[i].x, run[i].hi); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+              for (let i = run.length - 1; i >= 0; i--) { const [sx, sy] = toScreen(run[i].x, run[i].lo); ctx.lineTo(sx, sy); }
+              ctx.closePath();
+              ctx.fillStyle = C.profileFill; ctx.fill();
+              ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
+            }
+            run = [];
+          };
+          for (let ix = 0; ix < cart.nx; ix++) {
+            const o = iy * cart.nx + ix;
+            const hi = cart.height[o], lo = cart.bottom[o];
+            if (!Number.isFinite(hi) || !Number.isFinite(lo)) { flush(); continue; }
+            run.push({ x: cart.origin.x + ix * cart.cell, hi, lo });
+          }
+          flush();
+        }
+      }
+      // 軸心線：四軸的一切都繞著它，Z0 在這裡沒有意義
+      if (x0 != null) {
+        const [sx0] = toScreen(x0, 0), [sx1] = toScreen(x1, 0), [, sy] = toScreen(0, cz);
+        ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(sx0, sy); ctx.lineTo(sx1, sy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     function drawStockSection() {
       const { sim, stock } = S.data;
       const ha = hAxis(), ca = cutAxis(), v = S.section;
       ctx.lineWidth = 1.5; ctx.setLineDash([]);
-      if (rotaryOn()) { drawStockSectionRotary(); return; }
+      if (rotaryOn()) { if (S.mode === 'sectionX') drawStockSectionRotary(); else drawStockSectionRotaryY(); return; }
       if (stock) {
         const inside = v >= stock.min[ca] - 1e-9 && v <= stock.max[ca] + 1e-9;
         const r = rectW(stock.min[ha], stock.min.z, stock.max[ha], stock.max.z);
@@ -1084,18 +1405,47 @@
       }
     }
 
-    /** 四軸剖面的包絡：圓棒外圓 + 切削段（rapid 在工件座標下是繞著工件的大弧，不算） */
+    /** 圓棒的軸向範圍（有模擬格就用格網，沒有就用素材包絡盒） */
+    function rotaryXRange() {
+      const sim = S.data.sim;
+      if (sim && sim.cylinder) {
+        const cell = sim.cellX || sim.cell;
+        return [sim.origin.x - cell / 2, sim.origin.x + (sim.nx - 0.5) * cell];
+      }
+      if (S.data.stock) return [S.data.stock.min.x, S.data.stock.max.x];
+      return null;
+    }
+
+    /** 四軸剖面的包絡：圓棒外形 + 切削段（rapid 在工件座標下是繞著工件的大弧，不算） */
     function rotarySectionBounds() {
       const b = newBounds();
       const r = rotaryRadius();
       const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      const cy = c.y || 0, cz = c.z || 0;
       if (r > 0) {
-        extend(b, (c.y || 0) - r, (c.z || 0) - r);
-        extend(b, (c.y || 0) + r, (c.z || 0) + r);
+        if (S.mode === 'sectionX') { extend(b, cy - r, cz - r); extend(b, cy + r, cz + r); }
+        else {
+          const xr = rotaryXRange();
+          if (xr) { extend(b, xr[0], cz - r); extend(b, xr[1], cz + r); }
+        }
       }
       for (const it of projectedSegments()) {
         if (it.seg.kind === 'rapid') continue;
         extend(b, it.from.x, it.from.y); extend(b, it.to.x, it.to.y);
+      }
+      return validBounds(b);
+    }
+
+    /** 四軸俯視的包絡：圓棒的投影矩形 + 切削段（同上，不含 rapid） */
+    function rotaryTopBounds() {
+      const b = newBounds();
+      const r = rotaryRadius();
+      const cy = (S.data.rotaryCenter && S.data.rotaryCenter.y) || 0;
+      const xr = rotaryXRange();
+      if (r > 0 && xr) { extend(b, xr[0], cy - r); extend(b, xr[1], cy + r); }
+      for (const w of workSamples()) {
+        if (w.seg.kind === 'rapid') continue;
+        for (const p of w.pts) extend(b, p.x, p.y);
       }
       return validBounds(b);
     }
@@ -1132,9 +1482,9 @@
       else if (S.mode === 'unroll') renderUnroll();
       else renderSection();
       ctx.restore();
-      if (S.mode === 'top') drawRulers('X', 'Y');
-      else if (S.mode === 'unroll') drawRulersUnroll();
-      else if (rotaryOn()) drawRulers('Y（工件）', 'Z（工件）');
+      if (S.mode === 'unroll') drawRulersUnroll();
+      else if (S.mode === 'top') drawRulers('X', rotaryOn() ? 'Y（工件）' : 'Y');
+      else if (rotaryOn()) drawRulers(S.mode === 'sectionX' ? 'Y（工件）' : 'X', 'Z（工件）');
       else drawRulers(hAxis().toUpperCase(), 'Z');
       drawHud();
     }
@@ -1143,8 +1493,8 @@
       if (!(S.size.w > 0)) syncSize();
       const { w, h } = S.size;
       if (!(w > 0 && h > 0)) { S.needFit = true; return api; }
-      const b = S.mode === 'top' ? topBounds(S.data)
-        : S.mode === 'unroll' ? unrollBounds()
+      const b = S.mode === 'unroll' ? unrollBounds()
+        : S.mode === 'top' ? (rotaryOn() ? rotaryTopBounds() : topBounds(S.data))
           : rotaryOn() ? rotarySectionBounds()
             : sectionBounds(S.data, hAxis());
       let V;
@@ -1179,7 +1529,16 @@
       if (!V) return null;
       const [wx, wy] = toWorld(mx, my);
       let hit = null;
-      if (S.mode === 'top') hit = pickSegment(S.data.segments, wx, wy, V.scale, PICK_PX, isVisible);
+      if (S.mode === 'top' && rotaryOn()) {
+        // 俯視在四軸下畫的是工件座標的折線，挑選也要用同一份，否則點得到的位置對不上
+        const items = [];
+        for (const w of workSamples()) {
+          if (!isVisible(w.seg) || !w.pts) continue;
+          for (let i = 0; i + 1 < w.pts.length; i++) items.push({ from: { x: w.pts[i].x, y: w.pts[i].y }, to: { x: w.pts[i + 1].x, y: w.pts[i + 1].y }, seg: w.seg });
+        }
+        const r = pickSegment(items, wx, wy, V.scale, PICK_PX, null);
+        hit = r ? { seg: r.seg.seg, dist: r.dist } : null;
+      } else if (S.mode === 'top') hit = pickSegment(S.data.segments, wx, wy, V.scale, PICK_PX, isVisible);
       else if (S.mode === 'unroll') {
         const r = pickSegment(unrollPickItems(), wx, wy, V.scale, PICK_PX, null);
         // 點到的是展開折線，換回真正的 Segment（下游要 from/to 的程式座標）
@@ -1281,6 +1640,7 @@
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;
         S.imageCache = null;
+        S.cylCache = null;
         rebuildIndex();
         const V = curView();
         if (!V || V.empty) S.needFit = true;
@@ -1298,6 +1658,8 @@
         return api;
       },
       getMode() { return S.mode; },
+      /** 剖面用的軸 'x'|'y'（俯視時是「最近用過的那一個」，還沒用過 → null） */
+      getSectionAxis() { return S.sectionAxis === 'sectionX' ? 'x' : S.sectionAxis === 'sectionY' ? 'y' : null; },
       setSection(v) { S.section = Number(v) || 0; requestRender(); return api; },
       getSection() { return S.section; },
       /** 顯示第 i 個 snapshot 的高度（null → 最終高度） */
@@ -1308,6 +1670,7 @@
         S.snapshotIndex = snap ? i : null;
         S.heightArr = snap ? snap.height : sim.height;
         S.imageCache = null;
+        S.cylCache = null;
         requestRender();
         return api;
       },
@@ -1341,6 +1704,7 @@
         if (ro) { try { ro.disconnect(); } catch (e) { /* 忽略 */ } ro = null; }
         if (winResize) { window.removeEventListener('resize', winResize); winResize = null; }
         S.imageCache = null;
+        S.cylCache = null;
       },
     };
 

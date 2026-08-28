@@ -280,6 +280,37 @@ html, body {
 .app-tool-filter .app-toolchk.is-off { opacity: 0.45; }
 .app-tool-filter .nc-muted { font-size: 11px; }
 
+/* ==================== 視圖：左 2D／右 3D 並排 ==================== */
+/* 兩塊都是 flex 子項，寬度由 flex 決定；.nc-view2d／.nc-view3d 自帶的 width:100% 用
+ * flex-basis 蓋掉（列方向的 flex 容器裡 flex-basis 勝過 width）。
+ * 沒有並排時只有一塊沒被 .nc-hidden 藏起來，它自己撐滿。 */
+.app-view-split {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+}
+.app-view-split > .nc-view2d,
+.app-view-split > .nc-view3d {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+.app-view-split__bar { display: none; }
+.app-view-split.is-split > .nc-view2d { flex: 0 0 var(--view-split, 50%); }
+.app-view-split.is-split > .nc-view3d { flex: 1 1 0; }
+.app-view-split.is-split > .app-view-split__bar {
+  display: block;
+  flex: none;
+  width: 7px;
+  cursor: col-resize;
+  background: var(--nc-bg-alt, #f6f7f9);
+  border-left: 1px solid var(--nc-border, #d9dde3);
+  border-right: 1px solid var(--nc-border, #d9dde3);
+  touch-action: none;
+}
+.app-view-split.is-split > .app-view-split__bar:hover,
+.app-view-split.is-split > .app-view-split__bar.is-dragging { background: var(--nc-accent, #2b6cb0); }
+
 .app-view-foot {
   flex: none;
   display: flex;
