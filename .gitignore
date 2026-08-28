@@ -1,0 +1,23 @@
+# 本機暫存
+*.tmp
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# 不進版控的本機資料
+#
+#   private/                      實際加工程式、刀具資料、設計分析文件
+#   nc-preview/test/fixtures/     golden test 用的實際程式
+#   fixture-sim.*                 由上面那些程式跑出來的模擬快照
+#   test/shot-*.png               用實際程式截的畫面
+#   docs/proposals/               開發期的模組提案，內容大量引用實際程式的行號與座標
+#
+# 沒有 test/fixtures/ 時 golden test 整組自動 skip（見 nc-preview/test/load.mjs），
+# 其餘測試照跑。示範程式在 nc-preview/samples/，那個是進版控的。
+# ---------------------------------------------------------------------------
+/private/
+nc-preview/test/fixtures/
+nc-preview/test/fixture-sim.js
+nc-preview/test/fixture-sim.json
+nc-preview/test/shot-*.png
+nc-preview/docs/proposals/

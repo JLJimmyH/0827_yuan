@@ -1,0 +1,15 @@
+# 示範程式與測試 fixture：行尾必須原樣保留（tokenizer 會偵測 lineEnding，
+# 存檔時也要寫回原本的行尾，被 git 換成 CRLF 會讓測試與存檔行為改變）
+nc-preview/samples/*.nc      -text
+nc-preview/test/fixtures/**  -text
+
+# 專案原始碼一律 LF（跨平台一致，避免整檔 diff）
+*.js      text eol=lf
+*.mjs     text eol=lf
+*.html    text eol=lf
+*.css     text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.csv     text eol=lf
+
+*.png     binary

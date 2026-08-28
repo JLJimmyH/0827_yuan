@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>view2d 示範 — NC 預演台</title>
+<link rel="stylesheet" href="../css/view2d.css">
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif; color: #222; background: #f2f2f2; }
+  .layout { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 100%; height: 100%; }
+  .side { padding: 12px; overflow: auto; background: #fff; border-right: 1px solid #ddd; }
+  .side h1 { font-size: 15px; margin: 0 0 10px; }
+  .side fieldset { border: 1px solid #ddd; border-radius: 4px; margin: 0 0 10px; padding: 8px 10px; }
+  .side legend { font-weight: 600; padding: 0 4px; }
+  .side label { display: block; margin: 3px 0; }
+  .side input[type=number] { width: 70px; }
+  .side input[type=range] { width: 100%; }
+  .side button { margin: 2px 4px 2px 0; }
+  .main { position: relative; min-width: 0; }
+  .main .nc-view2d { height: 100%; }
+  #pick { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; background: #f7f7f7; padding: 6px; border-radius: 4px; min-height: 3em; }
+  .hint { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="side">
+    <h1>view2d 示範（手寫段 + 假 heightmap）</h1>
+    <p class="hint">滾輪縮放、拖曳平移、雙擊 fit、hover 看座標／深度、點擊路徑挑段。</p>
+    <fieldset>
+      <legend>模式</legend>
+      <label><input type="radio" name="mode" value="top" checked> 俯視</label>
+      <label><input type="radio" name="mode" value="sectionX"> 剖面 X（看 Y–Z）</label>
+      <label><input type="radio" name="mode" value="sectionY"> 剖面 Y（看 X–Z）</label>
+      <label>剖面位置 <span id="secVal">0</span><input id="section" type="range" min="-65" max="65" step="0.5" value="0"></label>
+    </fieldset>
+    <fieldset>
+      <legend>高亮</legend>
+      <label>行號 <input id="line" type="number" min="0" value="24"> <button id="clearLine">清除</button></label>
+      <label>刀具
+        <select id="tool">
+          <option value="">（全部）</option>
+          <option value="3">T3 8V</option><option value="7">T7 SG-4.5</option><option value="1">T1 10MM</option><option value="11">T11 12MM</option>
+        </select>
+      </label>
+      <label>模擬快照
+        <select id="snap">
+          <option value="">最終</option><option value="0">op0 T3 之後</option><option value="1">op1 T7 之後</option><option value="2">op2 T1 之後</option>
+        </select>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>顯示</legend>
+      <label><input id="vRapid" type="checkbox" checked> rapid（灰虛線）</label>
+      <label><input id="vFeed" type="checkbox" checked> feed（刀具色）</label>
+      <label><input id="vStock" type="checkbox" checked> 素材 / heightmap</label>
+      <div>只看刀：
+        <label style="display:inline"><input class="vTool" type="checkbox" value="3" checked> T3</label>
+        <label style="display:inline"><input class="vTool" type="checkbox" value="7" checked> T7</label>
+        <label style="display:inline"><input class="vTool" type="checkbox" value="1" checked> T1</label>
+        <label style="display:inline"><input class="vTool" type="checkbox" value="11" checked> T11</label>
+      </div>
+      <label><input id="noSim" type="checkbox"> 無模擬（只有素材外框）</label>
+    </fieldset>
+    <fieldset>
+      <legend>操作</legend>
+      <button id="fit">fit()</button>
+      <button id="scenario">切換情境標籤</button>
+    </fieldset>
+    <fieldset>
+      <legend>圖例</legend>
+      <div class="nc-view2d-legend" id="legend"></div>
+      <div class="nc-view2d-scale" style="margin-top:6px">頂面 <i></i> 深處</div>
+    </fieldset>
+    <fieldset>
+      <legend>onPick</legend>
+      <div id="pick">（點擊路徑）</div>
+    </fieldset>
+  </div>
+  <div class="main"><div class="nc-view2d"><canvas id="cv"></canvas></div></div>
+</div>
+
+<script src="../js/core/ns.js"></script>
+<script src="../js/ui/view2d.js"></script>
+<script>
+(function () {
+  'use strict';
+  const v = (x, y, z) => ({ x, y, z });
+
+  // ---- 素材 130×60×15，原點在頂面中心；左側有個夾爪治具高出頂面 5 mm ----
+  const stock = {
+    min: v(-65, -30, -15), max: v(65, 30, 0), source: 'user',
+    fixtures: [{ min: v(-70, -8, -15), max: v(-62, 8, 5), name: '夾爪' }],
+  };
+
+  // ---- 假 heightmap：格 0.5 mm；依作業分三個快照 ----
+  const cell = 0.5;
+  const nx = Math.ceil(130 / cell) + 1, ny = Math.ceil(60 / cell) + 1;
+  const origin = { x: -65, y: -30 };
+  const holes = [[-45, 20], [-15, 20], [15, 20], [45, 20]];
+  // 與 simulation.js 相同的節點式格網：格 (ix,iy) 中心在 origin + (ix·cell, iy·cell)
+  function stamp(h, fn) {
+    for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
+      const x = origin.x + ix * cell, y = origin.y + iy * cell;
+      const z = fn(x, y);
+      if (z != null && z < h[iy * nx + ix]) h[iy * nx + ix] = z;
+    }
+  }
+  const h0 = new Float32Array(nx * ny);           // 初始：頂面 0，夾爪區 +5
+  for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
+    const x = origin.x + ix * cell, y = origin.y + iy * cell;
+    h0[iy * nx + ix] = (x <= -62 && Math.abs(y) <= 8) ? 5 : 0;
+  }
+  const h1 = h0.slice();                           // op0 T3 點孔：四個 -1.2 的小錐坑
+  stamp(h1, (x, y) => { for (const [hx, hy] of holes) { const d = Math.hypot(x - hx, y - hy); if (d <= 4) return -1.2 * (1 - d / 4); } return null; });
+  const h2 = h1.slice();                           // op1 T7 鑽孔 φ4.5 到 -8
+  stamp(h2, (x, y) => { for (const [hx, hy] of holes) if (Math.hypot(x - hx, y - hy) <= 2.25) return -8; return null; });
+  const h3 = h2.slice();                           // op2 T1：口袋 -5、斜坡、T11 側銑 -10
+  stamp(h3, (x, y) => (x >= -45 && x <= 0 && y >= -20 && y <= 20) ? -5 : null);
+  stamp(h3, (x, y) => (x >= 10 && x <= 40 && y >= -22 && y <= -5) ? -6 * (x - 10) / 30 : null);
+  stamp(h3, (x, y) => (x >= 55) ? -10 : null);
+  stamp(h3, (x, y) => (Math.hypot(x - 30, y + 20) <= 10.5 && Math.hypot(x - 30, y + 20) >= 9.5) ? -3 : null);
+  const sim = {
+    scenario: 'off', cell, nx, ny, origin, height: h3, floorZ: -15,
+    snapshots: [{ afterOpIndex: 0, tool: 3, height: h1 }, { afterOpIndex: 1, tool: 7, height: h2 }, { afterOpIndex: 2, tool: 1, height: h3 }],
+    events: [], time: { perOp: [], total: 0 },
+  };
+
+  // ---- 手寫段 ----
+  let id = 0;
+  const segs = [];
+  const S = (line, op, tool, kind, from, to, extra) => segs.push(Object.assign({ id: ++id, line, opIndex: op, tool, kind, from, to, feed: kind === 'rapid' ? null : 300, path: 'programmed' }, extra || {}));
+  // op0 T3 (8V) G81 點孔 Z-1.2 R2 G98 Z25
+  let line = 5, cur = v(0, 0, 150);
+  S(line++, 0, 3, 'rapid', cur, v(-45, 20, 150)); cur = v(-45, 20, 150);
+  S(line, 0, 3, 'rapid', cur, v(-45, 20, 25)); cur = v(-45, 20, 25);
+  for (const [hx, hy] of holes) {
+    S(line, 0, 3, 'rapid', cur, v(hx, hy, 25));
+    S(line, 0, 3, 'rapid', v(hx, hy, 25), v(hx, hy, 2));
+    S(line, 0, 3, 'drill', v(hx, hy, 2), v(hx, hy, -1.2), { sub: 'plunge' });
+    S(line, 0, 3, 'rapid', v(hx, hy, -1.2), v(hx, hy, 25));
+    cur = v(hx, hy, 25); line++;
+  }
+  S(line++, 0, 3, 'rapid', cur, v(45, 20, 150), { refReturn: true }); cur = v(45, 20, 150);
+  // op1 T7 (SG-4.5) G83 Q3 Z-8 R2
+  line = 13;
+  for (const [hx, hy] of holes) {
+    S(line, 1, 7, 'rapid', cur, v(hx, hy, 25));
+    S(line, 1, 7, 'rapid', v(hx, hy, 25), v(hx, hy, 2));
+    let depth = 2;
+    for (let k = 0; k < 3; k++) {
+      const next = Math.max(-8, depth - 3);
+      S(line, 1, 7, 'drill', v(hx, hy, depth), v(hx, hy, next), { sub: 'peck' });
+      S(line, 1, 7, 'rapid', v(hx, hy, next), v(hx, hy, 2), { sub: 'retract' });
+      if (next > -8) S(line, 1, 7, 'rapid', v(hx, hy, 2), v(hx, hy, next + 0.5));
+      depth = next + 0.5;
+    }
+    S(line, 1, 7, 'rapid', v(hx, hy, 2), v(hx, hy, 25));
+    cur = v(hx, hy, 25); line++;
+  }
+  S(line++, 1, 7, 'rapid', cur, v(45, 20, 150), { refReturn: true }); cur = v(45, 20, 150);
+  // op2 T1 (10MM) G42 D1 繞矩形 A(-40,-15) B(-5,-15) C(-5,15) D(-40,15)，補正外偏 5、轉角插入 R5 弧
+  line = 20;
+  S(line++, 2, 1, 'rapid', cur, v(-50, -15, 10));
+  S(line++, 2, 1, 'rapid', v(-50, -15, 10), v(-50, -15, 2));
+  S(line++, 2, 1, 'feed', v(-50, -15, 2), v(-50, -15, -5), { feed: 100 });
+  const z = -5;
+  const arc = (from, to, center) => ({ arc: { center, cw: false, r: 5 }, inserted: true, path: 'compensated' });
+  S(23, 2, 1, 'feed', v(-50, -15, z), v(-40, -15, z));                                           // G42 啟動節
+  S(23, 2, 1, 'feed', v(-50, -15, z), v(-40, -20, z), { path: 'compensated' });
+  S(24, 2, 1, 'feed', v(-40, -15, z), v(-5, -15, z));
+  S(24, 2, 1, 'feed', v(-40, -20, z), v(-5, -20, z), { path: 'compensated' });
+  S(24, 2, 1, 'arc', v(-5, -20, z), v(0, -15, z), arc(null, null, { x: -5, y: -15 }));
+  S(25, 2, 1, 'feed', v(-5, -15, z), v(-5, 15, z));
+  S(25, 2, 1, 'feed', v(0, -15, z), v(0, 15, z), { path: 'compensated' });
+  S(25, 2, 1, 'arc', v(0, 15, z), v(-5, 20, z), arc(null, null, { x: -5, y: 15 }));
+  S(26, 2, 1, 'feed', v(-5, 15, z), v(-40, 15, z));
+  S(26, 2, 1, 'feed', v(-5, 20, z), v(-40, 20, z), { path: 'compensated' });
+  S(26, 2, 1, 'arc', v(-40, 20, z), v(-45, 15, z), arc(null, null, { x: -40, y: 15 }));
+  S(27, 2, 1, 'feed', v(-40, 15, z), v(-40, -15, z));
+  S(27, 2, 1, 'feed', v(-45, 15, z), v(-45, -15, z), { path: 'compensated' });
+  S(27, 2, 1, 'arc', v(-45, -15, z), v(-40, -20, z), arc(null, null, { x: -40, y: -15 }));
+  S(28, 2, 1, 'feed', v(-40, -15, z), v(-50, -15, z));                                           // G40 取消節
+  S(28, 2, 1, 'feed', v(-40, -20, z), v(-50, -15, z), { path: 'compensated' });
+  S(29, 2, 1, 'rapid', v(-50, -15, z), v(-50, -15, 10));
+  // T1 再做一個 G2 圓與 ,C 倒角（第 31–35 行）
+  S(31, 2, 1, 'rapid', v(-50, -15, 10), v(20, -20, 10));
+  S(32, 2, 1, 'feed', v(20, -20, 10), v(20, -20, -3), { feed: 100 });
+  S(33, 2, 1, 'arc', v(20, -20, -3), v(40, -20, -3), { arc: { center: { x: 30, y: -20 }, cw: true, r: 10 } });
+  S(34, 2, 1, 'feed', v(40, -20, -3), v(40, -2, -3));                                             // X40,C2 縮短
+  S(34, 2, 1, 'feed', v(40, -2, -3), v(38, 0, -3), { inserted: true });                          // 倒角段
+  S(35, 2, 1, 'feed', v(38, 0, -3), v(20, 0, -3));
+  S(36, 2, 1, 'rapid', v(20, 0, -3), v(20, 0, 10));
+  S(37, 2, 1, 'rapid', v(20, 0, 10), v(20, 0, 150), { refReturn: true });
+  // op3 T11 (12MM) 側銑 X=61
+  S(40, 3, 11, 'rapid', v(20, 0, 150), v(61, -40, 10));
+  S(41, 3, 11, 'rapid', v(61, -40, 10), v(61, -40, -10));
+  S(42, 3, 11, 'feed', v(61, -40, -10), v(61, 40, -10), { feed: 800 });
+  S(43, 3, 11, 'rapid', v(61, 40, -10), v(61, 40, 150), { refReturn: true });
+
+  const toolTable = {
+    programKey: 'demo', updatedAt: new Date().toISOString(), offsets: [],
+    tools: [
+      { t: 3, label: '8V', type: 'chamfer', diameter: 8 },
+      { t: 7, label: 'SG-4.5', type: 'drill', diameter: 4.5 },
+      { t: 1, label: '10MM', type: 'endmill', diameter: 10 },
+      { t: 11, label: '12MM', type: 'endmill', diameter: 12 },
+    ],
+  };
+
+  // ---- 建立視圖 ----
+  const view = NC.ui.createView2D(document.getElementById('cv'));
+  const scenarios = ['off', 'on', 'multiIgnored'];
+  let scenIdx = 0;
+  function applyData() {
+    view.setData({ segments: segs, sim: document.getElementById('noSim').checked ? null : sim, stock, toolTable, scenario: scenarios[scenIdx] });
+    document.getElementById('snap').value = '';
+  }
+  applyData();
+  view.highlightLine(24);
+  view.onPick((line, seg) => {
+    document.getElementById('line').value = line;
+    view.highlightLine(line);
+    const a = seg.arc ? `  arc c=(${seg.arc.center.x},${seg.arc.center.y}) r=${seg.arc.r} ${seg.arc.cw ? 'CW' : 'CCW'}` : '';
+    document.getElementById('pick').textContent = `line ${line}  T${seg.tool}  ${seg.kind}/${seg.path}${seg.inserted ? ' inserted' : ''}${seg.sub ? ' ' + seg.sub : ''}\n(${seg.from.x},${seg.from.y},${seg.from.z}) → (${seg.to.x},${seg.to.y},${seg.to.z})${a}`;
+  });
+
+  // 圖例
+  const legend = document.getElementById('legend');
+  legend.innerHTML = toolTable.tools.map((t) => `<span class="chip"><i style="background:${NC.ui.view2dUtil.toolColor(t.t)}"></i>T${t.t} ${t.label}</span>`).join('')
+    + '<span class="chip"><i class="rapid"></i>rapid</span><span class="chip"><i class="programmed" style="background:#333"></i>programmed 細</span><span class="chip"><i style="background:#333"></i>compensated 粗</span>';
+
+  // ---- 控制項 ----
+  const $ = (id) => document.getElementById(id);
+  const sec = $('section');
+  document.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', () => {
+    view.setMode(r.value);
+    const lim = r.value === 'sectionY' ? 30 : 65;
+    sec.min = -lim; sec.max = lim;
+    if (Math.abs(Number(sec.value)) > lim) sec.value = 0;
+    view.setSection(Number(sec.value)); $('secVal').textContent = sec.value;
+  }));
+  sec.addEventListener('input', () => { view.setSection(Number(sec.value)); $('secVal').textContent = sec.value; });
+  $('line').addEventListener('input', () => { const n = Number($('line').value); view.highlightLine(n > 0 ? n : null); });
+  $('clearLine').addEventListener('click', () => { $('line').value = ''; view.highlightLine(null); });
+  $('tool').addEventListener('change', () => view.highlightTool($('tool').value === '' ? null : Number($('tool').value)));
+  $('snap').addEventListener('change', () => view.setSnapshot($('snap').value === '' ? null : Number($('snap').value)));
+  const applyVisible = () => {
+    const boxes = [...document.querySelectorAll('.vTool')];
+    const all = boxes.every((b) => b.checked);
+    view.setVisible({ rapid: $('vRapid').checked, feed: $('vFeed').checked, stock: $('vStock').checked, tools: all ? null : new Set(boxes.filter((b) => b.checked).map((b) => Number(b.value))) });
+  };
+  ['vRapid', 'vFeed', 'vStock'].forEach((i) => $(i).addEventListener('change', applyVisible));
+  document.querySelectorAll('.vTool').forEach((b) => b.addEventListener('change', applyVisible));
+  $('noSim').addEventListener('change', applyData);
+  $('fit').addEventListener('click', () => view.fit());
+  $('scenario').addEventListener('click', () => { scenIdx = (scenIdx + 1) % scenarios.length; applyData(); });
+
+  // URL 參數（截圖／快速切換用）：?mode=sectionX&section=-45&line=14&tool=7&snap=1
+  const q = new URLSearchParams(location.search);
+  if (q.get('mode')) { const r = document.querySelector(`input[name=mode][value="${q.get('mode')}"]`); if (r) { r.checked = true; r.dispatchEvent(new Event('change')); } }
+  if (q.get('section') != null) { sec.value = q.get('section'); sec.dispatchEvent(new Event('input')); }
+  if (q.get('line') != null) { $('line').value = q.get('line'); $('line').dispatchEvent(new Event('input')); }
+  if (q.get('tool') != null) { $('tool').value = q.get('tool'); $('tool').dispatchEvent(new Event('change')); }
+  if (q.get('snap') != null) { $('snap').value = q.get('snap'); $('snap').dispatchEvent(new Event('change')); }
+})();
+</script>
+</body>
+</html>

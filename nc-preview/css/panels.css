@@ -1,0 +1,283 @@
+/* NC 預演台 — 面板樣式（js/ui/panels.js）
+ * 淺色為主；嚴重度：錯誤紅／警告琥珀／資訊藍／需輸入黃；來源：註解綠／動作藍／預設灰／手填紫。
+ */
+:root {
+  --nc-bg: #ffffff;
+  --nc-bg-alt: #f6f7f9;
+  --nc-border: #d9dde3;
+  --nc-text: #1f2429;
+  --nc-muted: #6b7480;
+  --nc-accent: #2b6cb0;
+  --nc-selected: #e8f1fb;
+  --nc-error: #c62828;
+  --nc-error-bg: #fdecea;
+  --nc-warning: #b26a00;
+  --nc-warning-bg: #fff4e0;
+  --nc-info: #1565c0;
+  --nc-info-bg: #e7f0fb;
+  --nc-needs: #7a6400;
+  --nc-needs-bg: #fff8c4;
+  --nc-src-comment: #2e7d32;
+  --nc-src-comment-bg: #e6f4e8;
+  --nc-src-motion: #1565c0;
+  --nc-src-motion-bg: #e7f0fb;
+  --nc-src-default: #616a75;
+  --nc-src-default-bg: #eceff2;
+  --nc-src-user: #6a1b9a;
+  --nc-src-user-bg: #f1e6f7;
+  --nc-font: -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", Arial, sans-serif;
+  --nc-mono: Consolas, "SF Mono", Menlo, monospace;
+}
+
+.nc-panel {
+  font-family: var(--nc-font);
+  font-size: 13px;
+  color: var(--nc-text);
+  background: var(--nc-bg);
+  line-height: 1.45;
+  box-sizing: border-box;
+}
+.nc-panel *, .nc-panel *::before, .nc-panel *::after { box-sizing: inherit; }
+.nc-hidden { display: none !important; }
+.nc-muted { color: var(--nc-muted); }
+.nc-empty { padding: 12px; color: var(--nc-muted); text-align: center; }
+.nc-scroll { overflow: auto; max-width: 100%; }
+.nc-sub-title { font-weight: 600; margin: 10px 0 4px; padding-bottom: 2px; border-bottom: 1px solid var(--nc-border); }
+
+/* 橫幅 */
+.nc-banner { padding: 6px 10px; border-radius: 4px; margin: 6px 0; font-weight: 600; }
+.nc-banner-warn { background: var(--nc-warning-bg); color: var(--nc-warning); border: 1px solid #f0c98a; }
+
+/* 表格 */
+.nc-table { border-collapse: collapse; width: 100%; white-space: nowrap; }
+.nc-table th, .nc-table td { border-bottom: 1px solid var(--nc-border); padding: 4px 6px; text-align: left; vertical-align: top; }
+.nc-table th { background: var(--nc-bg-alt); font-weight: 600; position: sticky; top: 0; z-index: 1; }
+.nc-table tbody tr:hover { background: var(--nc-bg-alt); }
+.nc-table tbody tr.nc-selected { background: var(--nc-selected); outline: 1px solid var(--nc-accent); }
+.nc-table tfoot td { font-weight: 600; background: var(--nc-bg-alt); }
+.nc-num-cell { font-family: var(--nc-mono); text-align: right; }
+.nc-num-cell.nc-deep { color: var(--nc-error); }
+.nc-tno { font-family: var(--nc-mono); font-weight: 600; }
+
+/* 輸入 */
+.nc-num, .nc-text, .nc-select {
+  font: inherit; padding: 2px 4px; border: 1px solid var(--nc-border); border-radius: 3px; background: #fff; color: var(--nc-text);
+}
+.nc-num { width: 5.5em; font-family: var(--nc-mono); text-align: right; }
+.nc-num-d { width: 4.5em; }
+.nc-text { width: 9em; }
+.nc-short { width: 4em; }
+.nc-search { width: 12em; }
+.nc-num:focus, .nc-text:focus, .nc-select:focus { outline: 2px solid #9cc0e8; outline-offset: 0; }
+.nc-check { display: inline-flex; align-items: center; gap: 2px; margin-right: 8px; cursor: pointer; }
+.nc-btn { font: inherit; padding: 3px 8px; border: 1px solid var(--nc-border); border-radius: 3px; background: #fff; color: var(--nc-text); cursor: pointer; }
+.nc-btn:hover { background: var(--nc-bg-alt); }
+.nc-btn-small { padding: 1px 6px; font-size: 12px; }
+.nc-btn-danger { color: var(--nc-error); border-color: #e7a5a5; }
+.nc-btn-add { margin-top: 6px; }
+.nc-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.nc-row-label { flex: 0 0 7em; color: var(--nc-muted); }
+.nc-row-value { flex: 1; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
+/* 來源標籤 */
+.nc-src { display: inline-block; font-size: 11px; line-height: 1.3; padding: 0 5px; border-radius: 8px; margin-left: 4px; vertical-align: middle; border: 1px solid transparent; }
+.nc-src-comment { color: var(--nc-src-comment); background: var(--nc-src-comment-bg); border-color: #b7dbbd; }
+.nc-src-motion { color: var(--nc-src-motion); background: var(--nc-src-motion-bg); border-color: #b3cdee; }
+.nc-src-default { color: var(--nc-src-default); background: var(--nc-src-default-bg); border-color: #cfd5dc; }
+.nc-src-user { color: var(--nc-src-user); background: var(--nc-src-user-bg); border-color: #d7b8e6; }
+.nc-legend { color: var(--nc-muted); font-size: 12px; margin: 4px 0 6px; }
+.nc-legend-title { margin-right: 2px; }
+
+/* 嚴重度 pill */
+.nc-pill { display: inline-block; font-size: 11px; line-height: 1.4; padding: 0 6px; border-radius: 3px; font-weight: 600; min-width: 3.2em; text-align: center; }
+.nc-pill-error { color: #fff; background: var(--nc-error); }
+.nc-pill-warning { color: #fff; background: var(--nc-warning); }
+.nc-pill-info { color: #fff; background: var(--nc-info); }
+.nc-pill-needsInput { color: var(--nc-needs); background: #ffe270; }
+
+/* 徽章 */
+.nc-badge { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 3px; background: var(--nc-bg-alt); border: 1px solid var(--nc-border); margin-left: 4px; }
+.nc-badge-probe { color: var(--nc-needs); background: var(--nc-needs-bg); border-color: #e6d56a; }
+.nc-badge-user { color: var(--nc-src-user); background: var(--nc-src-user-bg); }
+.nc-badge-est { color: var(--nc-src-default); background: var(--nc-src-default-bg); }
+.nc-badge-scn { color: var(--nc-warning); background: var(--nc-warning-bg); }
+
+/* 刀具表 */
+.nc-tools .nc-td-t { white-space: nowrap; }
+.nc-tools .nc-td-marks { display: block; margin-top: 2px; }
+.nc-star { font: inherit; border: 0; background: transparent; color: #c9ced4; cursor: pointer; padding: 0 3px; font-size: 14px; }
+.nc-star.nc-on { color: #e6a700; }
+.nc-star:hover { color: #f0b800; }
+.nc-tag-holder { display: inline-block; }
+.nc-dline { display: flex; align-items: center; gap: 4px; padding: 1px 0; }
+.nc-dno { font-family: var(--nc-mono); font-weight: 600; min-width: 2.8em; }
+.nc-dfield { color: var(--nc-muted); }
+.nc-tool.nc-probe td { background: #fffdf0; }
+
+/* 錯誤清單 */
+.nc-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 6px 4px; border-bottom: 1px solid var(--nc-border); background: var(--nc-bg-alt); position: sticky; top: 0; z-index: 1; }
+.nc-count { font-family: var(--nc-mono); color: var(--nc-muted); margin-left: 2px; }
+.nc-diag-summary { margin-left: auto; color: var(--nc-muted); font-size: 12px; }
+.nc-diag-list { list-style: none; margin: 0; padding: 0; }
+.nc-diag { border-bottom: 1px solid var(--nc-border); border-left: 4px solid transparent; cursor: pointer; }
+.nc-diag:hover { background: var(--nc-bg-alt); }
+.nc-diag.nc-selected { background: var(--nc-selected); }
+.nc-diag.nc-sev-error { border-left-color: var(--nc-error); }
+.nc-diag.nc-sev-warning { border-left-color: var(--nc-warning); }
+.nc-diag.nc-sev-info { border-left-color: var(--nc-info); }
+.nc-diag.nc-sev-needsInput { border-left-color: #e6c500; }
+.nc-diag-head { display: flex; align-items: baseline; gap: 6px; padding: 4px 6px; }
+.nc-diag-line { font-family: var(--nc-mono); color: var(--nc-accent); min-width: 3.5em; }
+.nc-diag-msg { flex: 1; white-space: normal; }
+.nc-diag-rule { font-family: var(--nc-mono); color: var(--nc-muted); font-size: 11px; }
+.nc-diag-count { font-family: var(--nc-mono); font-size: 11px; font-weight: 600; color: var(--nc-muted); background: var(--nc-bg-alt); border: 1px solid var(--nc-border); border-radius: 9px; padding: 0 6px; white-space: nowrap; }
+.nc-diag.nc-sev-error .nc-diag-count { color: var(--nc-error); border-color: var(--nc-error); background: var(--nc-error-bg); }
+.nc-diag-lines { margin: 3px 0 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.nc-diag-lines-label { color: var(--nc-muted); font-size: 12px; margin-right: 2px; }
+.nc-lineno { font-family: var(--nc-mono); font-size: 11px; line-height: 1.6; color: var(--nc-accent); background: var(--nc-bg); border: 1px solid var(--nc-border); border-radius: 3px; padding: 0 4px; cursor: pointer; }
+.nc-lineno:hover { background: var(--nc-selected); border-color: var(--nc-accent); }
+.nc-expand { font: inherit; border: 0; background: transparent; cursor: pointer; color: var(--nc-muted); padding: 0 4px; transition: transform .12s; }
+.nc-diag.nc-open .nc-expand { transform: rotate(90deg); }
+.nc-diag-detail { display: none; padding: 2px 10px 8px 46px; color: #3a424b; white-space: normal; }
+.nc-diag.nc-open .nc-diag-detail { display: block; }
+.nc-diag-detail p { margin: 3px 0; }
+.nc-diag-alarm code { font-family: var(--nc-mono); background: var(--nc-error-bg); color: var(--nc-error); padding: 0 4px; border-radius: 3px; }
+.nc-diag-fix { color: var(--nc-src-comment); }
+
+/* 模態 */
+.nc-panel-modal { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 6px; }
+.nc-modal-sec { min-width: 12em; }
+.nc-modal-title { font-weight: 600; color: var(--nc-muted); font-size: 12px; margin-bottom: 2px; }
+.nc-modal-grid { display: grid; grid-template-columns: auto auto; gap: 1px 10px; }
+.nc-k { color: var(--nc-muted); }
+.nc-v { font-family: var(--nc-mono); }
+.nc-v.nc-active { color: var(--nc-accent); font-weight: 600; }
+.nc-v.nc-warn { color: var(--nc-warning); }
+.nc-v.nc-pos { white-space: pre; font-weight: 600; }
+
+/* 作業摘要 */
+.nc-kind { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 12px; background: var(--nc-bg-alt); border: 1px solid var(--nc-border); }
+.nc-kind-drill, .nc-kind-tap, .nc-kind-ream { background: var(--nc-info-bg); color: var(--nc-info); border-color: #b3cdee; }
+.nc-kind-contour, .nc-kind-pocket, .nc-kind-face { background: var(--nc-src-comment-bg); color: var(--nc-src-comment); border-color: #b7dbbd; }
+.nc-kind-chamfer { background: var(--nc-src-user-bg); color: var(--nc-src-user); border-color: #d7b8e6; }
+.nc-kind-unknown { color: var(--nc-muted); }
+.nc-ops tbody tr { cursor: pointer; }
+
+/* 素材 */
+.nc-panel-stock, .nc-panel-settings { padding: 6px; }
+.nc-stock-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.nc-fixture { border: 1px solid var(--nc-border); border-radius: 4px; padding: 4px 8px; margin: 4px 0; background: var(--nc-bg-alt); }
+.nc-fixture-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.nc-size { font-family: var(--nc-mono); font-size: 12px; }
+
+/* 診斷摺疊列的「推估素材」徽章：比 severity 淡，只是提醒判定依據 */
+.nc-diag-head .nc-badge-est { font-size: 10px; opacity: 0.85; flex: none; }
+.nc-stock-note { margin: 4px 0 8px; line-height: 1.5; }
+
+
+/* ==================== 刀具表 CSV 匯入／匯出 ==================== */
+.nc-hidden-file { display: none; }
+.nc-tools-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 0 2px; }
+.nc-tools-bar-hint { font-size: 12px; }
+.nc-import-msg {
+  margin: 4px 0 6px; padding: 5px 9px; border-radius: 4px; border: 1px solid var(--nc-border);
+  background: var(--nc-bg-alt); line-height: 1.5;
+}
+.nc-import-msg.is-ok { color: var(--nc-src-comment); background: var(--nc-src-comment-bg); border-color: #b7dbbd; }
+.nc-import-msg.is-warn { color: var(--nc-warning); background: var(--nc-warning-bg); border-color: #f0c98a; }
+.nc-import-msg.is-error { color: var(--nc-error); background: var(--nc-error-bg); border-color: #e7a5a5; }
+.nc-import-msg.is-busy { color: var(--nc-muted); }
+/* 把 CSV 拖到刀具表面板上 */
+.nc-panel-tools { position: relative; min-height: 80px; }
+.nc-panel-tools.is-csv-drop { outline: 3px dashed var(--nc-accent); outline-offset: -3px; background: var(--nc-selected); }
+
+/* ==================== 刀庫 ==================== */
+.nc-panel-mag { padding: 6px; }
+.nc-mag-head { margin-bottom: 2px; }
+.nc-mag-why { font-size: 12px; line-height: 1.55; margin-bottom: 8px; max-width: 62em; }
+.nc-mag-cfg { display: flex; flex-wrap: wrap; gap: 0 22px; margin-bottom: 6px; }
+.nc-mag-cfg .nc-row { flex: 0 0 auto; }
+.nc-mag-cfg .nc-row-label { flex: 0 0 auto; margin-right: 2px; }
+.nc-num-pot { width: 4.5em; }
+
+.nc-mag-issues { margin: 6px 0; display: flex; flex-direction: column; gap: 2px; }
+.nc-mag-ok { color: var(--nc-src-comment); background: var(--nc-src-comment-bg); border: 1px solid #b7dbbd; border-radius: 4px; padding: 4px 9px; }
+.nc-mag-issue { display: flex; align-items: baseline; gap: 6px; padding: 3px 8px; border-radius: 4px; border-left: 4px solid transparent; background: var(--nc-bg-alt); }
+.nc-mag-issue.nc-sev-error { background: var(--nc-error-bg); border-left-color: var(--nc-error); }
+.nc-mag-issue.nc-sev-warning { background: var(--nc-warning-bg); border-left-color: var(--nc-warning); }
+.nc-mag-issue.nc-sev-info { background: var(--nc-info-bg); border-left-color: var(--nc-info); }
+.nc-mag-issue-text { flex: 1; }
+.nc-mag-note { margin: 4px 0; padding: 4px 9px; border-radius: 4px; background: var(--nc-needs-bg); color: var(--nc-needs); border: 1px solid #e6d56a; }
+.nc-mag-hint { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; color: var(--nc-muted); font-size: 12px; margin: 4px 0 8px; }
+.nc-mag-legend { display: inline-flex; gap: 6px; }
+.nc-pot-key { font-size: 11px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--nc-border); }
+.nc-pot-key.is-inprogram { border-color: var(--nc-accent); box-shadow: inset 0 0 0 1px var(--nc-accent); color: var(--nc-accent); }
+.nc-pot-key.is-big { background: #e2e9fb; border-color: #27408b; box-shadow: inset 0 0 0 1px #27408b; color: #27408b; }
+.nc-pot-key.is-clear { background: #fff4e0; border-color: #f0c98a; color: var(--nc-warning); }
+.nc-pot-key.is-conflict { background: var(--nc-error-bg); border-color: var(--nc-error); color: var(--nc-error); }
+
+.nc-mag-body { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; }
+
+/* 環狀刀位圖：刀庫是轉盤，畫成環最接近現場看到的樣子（第 1 號正上方、順時針） */
+.nc-pot-ring-wrap { flex: 0 0 auto; }
+.nc-pot-ring {
+  position: relative; border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%, #fff 0 38%, var(--nc-bg-alt) 38% 100%);
+  border: 1px solid var(--nc-border);
+}
+.nc-pot-hub {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  text-align: center; color: var(--nc-muted); pointer-events: none;
+}
+.nc-pot-hub-n { font-weight: 700; font-size: 15px; color: var(--nc-text); }
+.nc-pot-hub-s { font-size: 11px; }
+.nc-pot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 4px; flex: 1 1 320px; }
+
+.nc-pot {
+  font: inherit; cursor: pointer; padding: 2px 1px;
+  width: 44px; height: 40px; border-radius: 6px;
+  border: 1px solid var(--nc-border); background: #fff; color: var(--nc-muted);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.15;
+}
+.nc-pot-ring .nc-pot { position: absolute; transform: translate(-50%, -50%); }
+.nc-pot-no { font-size: 10px; }
+.nc-pot-t { font-family: var(--nc-mono); font-size: 12px; font-weight: 700; color: var(--nc-text); }
+.nc-pot-star { position: absolute; top: -1px; right: 1px; font-size: 9px; color: #e6a700; }
+/* 撞刀時大徑刀和被撞的鄰居都是紅底，靠這個藍記號才分得出哪一個是肇事者。
+   要塞在格子「裡面」——放到格子外面會壓在隔壁刀位上，看起來像是隔壁那把刀的標記 */
+.nc-pot-big {
+  position: absolute; left: 2px; bottom: 1px; padding: 0 2px; border-radius: 3px;
+  background: #27408b; color: #fff; font-size: 9px; font-weight: 700; line-height: 1.3;
+}
+/* 大徑刀就算同時在衝突狀態，藍框也要留著 */
+.nc-pot.is-big.is-conflict { border-color: #27408b; box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.28), inset 0 0 0 1px #27408b; }
+.nc-pot { position: relative; }
+.nc-pot.is-filled { background: #fff; border-color: #9aa3ad; color: var(--nc-text); }
+.nc-pot.is-inprogram { border-color: var(--nc-accent); box-shadow: inset 0 0 0 1px var(--nc-accent); }
+.nc-pot.is-clear { background: var(--nc-warning-bg); border-color: #f0c98a; }
+.nc-pot.is-big { background: #e2e9fb; border-color: #93a9e0; }
+.nc-pot.is-big .nc-pot-t { color: #27408b; }
+.nc-pot.is-conflict { background: var(--nc-error-bg); border-color: var(--nc-error); box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.28); }
+.nc-pot.is-conflict .nc-pot-t { color: var(--nc-error); }
+.nc-pot:hover { outline: 2px solid var(--nc-accent); outline-offset: 1px; z-index: 2; }
+.nc-pot.is-target:hover { background: var(--nc-selected); }
+
+.nc-mag-list { flex: 1 1 330px; min-width: 300px; }
+.nc-mag-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.nc-mag-table td, .nc-mag-table th { padding: 2px 6px; vertical-align: middle; }
+.nc-mag-table .nc-td-center { text-align: center; }
+.nc-mag-row.nc-conflict td { background: var(--nc-error-bg); }
+.nc-mag-flags { display: inline-flex; align-items: center; gap: 2px; }
+.nc-mag-tool {
+  font: inherit; font-size: 12px; cursor: pointer; text-align: left;
+  padding: 1px 7px; border-radius: 10px; border: 1px solid var(--nc-border); background: #fff; color: var(--nc-text);
+}
+.nc-mag-tool:hover { background: var(--nc-bg-alt); }
+.nc-mag-tool.is-unplaced { border-style: dashed; color: var(--nc-muted); }
+.nc-mag-tool.is-armed { background: var(--nc-accent); border-color: var(--nc-accent); color: #fff; font-weight: 600; }
+.nc-badge-conflict { color: var(--nc-error); background: var(--nc-error-bg); border-color: #e7a5a5; }
+.nc-badge-big { color: #27408b; background: #e2e9fb; border-color: #93a9e0; }
+/* 衝突清單放在右欄跟著刀具清單走：清單長的時候給它自己捲，別把刀位圖擠出畫面 */
+.nc-mag-list .nc-mag-issues { max-height: 190px; overflow: auto; margin: 0 0 6px; }
+.nc-num-t { width: 4em; }
+.nc-mag-tedit { display: inline-flex; align-items: center; gap: 2px; color: var(--nc-muted); font-family: var(--nc-mono); }

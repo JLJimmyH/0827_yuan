@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>NC 預演台 — editor.js 示範</title>
+<link rel="stylesheet" href="../css/editor.css">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    font: 13px/1.5 system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+    color: #1f2328; background: #f6f8fa;
+  }
+  header { padding: 8px 12px; background: #fff; border-bottom: 1px solid #d0d7de; }
+  header h1 { margin: 0 0 6px; font-size: 15px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .bar button, .bar input { font: inherit; padding: 3px 8px; }
+  .bar input[type=number] { width: 5.5em; }
+  .bar .sep { width: 1px; height: 20px; background: #d0d7de; margin: 0 4px; }
+  main { flex: 1 1 auto; min-height: 0; display: flex; gap: 8px; padding: 8px 12px; }
+  #editor { flex: 1 1 auto; min-width: 0; height: 100%; }
+  aside { flex: 0 0 340px; display: flex; flex-direction: column; min-height: 0; }
+  aside h2 { margin: 0 0 4px; font-size: 13px; }
+  #status { padding: 6px 8px; background: #fff; border: 1px solid #d0d7de; margin-bottom: 8px; white-space: pre-wrap; }
+  #log { flex: 1 1 auto; overflow: auto; background: #fff; border: 1px solid #d0d7de; padding: 6px 8px; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NC.ui.createEditor 示範（左：行號＋診斷色點｜中：程式｜右：行旁模態資訊）</h1>
+  <div class="bar">
+    <button id="btnSample">載入假程式</button>
+    <button id="btnStress">產生 2,000 行</button>
+    <button id="btnDiag">套用假診斷（計時）</button>
+    <button id="btnClearDiag">清除診斷</button>
+    <span class="sep"></span>
+    <label>行 <input type="number" id="lineNo" value="30" min="1"></label>
+    <button id="btnGoto">scrollToLine</button>
+    <button id="btnGotoCenter">scrollToLine(置中)</button>
+    <button id="btnHl">highlightLine</button>
+    <button id="btnHlOff">取消底色</button>
+    <span class="sep"></span>
+    <button id="btnSel">getSelectionLines</button>
+    <button id="btnComment">選取行加註解</button>
+    <button id="btnDel">刪除選取行</button>
+    <button id="btnInsert">把選取行換成兩行</button>
+    <span class="sep"></span>
+    <button id="btnGet">getText 長度</button>
+  </div>
+</header>
+<main>
+  <div id="editor"></div>
+  <aside>
+    <h2>狀態</h2>
+    <div id="status"></div>
+    <h2>事件紀錄</h2>
+    <div id="log"></div>
+  </aside>
+</main>
+
+<script src="../js/core/ns.js"></script>
+<script src="../js/ui/editor.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+  const statusEl = $('status');
+  function log(msg) {
+    const t = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+    logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+  }
+
+  // ---- 示範用的假程式（自己編的，塞了多斜線、逗號字組、G2、AICC 這些要測的東西） ----
+  const SAMPLE = [
+    '%', 'O0999(DEMO-PART)', 'G40G49G80',
+    'M6T3(10V)', 'G0G90G54X-50.Y30.G43H3Z25.M3S1500', 'G98R2.G81Z-2.5F60M8T7',
+    'X0.', 'X50.', 'Y-30.', 'M9', 'G91G28G80Z0.',
+    'M6T7(SG-8.5)', 'G0G90G54X50.Y-30.G43H7Z25.M3S1050', 'G98R2.G83Q1.Z-20.F60M8',
+    'Y30.', 'X0.', 'X-50.', 'M9', 'G91G28G80Z0.',
+    'M6T1(10MM)', 'G05.1Q1', 'G0G90G54X-80.Y-20.G43H1Z10.M3S1850', 'G1Z-3.F150M8T2',
+    'G1G41D1X-70.', 'Y40.', 'X-30.,C3.', 'G2X-24.Y34.R6.', 'Y-20.', 'G1G40X-80.', 'G0Y-20.',
+    '/G1Z-6.', 'G1G41D1X-70.', 'Y40.', 'G1G40X-80.', 'G0Y-20.',
+    '//G1Z-9.', 'G1G41D1X-70.', 'Y40.', 'G1G40X-80.', 'G0Z25.',
+    'X80.Y40.', 'Z3.', 'G1Z-3.', 'G1G41D1X70.', 'Y-20.', 'G1G40X80.', 'G0Y40.',
+    'G1Z-9', 'G1G41D1X70.', 'Y-20.', 'G1G40X80.', 'G0Z50.M9', 'G91G28Z0.', 'G05.1Q0',
+    'M6T2(10MM)', 'G05.1Q1', 'G0G90G54X-80.Y-20.G43H2Z10.M3S2200', 'G1Z-9.F150M8T15',
+    'G1G41D2X-70.', 'Y40.', 'G1G40X-80.', 'G0Z25.', 'X80.Y40.', 'Z3.', 'G1Z-9.',
+    'G1G41D2X70.', 'Y-20.', 'G1G40X80.', 'G0Z50.M9', 'G91G28Y0.Z0.', 'G05.1Q0',
+    'M6T15', 'T3', 'M30', '%',
+  ].join('\r\n');   // 故意用 CRLF，示範 getText 會還原換行
+
+  function makeStress(n) {
+    const out = ['%', 'O2000(STRESS)', 'G40G49G80', 'M6T1(10MM)', 'G0G90G54X0.Y0.G43H1Z10.M3S2000', 'G1Z-2.F200'];
+    let i = out.length;
+    while (i < n - 3) {
+      const x = ((i * 7) % 120 - 60).toFixed(1);
+      const y = ((i * 13) % 80 - 40).toFixed(1);
+      out.push((i % 37 === 0 ? '/' : '') + 'G1X' + x + 'Y' + y + (i % 11 === 0 ? 'F' + (100 + (i % 5) * 50) : ''));
+      i++;
+    }
+    out.push('G0Z50.M9', 'M30', '%');
+    return out.join('\n');
+  }
+
+  // ---- 建立編輯器 ----
+  const ed = NC.ui.createEditor($('editor'));
+
+  // ---- 行旁資訊：示範用的極簡模態掃描（真正的由 app 依 interpreter 結果提供） ----
+  let infoCache = { text: null, rows: [] };
+  function scanModal(text) {
+    const lines = text.split('\n');
+    const rows = new Array(lines.length);
+    const st = { motion: '', dist: 'G90', comp: 'G40', d: 0, f: null, z: null };
+    for (let i = 0; i < lines.length; i++) {
+      const s = lines[i].replace(/\(.*?\)/g, '').replace(/^\/+/, '').trim();
+      if (!s || s === '%' || /^O\d+/.test(s)) { rows[i] = ''; continue; }
+      const re = /([A-Za-z])\s*([+-]?(?:\d+\.?\d*|\.\d+))/g;
+      let m;
+      while ((m = re.exec(s))) {
+        const a = m[1].toUpperCase(); const v = parseFloat(m[2]);
+        if (a === 'G') {
+          if (v === 0 || v === 1 || v === 2 || v === 3) st.motion = 'G' + v;
+          else if (v === 90 || v === 91) st.dist = 'G' + v;
+          else if (v === 40 || v === 41 || v === 42) st.comp = 'G' + v;
+        } else if (a === 'D') st.d = v;
+        else if (a === 'F') st.f = v;
+        else if (a === 'Z') st.z = st.dist === 'G91' && st.z != null ? st.z + v : v;
+      }
+      rows[i] = [
+        st.motion || '—', st.dist.replace('G9', 'G9'),
+        st.comp === 'G40' ? 'G40' : st.comp + ' D' + st.d,
+        st.f == null ? 'F—' : 'F' + st.f,
+        st.z == null ? 'Z—' : 'Z' + NC.util.fmt(st.z),
+      ].join(' · ');
+    }
+    return rows;
+  }
+  ed.setLineInfo((line) => {
+    const text = ed.textarea.value;
+    if (infoCache.text !== text) infoCache = { text, rows: scanModal(text) };
+    return infoCache.rows[line - 1] || '';
+  });
+
+  // ---- 假診斷：依文字內容產生（模仿 rules 的輸出格式） ----
+  function fakeDiagnostics(text) {
+    const out = [];
+    const lines = text.split('\n');
+    let sawF = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = i + 1; const raw = lines[i];
+      if (/^\/{2,}/.test(raw)) out.push(NC.util.diag('R05', line, 'error', '多斜線節：Fanuc 0i 會把 "//" 當成 "/"，不是「永遠忽略」', { detail: '若本意是永久停用，請改成註解或刪除。', fanucAlarm: null }));
+      else if (/^\//.test(raw)) out.push(NC.util.diag('R05', line, 'warning', '單節跳過：開關 ON 時此行不執行', { detail: '請確認 OFF/ON 兩種情境的路徑差異。' }));
+      if (/F\d/.test(raw)) sawF = true;
+      if (/G1(?!\d)/.test(raw) && !sawF) out.push(NC.util.diag('R08', line, 'error', 'G1 切削但尚未指定進給 F', { fanucAlarm: 'PS0011' }));
+      const m = raw.match(/[XYZ](-?\d+)(?![\.\d])/);
+      if (m && !/^O/.test(raw)) out.push(NC.util.diag('R04', line, 'warning', `${m[0]} 沒有小數點，機台會讀成 ${(parseFloat(m[1]) / 1000).toFixed(3)} mm`, { detail: '請補上小數點。' }));
+      if (/M6/.test(raw)) out.push(NC.util.diag('R29', line, 'info', '換刀 ' + (raw.match(/T\d+/) || [''])[0]));
+      if (/,C/.test(raw)) out.push(NC.util.diag('R22', line, 'needsInput', '倒角 ,C 需要下一節為直線才會展開', { detail: '下一節是 G2，本版不展開。' }));
+      if (/G05\.1Q1/.test(raw)) out.push(NC.util.diag('R26', line, 'info', 'AICC 開啟'));
+    }
+    return out;
+  }
+
+  // ---- 事件 ----
+  ed.onChange((text) => log(`onChange（300 ms 後）：${text.length} 字元，${ed.getLineCount()} 行`));
+  ed.onCursorLine((line) => { statusEl.textContent = `游標行：${line}　行數：${ed.getLineCount()}`; });
+
+  function loadSample() {
+    ed.setText(SAMPLE);
+    log('setText：假程式（CRLF）' + ed.getLineCount() + ' 行');
+    applyDiag();
+  }
+  function applyDiag() {
+    const diags = fakeDiagnostics(ed.textarea.value);
+    const t0 = performance.now();
+    ed.setDiagnostics(diags);
+    const dt = performance.now() - t0;
+    log(`setDiagnostics：${diags.length} 筆，耗時 ${dt.toFixed(2)} ms`);
+  }
+
+  $('btnSample').addEventListener('click', loadSample);
+  $('btnStress').addEventListener('click', () => {
+    const t0 = performance.now();
+    ed.setText(makeStress(2000));
+    log(`setText：2,000 行，耗時 ${(performance.now() - t0).toFixed(2)} ms`);
+    applyDiag();
+  });
+  $('btnDiag').addEventListener('click', applyDiag);
+  $('btnClearDiag').addEventListener('click', () => { ed.setDiagnostics([]); log('setDiagnostics([])'); });
+  const lineNo = () => parseInt($('lineNo').value, 10) || 1;
+  $('btnGoto').addEventListener('click', () => { ed.scrollToLine(lineNo()); log('scrollToLine(' + lineNo() + ')'); });
+  $('btnGotoCenter').addEventListener('click', () => { ed.scrollToLine(lineNo(), { center: true }); log('scrollToLine(' + lineNo() + ', {center:true})'); });
+  $('btnHl').addEventListener('click', () => { ed.highlightLine(lineNo()); ed.scrollToLine(lineNo()); log('highlightLine(' + lineNo() + ')'); });
+  $('btnHlOff').addEventListener('click', () => { ed.highlightLine(0); log('highlightLine(0)'); });
+  $('btnSel').addEventListener('click', () => { const [a, b] = ed.getSelectionLines(); log(`getSelectionLines → [${a}, ${b}]`); });
+  $('btnComment').addEventListener('click', () => {
+    const [a, b] = ed.getSelectionLines();
+    const lines = ed.textarea.value.split('\n').slice(a - 1, b).map((s) => '(OFF)' + s);
+    ed.replaceLines(a, b, lines.join('\n'));
+    log(`replaceLines(${a}, ${b}, 加註解)`);
+  });
+  $('btnDel').addEventListener('click', () => { const [a, b] = ed.getSelectionLines(); ed.replaceLines(a, b, null); log(`replaceLines(${a}, ${b}, null) 刪除`); });
+  $('btnInsert').addEventListener('click', () => { const [a, b] = ed.getSelectionLines(); ed.replaceLines(a, b, 'G0Z50.\nM9'); log(`replaceLines(${a}, ${b}, 'G0Z50.\\nM9')`); });
+  $('btnGet').addEventListener('click', () => { const t = ed.getText(); log(`getText：${t.length} 字元，含 CRLF：${/\r\n/.test(t)}`); });
+
+  loadSample();
+  ed.highlightLine(24);
+  ed.focus();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>view3d 展示 — NC 預演台 3D 成品視圖</title>
+<link rel="stylesheet" href="../css/view3d.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #fbfbfb; color: #222;
+    font: 13px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif; }
+  #wrap { display: flex; flex-direction: column; height: 100%; }
+  #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+    padding: 6px 10px; border-bottom: 1px solid #e0e0e0; background: #fff; }
+  #bar button, #bar select { font: inherit; padding: 3px 9px; border: 1px solid #cfcfcf;
+    border-radius: 4px; background: #fff; color: #333; cursor: pointer; }
+  #bar button[aria-pressed="true"] { background: #e8f3ff; border-color: #6aa3e0; color: #14508f; }
+  #bar .sep { width: 1px; height: 18px; background: #e0e0e0; }
+  #bar .note { color: #666; }
+  #stage { position: relative; flex: 1; min-height: 0; }
+  #fallback { position: absolute; inset: 0; display: none; background: #fbfbfb; }
+  #fallback.on { display: block; }
+  #fallback canvas { display: block; width: 100%; height: 100%; }
+  #status { padding: 4px 10px; border-top: 1px solid #e0e0e0; background: #fff; color: #444;
+    font: 12px ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+  #status.bad { background: #fff1f0; color: #a11; }
+  .legend { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+  .legend .chip { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .legend .chip i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">
+    <button id="bRapid" aria-pressed="true">快速定位線</button>
+    <button id="bStock" aria-pressed="true">素材線框</button>
+    <button id="bSurface" aria-pressed="true">成品實體</button>
+    <span class="sep"></span>
+    <label>降採樣
+      <select id="selDs">
+        <option value="auto">自動</option>
+        <option value="1" selected>1×（全解析）</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+      </select>
+    </label>
+    <label>模擬到
+      <select id="selSnap">
+        <option value="">最終成品</option>
+        <option value="0">第 1 把刀</option>
+        <option value="1">第 2 把刀</option>
+      </select>
+    </label>
+    <span class="sep"></span>
+    <button id="bFit">重新取景 fit()</button>
+    <button id="bTop">俯視偏轉</button>
+    <button id="bLow">低仰角</button>
+    <button id="bHl">高亮 L118（島環繞）</button>
+    <span class="sep"></span>
+    <button id="bFallback" aria-pressed="false">2D 線框備援</button>
+    <span class="sep"></span>
+    <span class="legend" id="legend"></span>
+  </div>
+  <div id="stage">
+    <div class="nc-view3d" id="host" style="position:absolute; inset:0;">
+      <canvas id="cv"></canvas>
+    </div>
+    <div id="fallback"><canvas id="cv2"></canvas></div>
+  </div>
+  <div id="status">啟動中…</div>
+</div>
+
+<script src="../js/core/ns.js"></script>
+<script src="../js/ui/view3d.js"></script>
+<script>
+  // ?real=1：載入 tools/make-fixture-sim.mjs 由 test/fixtures/樣本 C 跑出來的真實 SimResult。
+  // file:// 下 fetch/XHR 會被擋，所以資料是寫成 .js（window.__SIM = {...}）用 <script> 同步載入。
+  if (new URLSearchParams(location.search).get('real')) {
+    document.write('<scr' + 'ipt src="fixture-sim.js"><\/scr' + 'ipt>');
+  }
+</script>
+<script>
+(function () {
+  'use strict';
+  var NC = globalThis.NC;
+  var $ = function (id) { return document.getElementById(id); };
+  var params = new URLSearchParams(location.search);
+  var status = $('status');
+  var log = [];
+  var frozen = false;   // selftest 印完結果後把狀態列凍住，免得被建網格進度訊息蓋掉
+  function say(s, bad) { if (frozen) return; log.push(s); status.textContent = log.slice(-6).join('\n'); if (bad) status.className = 'bad'; }
+
+  // ---------------------------------------------------------------------
+  // 假資料：素材 140×100×20（原點在頂面中心），格 0.5 mm
+  // 特徵：矩形口袋（含圓島）、四階階梯、貫穿圓孔、細長槽
+  // ---------------------------------------------------------------------
+  var CELL = params.get('big') === '2' ? 0.2 : (params.get('big') ? 0.25 : 0.5);
+  var FIX = { min: { x: -70, y: 34, z: -20 }, max: { x: -56, y: 50, z: 6 }, name: '左上壓板' };
+  var stock = { min: { x: -70, y: -50, z: -20 }, max: { x: 70, y: 50, z: 0 }, source: 'user', fixtures: [FIX] };
+  function makeHeight(stage) {
+    var nx = Math.round(140 / CELL) + 1, ny = Math.round(100 / CELL) + 1;
+    var h = new Float32Array(nx * ny);
+    for (var iy = 0; iy < ny; iy++) {
+      for (var ix = 0; ix < nx; ix++) {
+        var x = -70 + ix * CELL, y = -50 + iy * CELL, z = 0;
+        // 1) 矩形口袋 -6，中央留一個 Ø18 圓島（不切）
+        if (x >= -55 && x <= -10 && y >= -25 && y <= 25) {
+          var dr = Math.hypot(x + 32, y);
+          if (dr > 9) z = Math.min(z, -6);
+        }
+        if (stage >= 1) {
+          // 2) 四階階梯（T2）
+          if (x >= 5 && x <= 57 && y >= -40 && y <= -5) {
+            var k = Math.floor((x - 5) / 13);
+            z = Math.min(z, -2 - k * 3);
+          }
+          // 3) 細長槽 -3
+          if (x >= -4 && x <= 4 && y >= -45 && y <= 45) z = Math.min(z, -3);
+        }
+        if (stage >= 2) {
+          // 4) 貫穿圓孔 Ø26（到底）
+          if (Math.hypot(x - 30, y - 25) <= 13) z = Math.min(z, -20);
+          // 5) 邊緣去料（外形銑一刀）
+          if (x >= 62) z = Math.min(z, -12);
+        }
+        // 治具（壓板）：不可切的材料，高度在素材頂面之上 → 視圖用土黃標示
+        if (x >= FIX.min.x && x <= FIX.max.x && y >= FIX.min.y && y <= FIX.max.y) z = FIX.max.z;
+        h[iy * nx + ix] = z;
+      }
+    }
+    return { h: h, nx: nx, ny: ny };
+  }
+  var g0 = makeHeight(0), g1 = makeHeight(1), g2 = makeHeight(2);
+  var sim = {
+    scenario: 'off', cell: CELL, nx: g2.nx, ny: g2.ny, origin: { x: -70, y: -50 },
+    height: g2.h, floorZ: -20,
+    snapshots: [
+      { afterOpIndex: 0, tool: 1, height: g0.h },
+      { afterOpIndex: 1, tool: 2, height: g1.h },
+      { afterOpIndex: 2, tool: 3, height: g2.h }
+    ],
+    events: [], time: { perOp: [3, 4, 5], total: 12 }
+  };
+
+  // ---- 路徑（手寫；行號從 100 起跳）----
+  var segments = [];
+  var sid = 0, line = 100;
+  function seg(kind, tool, from, to, extra) {
+    var s = { id: sid++, line: line, opIndex: 0, tool: tool, kind: kind, from: from, to: to, feed: kind === 'rapid' ? null : 600, path: 'programmed' };
+    if (extra) for (var k in extra) s[k] = extra[k];
+    segments.push(s);
+    return s;
+  }
+  function P(x, y, z) { return { x: x, y: y, z: z }; }
+  // T1：口袋輪廓（兩層）＋圓島環繞
+  (function () {
+    var z, i;
+    for (i = 0; i < 2; i++) {
+      z = i === 0 ? -3 : -6;
+      line++; seg('rapid', 1, P(-32, 0, 8), P(-52, -22, 8));
+      line++; seg('rapid', 1, P(-52, -22, 8), P(-52, -22, z + 1));
+      line++; seg('feed', 1, P(-52, -22, z + 1), P(-52, -22, z));
+      line++; seg('feed', 1, P(-52, -22, z), P(-13, -22, z));
+      line++; seg('feed', 1, P(-13, -22, z), P(-13, 22, z));
+      line++; seg('feed', 1, P(-13, 22, z), P(-52, 22, z));
+      line++; seg('feed', 1, P(-52, 22, z), P(-52, -22, z));
+      // 圓島環繞（整圓）
+      line++; seg('rapid', 1, P(-52, -22, z), P(-18, 0, z));
+      line++; seg('arc', 1, P(-18, 0, z), P(-18, 0, z), { arc: { center: { x: -32, y: 0 }, cw: false, r: 14 } });
+    }
+    line++; seg('rapid', 1, P(-18, 0, -6), P(-18, 0, 8));
+  })();
+  // T2：階梯往復銑
+  (function () {
+    line += 2;
+    var y = -38, z, k;
+    line++; seg('rapid', 2, P(-18, 0, 8), P(5, y, 8));
+    for (k = 0; k < 4; k++) {
+      z = -2 - k * 3;
+      var x0 = 5 + k * 13, x1 = x0 + 13;
+      line++; seg('rapid', 2, P(x0, y, 8), P(x0, y, z + 1));
+      for (var j = 0; j < 5; j++) {
+        var yy = -38 + j * 8;
+        line++; seg('feed', 2, P(x0, yy, z), P(x1, yy, z));
+        if (j < 4) { line++; seg('feed', 2, P(x1, yy, z), P(x1, yy + 8, z)); line++; seg('feed', 2, P(x1, yy + 8, z), P(x0, yy + 8, z)); }
+      }
+      line++; seg('rapid', 2, P(x0, -6, z), P(x0, -6, 8));
+      if (k < 3) { line++; seg('rapid', 2, P(x0, -6, 8), P(x0 + 13, y, 8)); }
+    }
+  })();
+  // T3：鑽孔（貫穿）＋槽
+  (function () {
+    line += 2;
+    line++; seg('rapid', 3, P(60, -6, 8), P(30, 25, 8));
+    line++; seg('rapid', 3, P(30, 25, 8), P(30, 25, 1));
+    line++; seg('drill', 3, P(30, 25, 1), P(30, 25, -20), { sub: 'plunge' });
+    line++; seg('rapid', 3, P(30, 25, -20), P(30, 25, 8));
+    line++; seg('rapid', 3, P(30, 25, 8), P(0, -45, 8));
+    line++; seg('feed', 3, P(0, -45, 8), P(0, -45, -3));
+    line++; seg('feed', 3, P(0, -45, -3), P(0, 45, -3));
+    line++; seg('rapid', 3, P(0, 45, -3), P(0, 45, 8));
+  })();
+  var toolTable = {
+    programKey: 'DEMO3D',
+    tools: [
+      { t: 1, label: '12MM', type: 'endmill', diameter: 12, angle: null, fluteLen: 36, stickout: null, pitch: null, resident: false, probe: false, source: {} },
+      { t: 2, label: '10MM', type: 'endmill', diameter: 10, angle: null, fluteLen: 30, stickout: null, pitch: null, resident: false, probe: false, source: {} },
+      { t: 3, label: 'SG-26.', type: 'drill', diameter: 26, angle: 118, fluteLen: 78, stickout: null, pitch: null, resident: false, probe: false, source: {} }
+    ],
+    offsets: [], updatedAt: new Date().toISOString()
+  };
+
+  // ---------------------------------------------------------------------
+  // ?real=1：改用 test/fixtures/樣本 C 跑出來的真實資料（window.__SIM）
+  // 素材 130×60×15、原點在頂面中心；格距由產生腳本決定（預設 0.25 mm）。
+  // ---------------------------------------------------------------------
+  var REAL = null;
+  if (params.get('real')) {
+    if (!window.__SIM) say('?real=1 但 fixture-sim.js 沒載到（先跑 node tools/make-fixture-sim.mjs）', true);
+    else {
+      REAL = window.__SIM;
+      var f32 = function (a) { return Float32Array.from(a); };
+      sim = {
+        scenario: REAL.scenario, cell: REAL.cell, nx: REAL.nx, ny: REAL.ny, origin: REAL.origin,
+        height: f32(REAL.height), floorZ: REAL.floorZ,
+        snapshots: REAL.snapshots.map(function (s) { return { afterOpIndex: s.afterOpIndex, tool: s.tool, height: f32(s.height) }; }),
+        events: [], time: REAL.time
+      };
+      segments = REAL.segments;
+      stock = REAL.stock;
+      toolTable = REAL.toolTable;
+      // 「模擬到第 N 把刀」選單改成真實的 op 數
+      var sel = $('selSnap');
+      sel.innerHTML = '<option value="">最終成品</option>';
+      REAL.snapshots.forEach(function (s, i) {
+        sel.insertAdjacentHTML('beforeend', '<option value="' + i + '">第 ' + (i + 1) + ' 把刀（T' + s.tool + '）</option>');
+      });
+      $('bHl').textContent = '高亮 L' + segments[Math.floor(segments.length / 2)].line;
+      $('bHl').dataset.line = String(segments[Math.floor(segments.length / 2)].line);
+      say('真實資料 ' + REAL.name + '：格 ' + REAL.nx + '×' + REAL.ny + '（' + REAL.meta.cells.toLocaleString() +
+        ' 格 / ' + REAL.cell + ' mm）· 段 ' + REAL.meta.segments + ' · 作業 ' + REAL.meta.ops +
+        ' · 診斷 ' + REAL.meta.diagnostics + ' · 刀 ' + REAL.toolTable.tools.length + ' 把');
+    }
+  }
+
+  // ---- 圖例 ----
+  (function () {
+    var U = NC.ui.view3d, html = '<span class="chip"><i class="rapid" style="background:#9a9a9a"></i>快速定位</span>';
+    for (var i = 0; i < toolTable.tools.length; i++) {
+      var t = toolTable.tools[i];
+      html += '<span class="chip"><i style="background:' + U.toolColor(t.t) + '"></i>T' + t.t + ' ' + t.label + '</span>';
+    }
+    html += '<span class="nc-view3d-axes">軸：<b class="ax">X</b><b class="ay">Y</b><b class="az">Z</b></span>';
+    $('legend').innerHTML = html;
+  })();
+
+  // ---------------------------------------------------------------------
+  // 建立 3D 視圖
+  // ---------------------------------------------------------------------
+  var view = null, supported = NC.ui.view3d.isSupported();
+  try {
+    view = NC.ui.createView3D($('cv'), { preserveDrawingBuffer: true, forceUint16: !!params.get('u16') });
+  } catch (e) {
+    say('createView3D 例外：' + e.message, true);
+  }
+  if (!view) {
+    say('WebGL 建立失敗（isSupported=' + supported + '）→ 自動切到 2D 線框備援', true);
+    setFallback(true);
+  } else {
+    view.onProgress(function (p) { if (p < 1) say('建網格 ' + Math.round(p * 100) + '%'); });
+    view.onPick(function (l, s) { say('挑到 L' + l + ' ' + s.kind + ' T' + s.tool); });
+    view.setData({ sim: sim, segments: segments, stock: stock, toolTable: toolTable, scenario: 'off' });
+    if (params.get('ds')) { view.setDownsample(params.get('ds')); $('selDs').value = params.get('ds'); }
+    var az = parseFloat(params.get('az')), el = parseFloat(params.get('el'));
+    if (isFinite(az) || isFinite(el)) { view.setCamera({ az: isFinite(az) ? az : -60, el: isFinite(el) ? el : 28 }); view.fit(); }
+    if (params.get('hl')) view.highlightLine(parseInt(params.get('hl'), 10));
+    if (params.get('snap')) { var si = parseInt(params.get('snap'), 10); view.setSnapshot(si); $('selSnap').value = String(si); }
+    if (params.get('norapid')) { view.setVisible({ rapid: false }); $('bRapid').setAttribute('aria-pressed', 'false'); }
+    if (params.get('nostock')) { view.setVisible({ stock: false }); $('bStock').setAttribute('aria-pressed', 'false'); }
+    if (params.get('nosurface')) { view.setVisible({ surface: false }); $('bSurface').setAttribute('aria-pressed', 'false'); }
+    setTimeout(report, 300);
+    setTimeout(report, 1200);
+    if (params.get('fb')) setTimeout(function () { setFallback(true); }, 600);
+  }
+  function report() {
+    if (!view) return;
+    var i = view.getInfo();
+    say('WebGL' + (i.webgl2 ? '2' : '1') + ' · uint32=' + i.uint32 + ' · 降採樣 1/' + i.downsample +
+      ' · 頂點 ' + i.vertices.toLocaleString() + ' · 三角 ' + i.triangles.toLocaleString() +
+      ' · 分塊 ' + i.chunks + ' · 路徑頂點 ' + i.pathVertices +
+      ' · 畫布 ' + Math.round(i.size.w) + '×' + Math.round(i.size.h) + '@' + i.size.dpr +
+      ' · 相機 az=' + view.getCamera().az.toFixed(1) + ' el=' + view.getCamera().el.toFixed(1) +
+      ' · reducedMotion=' + i.reducedMotion + ' · 格 ' + sim.nx + '×' + sim.ny + '（' + (sim.nx * sim.ny).toLocaleString() + ' 格）');
+  }
+
+  // ---------------------------------------------------------------------
+  // 按鈕
+  // ---------------------------------------------------------------------
+  function toggle(btn, fn) {
+    btn.addEventListener('click', function () {
+      var on = btn.getAttribute('aria-pressed') !== 'true';
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      fn(on);
+    });
+  }
+  toggle($('bRapid'), function (on) { if (view) view.setVisible({ rapid: on }); drawFallback(); });
+  toggle($('bStock'), function (on) { if (view) view.setVisible({ stock: on }); drawFallback(); });
+  toggle($('bSurface'), function (on) { if (view) view.setVisible({ surface: on }); drawFallback(); });
+  $('selDs').addEventListener('change', function () {
+    if (view) { view.setDownsample(this.value === 'auto' ? 'auto' : parseInt(this.value, 10)); setTimeout(report, 400); }
+    fbDs = this.value === 'auto' ? 4 : parseInt(this.value, 10);
+    drawFallback();
+  });
+  $('selSnap').addEventListener('change', function () {
+    var v = this.value === '' ? null : parseInt(this.value, 10);
+    if (view) { view.setSnapshot(v); setTimeout(report, 300); }
+    fbHeight = v == null ? sim.height : sim.snapshots[v].height;
+    drawFallback();
+  });
+  $('bFit').addEventListener('click', function () { if (view) view.fit(); report(); });
+  $('bTop').addEventListener('click', function () { if (view) { view.setCamera({ az: -35, el: 72 }); view.fit(); } report(); });
+  $('bLow').addEventListener('click', function () { if (view) { view.setCamera({ az: -110, el: 6 }); view.fit(); } report(); });
+  $('bHl').addEventListener('click', function () { if (view) view.highlightLine(parseInt(this.dataset.line || '118', 10)); });
+  toggle($('bFallback'), function (on) { setFallback(on); });
+
+  // ---------------------------------------------------------------------
+  // 2D 線框備援：用同一份 buildMesh 幾何，純 canvas 2D 投影畫線
+  // （WebGL 起不來時用來驗證幾何是否正確）
+  // ---------------------------------------------------------------------
+  var fbOn = false, fbDs = 4, fbHeight = null;
+  function setFallback(on) {
+    fbOn = on;
+    $('fallback').classList.toggle('on', on);
+    $('bFallback').setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (on) drawFallback();
+  }
+  function drawFallback() {
+    if (!fbOn) return;
+    var U = NC.ui.view3d;
+    var cv = $('cv2'), ctx = cv.getContext('2d');
+    var w = cv.clientWidth || 1200, h = cv.clientHeight || 800;
+    cv.width = w; cv.height = h;
+    ctx.fillStyle = '#fbfbfb'; ctx.fillRect(0, 0, w, h);
+    var mesh = U.buildMesh(sim, { downsample: Math.max(2, fbDs), height: fbHeight || sim.height });
+    var b = U.sceneBounds({ sim: sim, stock: stock, segments: segments });
+    var target = [(b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2];
+    var r = 0.5 * Math.hypot(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z);
+    var cam = view ? view.getCamera() : { az: -60, el: 28, dist: r * 2.6, fov: 45 };
+    var az = cam.az * Math.PI / 180, el = cam.el * Math.PI / 180, dist = cam.dist || r * 2.6;
+    var eye = [target[0] + dist * Math.cos(el) * Math.cos(az), target[1] + dist * Math.cos(el) * Math.sin(az), target[2] + dist * Math.sin(el)];
+    var proj = U.mat4(), viewM = U.mat4(), mvp = U.mat4();
+    U.mat4Perspective(proj, (cam.fov || 45) * Math.PI / 180, w / h, dist * 0.01, dist + r * 6);
+    U.mat4LookAt(viewM, eye, target, [0, 0, 1]);
+    U.mat4Mul(mvp, proj, viewM);
+    var P = mesh.positions, q, i, pts, p;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(40,70,140,0.55)';
+    ctx.beginPath();
+    var top = mesh.counts.topQuads;
+    for (q = 0; q < mesh.counts.quads; q++) {
+      if (q < top && (q % 5) !== 0) continue;      // 頂面抽稀，牆面全畫
+      pts = [];
+      for (i = 0; i < 4; i++) {
+        p = U.projectPoint(mvp, P[(q * 4 + i) * 3], P[(q * 4 + i) * 3 + 1], P[(q * 4 + i) * 3 + 2], w, h);
+        if (!p) { pts = null; break; }
+        pts.push(p);
+      }
+      if (!pts) continue;
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+    }
+    ctx.stroke();
+    // 路徑
+    var pl = U.buildPathLines(segments, {});
+    ctx.lineWidth = 1.2;
+    for (var ri = 0; ri < pl.ranges.length; ri++) {
+      var rg = pl.ranges[ri];
+      if (rg.cls === 'rapid' && $('bRapid').getAttribute('aria-pressed') !== 'true') continue;
+      ctx.strokeStyle = rg.cls === 'rapid' ? '#9a9a9a' : U.toolColor(rg.tool);
+      ctx.beginPath();
+      for (i = rg.first; i < rg.first + rg.count; i += 2) {
+        var a = U.projectPoint(mvp, pl.positions[i * 3], pl.positions[i * 3 + 1], pl.positions[i * 3 + 2], w, h);
+        var c = U.projectPoint(mvp, pl.positions[(i + 1) * 3], pl.positions[(i + 1) * 3 + 1], pl.positions[(i + 1) * 3 + 2], w, h);
+        if (!a || !c) continue;
+        ctx.moveTo(a.x, a.y); ctx.lineTo(c.x, c.y);
+      }
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#a11';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText('2D 線框備援（僅驗證幾何，非 WebGL 畫面）', 12, h - 12);
+  }
+  // ---------------------------------------------------------------------
+  // 自我測試：?selftest=1 用合成事件驗證旋轉／縮放／平移／雙擊 fit／點擊挑選／dispose
+  // （headless 截圖沒辦法真的動滑鼠，只能這樣驗）
+  // ---------------------------------------------------------------------
+  function selftest() {
+    if (!view) { say('SELFTEST 略過：沒有 WebGL', true); return; }
+    var results = [], fails = 0;
+    function chk(name, ok, extra) { results.push((ok ? 'PASS ' : 'FAIL ') + name + (extra ? ' … ' + extra : '')); if (!ok) fails++; }
+    var cv = $('cv');
+    function pev(type, o) {
+      var init = { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        button: 0, buttons: 1, clientX: 0, clientY: 0 };
+      for (var k in o) init[k] = o[k];
+      cv.dispatchEvent(typeof PointerEvent === 'function' ? new PointerEvent(type, init)
+        : new MouseEvent(type.replace('pointer', 'mouse'), init));
+    }
+    var r = cv.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+
+    // 1) 左鍵拖曳＝軌道旋轉
+    var c0 = view.getCamera();
+    pev('pointerdown', { clientX: cx, clientY: cy });
+    pev('pointermove', { clientX: cx + 60, clientY: cy + 20 });
+    pev('pointermove', { clientX: cx + 120, clientY: cy + 40 });
+    pev('pointerup', { clientX: cx + 120, clientY: cy + 40, buttons: 0 });
+    var c1 = view.getCamera();
+    chk('左鍵拖曳旋轉', Math.abs(c1.az - c0.az) > 1 && Math.abs(c1.el - c0.el) > 0.5,
+      'az ' + c0.az.toFixed(1) + ' → ' + c1.az.toFixed(1) + ' , el ' + c0.el.toFixed(1) + ' → ' + c1.el.toFixed(1));
+
+    // 2) 仰角夾在 -5° ~ 89°
+    var i;
+    for (i = 0; i < 30; i++) { pev('pointerdown', { clientX: cx, clientY: cy }); pev('pointermove', { clientX: cx, clientY: cy - 200 }); pev('pointerup', { clientX: cx, clientY: cy - 200, buttons: 0 }); }
+    var cUp = view.getCamera();
+    chk('仰角下限夾住（>= -5）', cUp.el >= -5.001, 'el=' + cUp.el.toFixed(2));
+    for (i = 0; i < 30; i++) { pev('pointerdown', { clientX: cx, clientY: cy }); pev('pointermove', { clientX: cx, clientY: cy + 200 }); pev('pointerup', { clientX: cx, clientY: cy + 200, buttons: 0 }); }
+    var cDn = view.getCamera();
+    chk('仰角上限夾住（<= 89）', cDn.el <= 89.001, 'el=' + cDn.el.toFixed(2));
+
+    view.setCamera({ az: -60, el: 28 }); view.fit();
+
+    // 3) 滾輪縮放
+    var d0 = view.getCamera().dist;
+    cv.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -400, clientX: cx, clientY: cy }));
+    var d1 = view.getCamera().dist;
+    cv.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 400, clientX: cx, clientY: cy }));
+    var d2 = view.getCamera().dist;
+    chk('滾輪縮放', d1 < d0 - 1e-6 && d2 > d1, d0.toFixed(1) + ' -> ' + d1.toFixed(1) + ' -> ' + d2.toFixed(1));
+
+    // 4) 右鍵拖曳＝平移
+    var t0 = view.getCamera().target.slice();
+    pev('pointerdown', { clientX: cx, clientY: cy, button: 2, buttons: 2 });
+    pev('pointermove', { clientX: cx + 80, clientY: cy, buttons: 2 });
+    pev('pointerup', { clientX: cx + 80, clientY: cy, button: 2, buttons: 0 });
+    var t1 = view.getCamera().target;
+    chk('右鍵拖曳平移', Math.hypot(t1[0] - t0[0], t1[1] - t0[1], t1[2] - t0[2]) > 1,
+      'target ' + t0.map(function (v) { return v.toFixed(1); }).join(',') + ' -> ' + t1.map(function (v) { return v.toFixed(1); }).join(','));
+
+    // 5) 雙擊＝fit()
+    cv.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+    var t2 = view.getCamera().target;
+    chk('雙擊 fit()', Math.hypot(t2[0] - t0[0], t2[1] - t0[1], t2[2] - t0[2]) < 1e-6,
+      'target 回到 ' + t2.map(function (v) { return v.toFixed(1); }).join(','));
+
+    // 6) 點擊挑選：把某段中點投到畫面上再點下去
+    var target = segments[3];
+    var mid = view.worldToScreen((target.from.x + target.to.x) / 2, (target.from.y + target.to.y) / 2, (target.from.z + target.to.z) / 2);
+    var picked = null;
+    view.onPick(function (l, sg) { picked = { line: l, seg: sg }; });
+    if (mid) {
+      pev('pointerdown', { clientX: r.left + mid[0], clientY: r.top + mid[1] });
+      pev('pointerup', { clientX: r.left + mid[0], clientY: r.top + mid[1], buttons: 0 });
+    }
+    chk('點擊挑選 onPick', !!picked && picked.line === target.line,
+      picked ? ('挑到 L' + picked.line + '（預期 L' + target.line + '）') : '沒有回呼');
+    picked = null;
+    if (mid) {
+      pev('pointerdown', { clientX: r.left + mid[0] + 60, clientY: r.top + mid[1] + 60 });
+      pev('pointerup', { clientX: r.left + mid[0] + 60, clientY: r.top + mid[1] + 60, buttons: 0 });
+    }
+    chk('離 60 px 不誤挑', picked === null);
+    view.onPick(function (l, sg) { say('挑到 L' + l + ' ' + sg.kind + ' T' + sg.tool); });
+
+    // 7) setVisible / highlight / setSnapshot
+    view.setVisible({ rapid: false, tools: new Set([1]) });
+    var vis = view.getVisible();
+    chk('setVisible', vis.rapid === false && vis.tools instanceof Set && vis.tools.has(1));
+    view.setVisible({ rapid: true, tools: null });
+    view.highlightLine(118); view.highlightTool(1); view.highlightTool(null);
+    view.setSnapshot(0);
+    var i0 = view.getInfo();
+    view.setSnapshot(null);
+    var i1 = view.getInfo();
+    chk('setSnapshot 切換', i0.snapshotIndex === 0 && i1.snapshotIndex === null,
+      '第 1 把刀 -> 最終；拓樸相容時走只改 Z 的快路徑，三角數維持 ' + i1.triangles);
+
+    // 8) 降採樣旗標 → 9) dispose 後重建
+    view.setDownsample(4);
+    setTimeout(function () {
+      var i2 = view.getInfo();
+      chk('降採樣 1/4', i2.downsample === 4, '頂點 ' + i2.vertices);
+      view.setDownsample(1);
+      var before = view.getInfo();
+      try { view.dispose(); chk('dispose() 不丟例外', true, '釋放前 ' + before.vertices + ' 頂點'); }
+      catch (e) { chk('dispose() 不丟例外', false, e.message); }
+      view = NC.ui.createView3D($('cv'), { preserveDrawingBuffer: true });
+      chk('dispose 後可重建', !!view);
+      if (view) {
+        view.setData({ sim: sim, segments: segments, stock: stock, toolTable: toolTable, scenario: 'off' });
+        view.setCamera({ az: -60, el: 28 });
+        setTimeout(function () { view.fit(); }, 200);
+      }
+      window.ncDemo.view = view;
+      results.push(fails ? ('=== ' + fails + ' 項失敗 ===') : ('=== 全部通過（' + results.length + ' 項）==='));
+      frozen = true;
+      status.textContent = results.join('\n');
+      if (fails) status.className = 'bad';
+      window.ncSelftest = { results: results, fails: fails };
+    }, 400);
+  }
+  if (params.get('selftest')) setTimeout(selftest, 700);
+
+  // ---------------------------------------------------------------------
+  // ?bench=1：連續旋轉 90 幀，量平均畫格時間（headless 是 SwiftShader 軟體算圖，
+  // 真實 GPU 會快得多；這裡主要驗證迴圈與 draw call 正常、不會爆錯）
+  // ---------------------------------------------------------------------
+  function bench() {
+    if (!view) return;
+    var n = 0, N = 90, t0 = 0, az = view.getCamera().az;
+    function frame() {
+      if (n === 0) t0 = performance.now();
+      view.setCamera({ az: az + n * 3 });
+      view.render();
+      n++;
+      if (n < N) requestAnimationFrame(frame);
+      else {
+        var dt = (performance.now() - t0) / N;
+        var i = view.getInfo();
+        frozen = false;
+        say('BENCH ' + N + ' 幀：平均 ' + dt.toFixed(1) + ' ms/幀（' + (1000 / dt).toFixed(1) + ' fps）· ' +
+          i.triangles.toLocaleString() + ' 三角 · ' + i.chunks + ' 分塊 · 格 ' + sim.nx + '×' + sim.ny +
+          ' = ' + (sim.nx * sim.ny).toLocaleString() + ' 格 · 降採樣 1/' + i.downsample);
+        frozen = true;
+        window.ncBench = { msPerFrame: dt, info: i, cells: sim.nx * sim.ny };
+      }
+    }
+    // 等網格建好再開始
+    var wait = setInterval(function () {
+      if (!view.getInfo().building && view.getInfo().triangles > 0) { clearInterval(wait); requestAnimationFrame(frame); }
+    }, 100);
+  }
+  if (params.get('bench')) setTimeout(bench, 500);
+
+  window.addEventListener('resize', function () { if (view) view.resize(); drawFallback(); });
+  window.ncDemo = { view: view, sim: sim, segments: segments, stock: stock, report: report };
+})();
+</script>
+</body>
+</html>

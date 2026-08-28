@@ -1,0 +1,103 @@
+/* NC 預演台 — 3D 成品視圖（view3d.js）樣式。
+ * 容器給 .nc-view3d（position:relative），canvas 以 CSS 撐滿容器；
+ * 像素尺寸由 view3d.js 依 devicePixelRatio 同步。HUD 覆蓋層由 view3d.js 建立在 canvas 的父節點下。 */
+.nc-view3d {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  background: #fbfbfb;
+  overflow: hidden;
+}
+/* canvas 的「版面尺寸」一定要由 CSS 給（這裡的 100%），像素尺寸才由 view3d.js 乘上
+ * devicePixelRatio 寫進 width/height 屬性。不要另外設內聯的 style.width／height，
+ * 那會蓋掉這條規則，拖分隔線或縮視窗時 canvas 就不會跟著縮了。 */
+.nc-view3d canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;          /* 讓 pointer 事件處理旋轉／縮放，不被瀏覽器手勢吃掉 */
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+}
+.nc-view3d canvas.is-dragging { cursor: grabbing; }
+
+/* 抬頭資訊（3D 沒辦法像 2D 直接在 canvas 上寫字，改用覆蓋層 div） */
+.nc-view3d-hud {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  pointer-events: none;        /* 不擋滑鼠拖曳 */
+  font: 12px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  color: #333;
+  z-index: 2;
+}
+.nc-view3d-hud .tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border: 1px solid #d8d8d8;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.86);
+  white-space: nowrap;
+}
+.nc-view3d-hud .tag.warn { border-color: #e0b23c; background: rgba(255, 246, 220, 0.92); color: #7a5300; }
+.nc-view3d-hud .tag.build { border-color: #6aa3e0; background: rgba(232, 243, 255, 0.92); color: #14508f; }
+
+/* 視圖右下角的小工具列（app / demo 可用） */
+.nc-view3d-tools {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+  font: 12px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+}
+.nc-view3d-tools button {
+  padding: 3px 9px;
+  border: 1px solid #cfcfcf;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #333;
+  cursor: pointer;
+}
+.nc-view3d-tools button:hover { background: #fff; border-color: #9aa; }
+.nc-view3d-tools button[aria-pressed="true"] { background: #e8f3ff; border-color: #6aa3e0; color: #14508f; }
+
+/* 座標軸圖例：紅 X／綠 Y／藍 Z */
+.nc-view3d-axes {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 11px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  color: #555;
+}
+.nc-view3d-axes b { font-weight: 600; }
+.nc-view3d-axes .ax { color: #d62728; }
+.nc-view3d-axes .ay { color: #2ca02c; }
+.nc-view3d-axes .az { color: #1f77b4; }
+
+/* 不支援 WebGL 時的提示（呼叫端把 createView3D 的 null 換成這塊） */
+.nc-view3d-unsupported {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 16px;
+  text-align: center;
+  font: 13px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  color: #7a5300;
+  background: #fff8e6;
+}
+
+/* prefers-reduced-motion 的實際處理在 view3d.js（拖曳放手後不做慣性），CSS 這邊只要確定
+ * 覆蓋層不要有任何轉場動畫即可。 */
+@media (prefers-reduced-motion: reduce) {
+  .nc-view3d-hud .tag,
+  .nc-view3d-tools button { transition: none; }
+}

@@ -1,0 +1,50 @@
+/* NC 預演台 — 2D 視圖（view2d.js）樣式。
+ * 容器給 .nc-view2d，canvas 以 CSS 撐滿容器；像素尺寸由 view2d.js 依 devicePixelRatio 同步。 */
+.nc-view2d {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  background: #fbfbfb;
+  overflow: hidden;
+}
+.nc-view2d canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;          /* 讓 pointer 事件處理拖曳／縮放，不被瀏覽器手勢吃掉 */
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+}
+.nc-view2d canvas.is-dragging { cursor: grabbing; }
+
+/* 刀具色圖例（app / demo 可用）：<span class="chip"><i style="background:#…"></i>T1 10MM</span> */
+.nc-view2d-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font: 12px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  color: #333;
+}
+.nc-view2d-legend .chip { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.nc-view2d-legend .chip i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; }
+.nc-view2d-legend .chip i.rapid { background: repeating-linear-gradient(90deg, #9a9a9a 0 4px, transparent 4px 7px); }
+.nc-view2d-legend .chip i.programmed { height: 1px; }
+
+/* 色階說明條：頂面淺灰 → 深處深藍 */
+.nc-view2d-scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 11px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  color: #555;
+}
+.nc-view2d-scale i {
+  display: inline-block;
+  width: 90px;
+  height: 10px;
+  border: 1px solid #bbb;
+  background: linear-gradient(90deg, #ded8ce 0%, #8a98c0 40%, #0e2268 100%);
+}

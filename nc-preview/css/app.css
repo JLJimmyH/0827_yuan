@@ -1,0 +1,421 @@
+/*
+ * NC 預演台 — 整體版面（index.html / js/ui/app.js）
+ * 色彩沿用 panels.css 的 CSS 變數（--nc-*），這裡只補版面與工具列自己的樣式。
+ * 版面：頂列工具列 ─ 左 45%（編輯器 + 模態）｜右 55%（視圖 + 分頁）。
+ */
+
+/*
+ * 這個工具刻意只做淺色（契約 §8），但一定要明講——否則 Chrome 的「自動深色模式」
+ * 會把 HTML 強制反白、canvas 卻不會跟著反：視圖區會變成深色介面正中央一大塊亮白，
+ * 刀具表的常駐刀星號（淺灰 vs 金色）也會全部變成同一色，看起來每把刀都是常駐刀。
+ */
+:root {
+  color-scheme: only light;
+  --app-bar-h: 44px;
+  --app-gap: 8px;
+  --app-head-h: 26px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--nc-bg-alt, #f6f7f9);
+  color: var(--nc-text, #1f2429);
+  font: 13px var(--nc-font, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", Arial, sans-serif);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ==================== 頂列工具列 ==================== */
+.app-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--app-gap);
+  min-height: var(--app-bar-h);
+  padding: 5px 10px;
+  background: linear-gradient(#ffffff, #f2f4f7);
+  border-bottom: 1px solid var(--nc-border, #d9dde3);
+  white-space: nowrap;
+}
+.app-bar__title {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  color: var(--nc-accent, #2b6cb0);
+  padding-right: 4px;
+  border-right: 1px solid var(--nc-border, #d9dde3);
+  margin-right: 2px;
+}
+.app-bar__group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.app-bar__label {
+  color: var(--nc-muted, #6b7480);
+  font-size: 12px;
+}
+.app-bar__spacer { flex: 1 1 auto; min-width: 8px; }
+.app-hidden-file { display: none; }
+
+.app-bar__banner {
+  margin: 0;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-bar__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--nc-muted, #6b7480);
+  max-width: 46ch;
+  overflow: hidden;
+}
+.app-status__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-status__counts { display: flex; gap: 4px; flex: none; }
+.app-status__counts .nc-pill { min-width: 0; padding: 0 5px; }
+.app-progress {
+  flex: none;
+  width: 70px;
+  height: 5px;
+  border-radius: 3px;
+  background: #dfe3e8;
+  overflow: hidden;
+}
+.app-progress__bar {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--nc-accent, #2b6cb0);
+  transition: width 0.12s linear;
+}
+
+/* ==================== 主體 ==================== */
+.app-main {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+.app-left {
+  flex: 0 0 45%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--app-gap);
+  gap: 0;
+}
+.app-right {
+  flex: 1 1 55%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--app-gap) var(--app-gap) var(--app-gap) 0;
+  gap: 0;
+}
+.app-splitter {
+  flex: none;
+  height: var(--app-gap);
+}
+
+.app-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--nc-bg, #fff);
+  border: 1px solid var(--nc-border, #d9dde3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.app-pane--editor { flex: 3 1 0; }
+.app-pane--modal  { flex: 2 1 0; min-height: 120px; }
+.app-pane--view   { flex: 3 1 0; min-height: 220px; }
+.app-pane--tabs   { flex: 2 1 0; min-height: 150px; }
+
+.app-pane__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--app-head-h);
+  padding: 0 8px;
+  background: var(--nc-bg-alt, #f6f7f9);
+  border-bottom: 1px solid var(--nc-border, #d9dde3);
+  font-size: 12px;
+}
+.app-pane__title { font-weight: 600; }
+.app-pane__sub {
+  color: var(--nc-muted, #6b7480);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-pane__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+.app-pane__body--scroll { overflow: auto; }
+.app-pane__body--scroll > .nc-panel { padding: 6px 8px; }
+
+/* 編輯器要撐滿它的格子 */
+.app-pane--editor .app-pane__body > .nc-editor { border: 0; height: 100%; }
+.nc-editor { --nc-editor-info-w: 26ch; }
+
+/* ==================== 視圖工具列 ==================== */
+.app-view-tools {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 8px;
+  background: var(--nc-bg-alt, #f6f7f9);
+  border-bottom: 1px solid var(--nc-border, #d9dde3);
+  font-size: 12px;
+}
+.app-view-tools__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+.app-view-tools__row--wrap { flex-wrap: wrap; row-gap: 2px; }
+.app-view-tools__label { color: var(--nc-muted, #6b7480); flex: none; }
+/* 刀具過濾自成一列：刀多的時候（樣本 A 有 15 把）「刀具」標籤才不會被留在上一行，
+ * 讓人誤以為第二行的勾選框屬於「顯示」那一組。 */
+.app-view-tools__row--tools { align-items: flex-start; }
+.app-view-tools__label--tools { padding-top: 1px; }
+.app-view-tools__sep {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: var(--nc-border, #d9dde3);
+}
+
+.app-seg {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--nc-border, #d9dde3);
+  border-radius: 3px;
+  overflow: hidden;
+  background: #fff;
+}
+.app-seg__btn {
+  font: inherit;
+  padding: 2px 9px;
+  border: 0;
+  border-right: 1px solid var(--nc-border, #d9dde3);
+  background: #fff;
+  color: var(--nc-text, #1f2429);
+  cursor: pointer;
+}
+.app-seg__btn:last-child { border-right: 0; }
+.app-seg__btn:hover { background: var(--nc-bg-alt, #f6f7f9); }
+.app-seg__btn.is-on { background: var(--nc-accent, #2b6cb0); color: #fff; }
+
+.app-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.app-slider--wide { flex: 1 1 100%; }
+.app-slider__label { color: var(--nc-muted, #6b7480); flex: none; }
+.app-slider input[type=range] { flex: 1 1 auto; min-width: 60px; margin: 0; }
+.app-slider input[type=range]:disabled { opacity: 0.45; }
+.app-slider__value {
+  flex: none;
+  min-width: 11ch;
+  font-family: var(--nc-mono, Consolas, monospace);
+  font-size: 11px;
+  color: var(--nc-muted, #6b7480);
+}
+
+.app-tool-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+.app-tool-filter .app-toolchk {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.app-tool-filter .app-toolchk input { margin: 0; }
+.app-tool-filter .app-toolchk i {
+  display: inline-block;
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+}
+.app-tool-filter .app-toolchk.is-off { opacity: 0.45; }
+.app-tool-filter .nc-muted { font-size: 11px; }
+
+.app-view-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 8px;
+  border-top: 1px solid var(--nc-border, #d9dde3);
+  background: var(--nc-bg-alt, #f6f7f9);
+  font-size: 11px;
+  color: var(--nc-muted, #6b7480);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.app-view-foot__hint { overflow: hidden; text-overflow: ellipsis; }
+
+/* ==================== 分頁 ==================== */
+.app-tabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  height: var(--app-head-h);
+  background: var(--nc-bg-alt, #f6f7f9);
+  border-bottom: 1px solid var(--nc-border, #d9dde3);
+}
+.app-tab {
+  font: inherit;
+  font-size: 12px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--nc-border, #d9dde3);
+  background: transparent;
+  color: var(--nc-muted, #6b7480);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.app-tab:hover { background: #eceff3; }
+.app-tab.is-on {
+  background: var(--nc-bg, #fff);
+  color: var(--nc-text, #1f2429);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--nc-accent, #2b6cb0);
+}
+.app-tab__badge {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--nc-error, #c62828);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+.app-tab__badge.is-warn { background: var(--nc-warning, #b26a00); }
+.app-tab-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 8px 10px;
+}
+.app-tab-body > .nc-panel { padding: 0; }
+
+/* ==================== 整頁拖放 ==================== */
+.app-drop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(43, 108, 176, 0.14);
+  backdrop-filter: blur(1px);
+  pointer-events: none;
+}
+.app.is-dropping .app-drop { display: flex; }
+.app-drop__box {
+  padding: 22px 40px;
+  border: 3px dashed var(--nc-accent, #2b6cb0);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--nc-accent, #2b6cb0);
+  font-size: 18px;
+  font-weight: 700;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+}
+
+/* ==================== 其他 ==================== */
+.app-empty {
+  padding: 18px 12px;
+  color: var(--nc-muted, #6b7480);
+  text-align: center;
+  line-height: 1.9;
+}
+.app-empty kbd {
+  font: 12px var(--nc-mono, Consolas, monospace);
+  padding: 1px 5px;
+  border: 1px solid var(--nc-border, #d9dde3);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: #fff;
+}
+
+/* 視窗較窄時左右比例放寬一點 */
+@media (max-width: 1200px) {
+  .app-left { flex-basis: 42%; }
+  .nc-editor { --nc-editor-info-w: 18ch; }
+}
+
+
+/* ---- 頂列：素材推估橫幅（可點，跳到「素材與設定」分頁） ---- */
+#stockBanner {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #a8c6e8;
+  background: var(--nc-info-bg, #eaf2fb);
+  color: var(--nc-info, #1b5fa8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30vw;
+}
+#stockBanner:hover { filter: brightness(0.97); }
+
+/* 同步分析（還沒跑模擬）時的狀態列註記 */
+.nc-pill-pending {
+  background: #eef0f3;
+  color: #5b6472;
+  border: 1px dashed #c3c9d2;
+}
+
+
+/* ==================== 刀庫分頁 ==================== */
+/* 拖放提示現在有兩行（NC 程式／刀具表 CSV），置中才不會偏 */
+.app-drop__box { text-align: center; line-height: 1.35; }
+/* 刀位圖是固定尺寸的方塊，分頁窄的時候讓它自己捲，不要把整個版面推寬 */
+#tabMag { overflow: auto; }
+#tabMag .nc-panel-mag { padding: 2px 0 8px; }

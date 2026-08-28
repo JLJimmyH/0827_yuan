@@ -1,0 +1,963 @@
+/*
+ * NC 預演台 — 2D 視圖（Canvas 2D）。
+ * NC.ui.createView2D(canvas) → View
+ *   setData({segments, sim, stock, toolTable, scenario})
+ *   setMode('top'|'sectionX'|'sectionY')   setSection(v)   setSnapshot(i|null)
+ *   highlightLine(n)   highlightTool(t|null)   setVisible({rapid, feed, stock, tools})
+ *   onPick((line, seg) => …)   fit()   render()   destroy()
+ * 俯視：素材外框、heightmap 色階（頂面淺灰 → 深處深藍，離屏 canvas putImageData 後 drawImage 縮放）、
+ *       路徑（rapid 灰虛線、feed 依刀具色 12 色循環、compensated 實線、programmed 細線、drill 短線＋孔標記）、
+ *       目前高亮行（粗亮色）、高亮刀具（其他淡化）。
+ * 剖面：sectionX / sectionY 畫該位置的高度折線、素材輪廓、投影路徑與標尺。
+ * 互動：滾輪縮放（以滑鼠為中心）、拖曳平移、雙擊 fit、hover 顯示工件座標與該格深度、點擊最近的段 → onPick。
+ * 純邏輯（色階、影像、剖面、挑選、fit 變換）另掛在 NC.ui.view2dUtil，方便在 Node 測。
+ */
+(function (NC) {
+  'use strict';
+  NC.ui = NC.ui || {};
+
+  const util = NC.util || {};
+  const clamp = util.clamp || ((v, lo, hi) => Math.min(hi, Math.max(lo, v)));
+  const fmt = util.fmt || ((v, d = 3) => (v == null ? '—' : String(Math.round(v * 1000) / 1000)));
+  const TAU = Math.PI * 2;
+
+  // 刀具色（12 色循環，T1 → 第 0 色）
+  const TOOL_COLORS = ['#d62728', '#1f77b4', '#2ca02c', '#ff7f0e', '#9467bd', '#17becf', '#e377c2', '#8c564b', '#bcbd22', '#0b8f8f', '#c05a00', '#5b3fd6'];
+  // 色階端點：頂面暖灰 → 深處深藍；高於頂面（治具）用土黃。
+  // 頂面色一定要和畫布背景（C.bg #fbfbfb）分得開——「哪裡還是實心」是這個工具的核心資訊，
+  // 舊值 [236,236,236] 對背景只有 1.13:1，整片素材看起來像什麼都沒有。
+  const TOP_RGB = [222, 216, 206];
+  const DEEP_RGB = [14, 34, 104];
+  const FIXTURE_RGB = [196, 160, 120];
+  const C = {
+    bg: '#fbfbfb',
+    stockFill: 'rgba(214,214,214,0.55)',
+    stockFillOut: 'rgba(214,214,214,0.2)',
+    stockLine: '#4a4a4a',
+    fixtureFill: 'rgba(196,160,120,0.5)',
+    fixtureLine: '#8b5a2b',
+    rapid: '#9a9a9a',
+    highlight: '#ff2d55',
+    halo: 'rgba(255,255,255,0.95)',
+    text: '#222',
+    hudBg: 'rgba(255,255,255,0.86)',
+    hudAlertBg: 'rgba(255,214,140,0.95)',
+    ruler: '#8a8a8a',
+    rulerText: '#555',
+    grid: 'rgba(0,0,0,0.05)',
+    axis: 'rgba(0,0,0,0.35)',
+    section: '#ff9500',
+    profileFill: 'rgba(70,120,210,0.28)',
+    profileLine: '#1d4ed8',
+    zero: 'rgba(0,0,0,0.3)',
+  };
+  const PICK_PX = 6;           // 點選距離門檻（CSS px）
+  const DRAG_PX = 3;           // 超過此位移視為拖曳而非點擊
+  const PAD = { l: 46, r: 14, t: 30, b: 28 };  // 標尺／抬頭顯示留白（CSS px）
+  const FONT = '11px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif';
+  const FONT_HUD = '12px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif';
+
+  // ---------------------------------------------------------------------------
+  // 純函式（可在 Node 測）
+  // ---------------------------------------------------------------------------
+  /** 刀具色：T 號 12 色循環；null → 灰藍 */
+  function toolColor(t) {
+    if (t == null || !Number.isFinite(t)) return '#607d8b';
+    const i = (((Math.round(t) - 1) % TOOL_COLORS.length) + TOOL_COLORS.length) % TOOL_COLORS.length;
+    return TOOL_COLORS[i];
+  }
+
+  /** 高度 → 色階 [r,g,b]。h ≥ zTop 淺灰；h ≤ zBottom 深藍；高於頂面（治具）土黃。 */
+  function depthColor(h, zTop, zBottom) {
+    if (h > zTop + 1e-6) return FIXTURE_RGB.slice();
+    const span = zTop - zBottom;
+    let f = span > 1e-9 ? (zTop - h) / span : (h < zTop ? 1 : 0);
+    f = Math.pow(clamp(f, 0, 1), 0.6);   // 讓淺切也看得出來
+    return [0, 1, 2].map((k) => Math.round(TOP_RGB[k] + (DEEP_RGB[k] - TOP_RGB[k]) * f));
+  }
+
+  /**
+   * 把 heightmap 轉成 RGBA 影像資料（列已上下翻轉：影像第 0 列 = 工件 Y 最大那列）。
+   * @returns {{width:number,height:number,data:Uint8ClampedArray}}
+   */
+  function buildHeightImage(sim, heightArr, zTop, zBottom) {
+    const nx = sim.nx, ny = sim.ny;
+    const arr = heightArr || sim.height;
+    const data = new Uint8ClampedArray(nx * ny * 4);
+    const span = zTop - zBottom;
+    // 256 階查表
+    const lut = new Uint8ClampedArray(256 * 3);
+    for (let i = 0; i < 256; i++) {
+      const rgb = depthColor(zTop - (span * i) / 255, zTop, zBottom);
+      lut[i * 3] = rgb[0]; lut[i * 3 + 1] = rgb[1]; lut[i * 3 + 2] = rgb[2];
+    }
+    for (let iy = 0; iy < ny; iy++) {
+      const row = ny - 1 - iy;
+      for (let ix = 0; ix < nx; ix++) {
+        const h = arr[iy * nx + ix];
+        const o = (row * nx + ix) * 4;
+        if (h > zTop + 1e-6) {
+          data[o] = FIXTURE_RGB[0]; data[o + 1] = FIXTURE_RGB[1]; data[o + 2] = FIXTURE_RGB[2];
+        } else {
+          const k = span > 1e-9 ? clamp(Math.round(((zTop - h) / span) * 255), 0, 255) : 0;
+          data[o] = lut[k * 3]; data[o + 1] = lut[k * 3 + 1]; data[o + 2] = lut[k * 3 + 2];
+        }
+        data[o + 3] = 255;
+      }
+    }
+    return { width: nx, height: ny, data };
+  }
+
+  /*
+   * 格子解讀（與 simulation.js 一致）：格 (ix,iy) 的中心在 origin + (ix·cell, iy·cell)，
+   * 即節點式格網，覆蓋範圍為 origin − cell/2 … origin + (n − 0.5)·cell；查表用四捨五入。
+   */
+  /** 模擬格覆蓋的工件座標範圍 {minX,minY,maxX,maxY} */
+  function simExtent(sim) {
+    const h = sim.cell / 2;
+    return { minX: sim.origin.x - h, minY: sim.origin.y - h, maxX: sim.origin.x + (sim.nx - 0.5) * sim.cell, maxY: sim.origin.y + (sim.ny - 0.5) * sim.cell };
+  }
+
+  /** 該工件座標所在格的高度；在格外 → null */
+  function heightAt(sim, heightArr, x, y) {
+    if (!sim) return null;
+    const arr = heightArr || sim.height;
+    const ix = Math.round((x - sim.origin.x) / sim.cell);
+    const iy = Math.round((y - sim.origin.y) / sim.cell);
+    if (ix < 0 || iy < 0 || ix >= sim.nx || iy >= sim.ny) return null;
+    return arr[iy * sim.nx + ix];
+  }
+
+  /**
+   * 剖面折線。cutAxis='x' → 在 X=v 切，回傳沿 Y 的 (pos, z)；cutAxis='y' → 在 Y=v 切，沿 X。
+   * @returns {{pos:number[], z:number[]}|null}
+   */
+  function sectionProfile(sim, heightArr, cutAxis, v) {
+    if (!sim) return null;
+    const arr = heightArr || sim.height;
+    const { nx, ny, cell, origin } = sim;
+    const pos = [], z = [];
+    if (cutAxis === 'x') {
+      const ix = Math.round((v - origin.x) / cell);
+      if (ix < 0 || ix >= nx) return null;
+      for (let iy = 0; iy < ny; iy++) { pos.push(origin.y + iy * cell); z.push(arr[iy * nx + ix]); }
+    } else {
+      const iy = Math.round((v - origin.y) / cell);
+      if (iy < 0 || iy >= ny) return null;
+      for (let ix = 0; ix < nx; ix++) { pos.push(origin.x + ix * cell); z.push(arr[iy * nx + ix]); }
+    }
+    return { pos, z };
+  }
+
+  /** 標尺刻度：≥ raw 的 1/2/5×10^n */
+  function niceStep(raw) {
+    if (!(raw > 0) || !Number.isFinite(raw)) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(raw)));
+    const m = raw / p;
+    const k = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
+    return k * p;
+  }
+
+  function distPointSeg2D(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const l2 = dx * dx + dy * dy;
+    let t = 0;
+    if (l2 > 1e-18) t = clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0, 1);
+    return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+  }
+
+  function normAngle(a) { a %= TAU; if (a < 0) a += TAU; return a; }
+
+  /** 點到圓弧段的距離（XY 平面、工件單位） */
+  function arcDistance(seg, px, py) {
+    const c = seg.arc.center, r = seg.arc.r;
+    const a0 = Math.atan2(seg.from.y - c.y, seg.from.x - c.x);
+    const a1 = Math.atan2(seg.to.y - c.y, seg.to.x - c.x);
+    const ap = Math.atan2(py - c.y, px - c.x);
+    let sweep, off;
+    if (seg.arc.cw) { sweep = normAngle(a0 - a1); off = normAngle(a0 - ap); }
+    else { sweep = normAngle(a1 - a0); off = normAngle(ap - a0); }
+    if (sweep < 1e-9 && Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y) < 1e-6) sweep = TAU; // 整圓
+    if (off <= sweep) return Math.abs(Math.hypot(px - c.x, py - c.y) - r);
+    return Math.min(Math.hypot(px - seg.from.x, py - seg.from.y), Math.hypot(px - seg.to.x, py - seg.to.y));
+  }
+
+  /** 點到段的距離（XY 平面、工件單位）；直線或圓弧 */
+  function segDistance2D(seg, px, py) {
+    if (seg.arc) return arcDistance(seg, px, py);
+    return distPointSeg2D(px, py, seg.from.x, seg.from.y, seg.to.x, seg.to.y);
+  }
+
+  /**
+   * 找最近的段：距離（乘上 scale 變成 px）≤ thresholdPx 才算命中；同距離時偏好 compensated。
+   * @returns {{seg:Object, dist:number}|null}
+   */
+  function pickSegment(segments, px, py, scale, thresholdPx, filter) {
+    let best = null, bd = Infinity;
+    for (const seg of segments) {
+      if (filter && !filter(seg)) continue;
+      const d = segDistance2D(seg, px, py) * scale;
+      if (d < bd - 1e-9 || (d <= bd + 1e-9 && best && best.path !== 'compensated' && seg.path === 'compensated')) { bd = d; best = seg; }
+    }
+    return best && bd <= thresholdPx ? { seg: best, dist: bd } : null;
+  }
+
+  function newBounds() { return { minH: Infinity, maxH: -Infinity, minV: Infinity, maxV: -Infinity }; }
+  function extend(b, h, v) {
+    if (!Number.isFinite(h) || !Number.isFinite(v)) return;
+    if (h < b.minH) b.minH = h; if (h > b.maxH) b.maxH = h;
+    if (v < b.minV) b.minV = v; if (v > b.maxV) b.maxV = v;
+  }
+  function validBounds(b) { return b.minH <= b.maxH && b.minV <= b.maxV ? b : null; }
+
+  /** 俯視包絡（XY）：素材、治具、模擬格、所有非 G28 段 */
+  function topBounds(data) {
+    const b = newBounds();
+    const { stock, sim, segments } = data;
+    if (stock) {
+      extend(b, stock.min.x, stock.min.y); extend(b, stock.max.x, stock.max.y);
+      for (const f of stock.fixtures || []) { extend(b, f.min.x, f.min.y); extend(b, f.max.x, f.max.y); }
+    }
+    if (sim) { const e = simExtent(sim); extend(b, e.minX, e.minY); extend(b, e.maxX, e.maxY); }
+    for (const s of segments || []) {
+      if (s.refReturn) continue;
+      extend(b, s.from.x, s.from.y); extend(b, s.to.x, s.to.y);
+      if (s.arc) { extend(b, s.arc.center.x - s.arc.r, s.arc.center.y - s.arc.r); extend(b, s.arc.center.x + s.arc.r, s.arc.center.y + s.arc.r); }
+    }
+    return validBounds(b);
+  }
+
+  /** 剖面包絡：水平軸 hAxis（'x'|'y'）、垂直軸 Z（不含 rapid） */
+  function sectionBounds(data, hAxis) {
+    const b = newBounds();
+    const { stock, sim, segments } = data;
+    if (stock) {
+      extend(b, stock.min[hAxis], stock.min.z); extend(b, stock.max[hAxis], stock.max.z);
+      for (const f of stock.fixtures || []) { extend(b, f.min[hAxis], f.min.z); extend(b, f.max[hAxis], f.max.z); }
+    }
+    if (sim) {
+      const e = simExtent(sim);
+      extend(b, hAxis === 'x' ? e.minX : e.minY, sim.floorZ); extend(b, hAxis === 'x' ? e.maxX : e.maxY, sim.floorZ);
+    }
+    for (const s of segments || []) {
+      if (s.kind === 'rapid') continue;
+      extend(b, s.from[hAxis], s.from.z); extend(b, s.to[hAxis], s.to.z);
+    }
+    const v = validBounds(b);
+    if (!v) return null;
+    v.maxV = Math.max(v.maxV, 0) + 2;   // 頂面上方留一點空
+    v.minV -= 1;
+    return v;
+  }
+
+  /** 由包絡算出 fit 變換 {scale, ox, oy}（螢幕 = ox + h·scale, oy − v·scale） */
+  function fitTransform(b, w, h, pad) {
+    pad = pad || PAD;
+    const aw = Math.max(1, w - pad.l - pad.r), ah = Math.max(1, h - pad.t - pad.b);
+    const spanH = Math.max(b.maxH - b.minH, 1e-3), spanV = Math.max(b.maxV - b.minV, 1e-3);
+    const scale = Math.min(aw / spanH, ah / spanV) * 0.94;
+    const cx = pad.l + aw / 2, cy = pad.t + ah / 2;
+    return { scale, ox: cx - ((b.minH + b.maxH) / 2) * scale, oy: cy + ((b.minV + b.maxV) / 2) * scale };
+  }
+
+  NC.ui.view2dUtil = {
+    TOOL_COLORS, PAD, PICK_PX, toolColor, depthColor, buildHeightImage, simExtent, heightAt, sectionProfile, niceStep,
+    distPointSeg2D, arcDistance, segDistance2D, pickSegment, topBounds, sectionBounds, fitTransform,
+  };
+
+  // ---------------------------------------------------------------------------
+  // View
+  // ---------------------------------------------------------------------------
+  // 「開關關 / 開關開」在 11px 下差一個形近字，讀錯會做出完全相反的判斷。
+  const SCENARIO_LABEL = {
+    off: 'Block skip：關（全部執行）',
+    on: 'Block skip：開（跳過 / 節）',
+    multiIgnored: 'Block skip：只跳過多斜線節',
+  };
+  const MODES = ['top', 'sectionX', 'sectionY'];
+
+  function createView2D(canvas) {
+    if (!canvas || typeof canvas.getContext !== 'function') throw new Error('createView2D 需要 canvas 元素');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('取不到 2D context');
+
+    const S = {
+      data: { segments: [], sim: null, stock: null, toolTable: null, scenario: 'off' },
+      heightArr: null,          // 目前顯示的高度陣列（sim.height 或某個 snapshot）
+      snapshotIndex: null,
+      mode: 'top',
+      section: 0,
+      sectionAxis: null,        // 最近用過的剖面模式（俯視時畫指示線）
+      hlLine: null,
+      hlTool: null,
+      visible: { rapid: true, feed: true, refReturn: false, stock: true, tools: null },
+      view: { top: null, sectionX: null, sectionY: null },   // 各模式獨立的 {scale, ox, oy}
+      size: { w: 0, h: 0 },
+      dpr: 1,
+      hover: null,
+      drag: null,
+      needFit: true,
+      imageCache: null,
+      toolRadius: new Map(),
+      compLines: new Set(),
+      byLine: new Map(),
+      pickCb: null,
+      scheduled: false,
+      destroyed: false,
+    };
+
+    // ---- 基本換算 ----------------------------------------------------------
+    const curView = () => S.view[S.mode];
+    const hAxis = () => (S.mode === 'sectionX' ? 'y' : 'x');   // 剖面水平軸
+    const cutAxis = () => (S.mode === 'sectionX' ? 'x' : 'y');
+    function toScreen(h, v) { const V = curView(); return [V.ox + h * V.scale, V.oy - v * V.scale]; }
+    function toWorld(sx, sy) { const V = curView(); return [(sx - V.ox) / V.scale, (V.oy - sy) / V.scale]; }
+    function plotRect() { const { w, h } = S.size; return [PAD.l, PAD.t, Math.max(1, w - PAD.l - PAD.r), Math.max(1, h - PAD.t - PAD.b)]; }
+
+    function makeCanvas(w, h) {
+      const doc = canvas.ownerDocument || (typeof document !== 'undefined' ? document : null);
+      if (doc && typeof doc.createElement === 'function') {
+        const c = doc.createElement('canvas'); c.width = w; c.height = h; return c;
+      }
+      if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
+      return null;
+    }
+
+    /** 同步 canvas 像素尺寸與 devicePixelRatio；回傳是否有有效尺寸 */
+    function syncSize() {
+      const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+      let w = canvas.clientWidth, h = canvas.clientHeight;
+      if (!(w > 0 && h > 0)) {
+        // 尚未排版：退而用既有像素尺寸
+        w = canvas.width / (S.dpr || 1); h = canvas.height / (S.dpr || 1);
+        if (!(w > 0 && h > 0)) return false;
+      } else if (canvas.style && !canvas.style.width) {
+        // 沒有 CSS 尺寸時釘住 CSS 尺寸，避免 width 屬性改動後 clientWidth 跟著漲
+        canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+      }
+      const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+      if (canvas.width !== pw) canvas.width = pw;
+      if (canvas.height !== ph) canvas.height = ph;
+      S.size.w = w; S.size.h = h; S.dpr = dpr;
+      return true;
+    }
+
+    function requestRender() {
+      if (S.scheduled || S.destroyed) return;
+      S.scheduled = true;
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+      raf(() => { S.scheduled = false; render(); });
+    }
+
+    function rebuildIndex() {
+      S.toolRadius = new Map();
+      const tt = S.data.toolTable;
+      if (tt && Array.isArray(tt.tools)) for (const t of tt.tools) if (t && t.diameter > 0) S.toolRadius.set(t.t, t.diameter / 2);
+      S.compLines = new Set();
+      S.byLine = new Map();
+      for (const s of S.data.segments) {
+        if (s.path === 'compensated') S.compLines.add(s.line);
+        let arr = S.byLine.get(s.line);
+        if (!arr) { arr = []; S.byLine.set(s.line, arr); }
+        arr.push(s);
+      }
+    }
+
+    function isVisible(seg) {
+      const vis = S.visible;
+      // G28／G30 回原點：中間點與參考點都在 Z150 的空中，畫成一般 G0 就是兩條橫跨整個
+      // 工件的大對角線，把版面切成兩半（15 把刀的程式會變成一團看不懂的線）。預設不畫。
+      if (seg.refReturn) return !!vis.refReturn;
+      if (seg.kind === 'rapid') { if (!vis.rapid) return false; } else if (!vis.feed) return false;
+      if (vis.tools && seg.tool != null && !vis.tools.has(seg.tool)) return false;
+      return true;
+    }
+
+    /** 色階範圍 [zTop, zBottom] */
+    function depthRange() {
+      const { sim, stock } = S.data;
+      let zTop = stock ? stock.max.z : null;
+      let zBottom = stock ? stock.min.z : null;
+      if (sim) {
+        if (zBottom == null || sim.floorZ < zBottom) zBottom = sim.floorZ;
+        if (zTop == null && S.heightArr) { zTop = -Infinity; for (let i = 0; i < S.heightArr.length; i++) if (S.heightArr[i] > zTop) zTop = S.heightArr[i]; if (!Number.isFinite(zTop)) zTop = 0; }
+      }
+      if (zTop == null) zTop = 0;
+      if (zBottom == null || zBottom >= zTop) zBottom = zTop - 10;
+      return [zTop, zBottom];
+    }
+
+    /** 取得（快取的）heightmap 離屏 canvas */
+    function heightImage() {
+      const sim = S.data.sim;
+      if (!sim || !S.heightArr) return null;
+      const [zTop, zBottom] = depthRange();
+      const c = S.imageCache;
+      if (c && c.arr === S.heightArr && c.zTop === zTop && c.zBottom === zBottom) return c.canvas;
+      const img = buildHeightImage(sim, S.heightArr, zTop, zBottom);
+      const off = makeCanvas(img.width, img.height);
+      if (!off) return null;
+      const octx = off.getContext('2d');
+      const id = octx.createImageData(img.width, img.height);
+      id.data.set(img.data);
+      octx.putImageData(id, 0, 0);
+      S.imageCache = { arr: S.heightArr, zTop, zBottom, canvas: off };
+      return off;
+    }
+
+    // ---- 繪圖：共用 ----------------------------------------------------------
+    function rectW(h0, v0, h1, v1) {
+      const [ax, ay] = toScreen(h0, v0), [bx, by] = toScreen(h1, v1);
+      return [Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay)];
+    }
+
+    /** 沿目前 view 畫一段（已 beginPath）；俯視用 */
+    function tracePathTop(seg, ax, ay, bx, by) {
+      const V = curView();
+      if (seg.arc) {
+        const c = seg.arc.center;
+        const [cx, cy] = toScreen(c.x, c.y);
+        const a0 = Math.atan2(seg.from.y - c.y, seg.from.x - c.x);
+        let a1 = Math.atan2(seg.to.y - c.y, seg.to.x - c.x);
+        const full = Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y) < 1e-6;
+        if (full) a1 = a0 + (seg.arc.cw ? -TAU : TAU);
+        // 螢幕 Y 朝下 → 角度取負；世界 CW（G2）在螢幕上為角度遞增（anticlockwise=false）
+        ctx.arc(cx, cy, seg.arc.r * V.scale, -a0, -a1, !seg.arc.cw);
+      } else {
+        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      }
+    }
+
+    function drawGrid() {
+      const V = curView();
+      const [px, py, pw, ph] = plotRect();
+      const step = niceStep(70 / V.scale);
+      const [h0] = toWorld(px, 0), [h1] = toWorld(px + pw, 0);
+      const [, v1] = toWorld(0, py), [, v0] = toWorld(0, py + ph);
+      ctx.save();
+      ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath();
+      for (let k = Math.ceil(h0 / step); k * step <= h1; k++) { const [sx] = toScreen(k * step, 0); ctx.moveTo(sx, py); ctx.lineTo(sx, py + ph); }
+      for (let k = Math.ceil(v0 / step); k * step <= v1; k++) { const [, sy] = toScreen(0, k * step); ctx.moveTo(px, sy); ctx.lineTo(px + pw, sy); }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawRulers(hLabel, vLabel) {
+      const V = curView();
+      const { w, h } = S.size;
+      const [px, py, pw, ph] = plotRect();
+      const step = niceStep(70 / V.scale);
+      const [h0] = toWorld(px, 0), [h1] = toWorld(px + pw, 0);
+      const [, v1] = toWorld(0, py), [, v0] = toWorld(0, py + ph);
+      ctx.save();
+      ctx.font = FONT; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.strokeStyle = C.ruler; ctx.fillStyle = C.rulerText;
+      ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
+      // 水平軸（底）
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.beginPath();
+      for (let k = Math.ceil(h0 / step); k * step <= h1; k++) {
+        const t = k * step; const [sx] = toScreen(t, 0);
+        ctx.moveTo(sx, py + ph); ctx.lineTo(sx, py + ph + 5);
+        ctx.fillText(fmt(t, 3), sx, py + ph + 7);
+      }
+      ctx.stroke();
+      // 垂直軸（左）
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.beginPath();
+      for (let k = Math.ceil(v0 / step); k * step <= v1; k++) {
+        const t = k * step; const [, sy] = toScreen(0, t);
+        ctx.moveTo(px - 5, sy); ctx.lineTo(px, sy);
+        ctx.fillText(fmt(t, 3), px - 7, sy);
+      }
+      ctx.stroke();
+      // 軸名
+      ctx.fillStyle = C.text;
+      ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+      ctx.fillText(hLabel, w - 4, h - 4);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText(vLabel, 4, py - 14);
+      ctx.restore();
+    }
+
+    function labelBox(text, x, y, align, bg) {
+      ctx.font = FONT_HUD;
+      const tw = ctx.measureText(text).width;
+      const bw = tw + 10, bh = 18;
+      const bx = align === 'right' ? x - bw : x;
+      ctx.fillStyle = bg || C.hudBg; ctx.fillRect(bx, y, bw, bh);
+      ctx.fillStyle = C.text; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + 5, y + bh / 2);
+    }
+
+    function hoverText() {
+      const [hh, vv] = toWorld(S.hover.sx, S.hover.sy);
+      const { sim } = S.data;
+      const [zTop] = depthRange();
+      let t, wx, wy;
+      if (S.mode === 'top') { t = `X ${fmt(hh)}  Y ${fmt(vv)}`; wx = hh; wy = vv; }
+      else {
+        t = `${hAxis().toUpperCase()} ${fmt(hh)}  Z ${fmt(vv)}`;
+        wx = hAxis() === 'x' ? hh : S.section; wy = hAxis() === 'y' ? hh : S.section;
+      }
+      const z = heightAt(sim, S.heightArr, wx, wy);
+      if (z != null) t += `  Z面 ${fmt(z)}（深 ${fmt(zTop - z)}）`;
+      return t;
+    }
+
+    function drawHud() {
+      const { w, h } = S.size;
+      const [px, py, , ph] = plotRect();
+      const scen = SCENARIO_LABEL[S.data.scenario] || S.data.scenario;
+      const modeText = S.mode === 'top' ? '俯視' : `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
+      let head = `${modeText} · ${scen}`;
+      if (S.snapshotIndex != null) head += ` · 快照 ${S.snapshotIndex}`;
+      if (S.hlTool != null) head += ` · 只看 T${S.hlTool}`;
+      if (S.data.simStale) head += ' · 成品圖更新中';
+      // 不是預設情境（開關關）時給 HUD 一個琥珀底，讓人一眼看出現在不是平常那一種
+      const alert = S.data.scenario && S.data.scenario !== 'off';
+      labelBox(head, px + 4, 6, 'left', alert ? C.hudAlertBg : null);
+      if (S.hover && curView()) labelBox(hoverText(), w - PAD.r - 4, py + ph - 22, 'right');
+      if (!S.data.segments.length && !S.data.stock && !S.data.sim) {
+        ctx.font = FONT_HUD; ctx.fillStyle = C.rulerText; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('尚無資料', w / 2, h / 2);
+      }
+    }
+
+    // ---- 俯視 --------------------------------------------------------------
+    function drawStockTop() {
+      const { sim, stock } = S.data;
+      const V = curView();
+      if (stock) {
+        const r = rectW(stock.min.x, stock.min.y, stock.max.x, stock.max.y);
+        ctx.fillStyle = C.stockFill; ctx.fillRect(r[0], r[1], r[2], r[3]);
+      }
+      if (sim && S.heightArr) {
+        const img = heightImage();
+        if (img) {
+          const e = simExtent(sim);
+          const [sx, sy] = toScreen(e.minX, e.maxY);
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(img, sx, sy, sim.nx * sim.cell * V.scale, sim.ny * sim.cell * V.scale);
+          ctx.imageSmoothingEnabled = true;
+        }
+      }
+      ctx.lineWidth = 1.5; ctx.setLineDash([]);
+      if (stock) {
+        const r = rectW(stock.min.x, stock.min.y, stock.max.x, stock.max.y);
+        ctx.strokeStyle = C.stockLine; ctx.strokeRect(r[0], r[1], r[2], r[3]);
+        for (const f of stock.fixtures || []) {
+          const fr = rectW(f.min.x, f.min.y, f.max.x, f.max.y);
+          ctx.fillStyle = C.fixtureFill; ctx.fillRect(fr[0], fr[1], fr[2], fr[3]);
+          ctx.strokeStyle = C.fixtureLine; ctx.strokeRect(fr[0], fr[1], fr[2], fr[3]);
+        }
+      } else if (sim) {
+        const e = simExtent(sim);
+        const r = rectW(e.minX, e.minY, e.maxX, e.maxY);
+        ctx.strokeStyle = C.stockLine; ctx.strokeRect(r[0], r[1], r[2], r[3]);
+      }
+    }
+
+    function drawOriginTop() {
+      const [ox, oy] = toScreen(0, 0);
+      ctx.strokeStyle = C.axis; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(ox - 10, oy); ctx.lineTo(ox + 10, oy);
+      ctx.moveTo(ox, oy - 10); ctx.lineTo(ox, oy + 10);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(ox, oy, 3, 0, TAU); ctx.stroke();
+    }
+
+    function drawSectionIndicator() {
+      if (!S.sectionAxis) return;
+      const [px, py, pw, ph] = plotRect();
+      ctx.strokeStyle = C.section; ctx.lineWidth = 1; ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      if (S.sectionAxis === 'sectionX') { const [sx] = toScreen(S.section, 0); ctx.moveTo(sx, py); ctx.lineTo(sx, py + ph); }
+      else { const [, sy] = toScreen(0, S.section); ctx.moveTo(px, sy); ctx.lineTo(px + pw, sy); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function drawHoleMarker(seg, ax, ay, drawn) {
+      const key = `${seg.line}:${Math.round(seg.from.x * 1000)},${Math.round(seg.from.y * 1000)}`;
+      if (drawn.has(key)) return;
+      drawn.add(key);
+      const V = curView();
+      const r = S.toolRadius.get(seg.tool);
+      const rp = Math.max(r ? r * V.scale : 0, 3);
+      ctx.strokeStyle = toolColor(seg.tool); ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(ax, ay, rp, 0, TAU); ctx.stroke();
+      // 短線（十字）
+      const t = rp + 3;
+      ctx.beginPath();
+      ctx.moveTo(ax - t, ay); ctx.lineTo(ax + t, ay);
+      ctx.moveTo(ax, ay - t); ctx.lineTo(ax, ay + t);
+      ctx.stroke();
+    }
+
+    function drawSegmentsTop() {
+      const drawn = new Set();
+      for (const seg of S.data.segments) {
+        if (!isVisible(seg)) continue;
+        const isRapid = seg.kind === 'rapid';
+        const dim = S.hlTool != null && seg.tool !== S.hlTool;
+        const [ax, ay] = toScreen(seg.from.x, seg.from.y);
+        const [bx, by] = toScreen(seg.to.x, seg.to.y);
+        const flat = !seg.arc && Math.hypot(bx - ax, by - ay) < 0.75;   // 純 Z 向移動
+        ctx.globalAlpha = dim ? 0.12 : (seg.path === 'programmed' && S.compLines.has(seg.line) ? 0.55 : 1);
+        if (flat) {
+          if (seg.kind === 'drill') drawHoleMarker(seg, ax, ay, drawn);
+          else if (!isRapid) { ctx.fillStyle = toolColor(seg.tool); ctx.beginPath(); ctx.arc(ax, ay, 2.5, 0, TAU); ctx.fill(); }
+          continue;
+        }
+        ctx.strokeStyle = isRapid ? C.rapid : toolColor(seg.tool);
+        ctx.lineWidth = isRapid ? 1 : (seg.path === 'compensated' ? 2 : (seg.kind === 'drill' ? 1.5 : 1));
+        ctx.setLineDash(isRapid ? [4, 3] : []);
+        if (seg.refReturn) { ctx.globalAlpha *= 0.35; ctx.setLineDash([2, 6]); }
+        ctx.beginPath(); tracePathTop(seg, ax, ay, bx, by); ctx.stroke();
+      }
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+    }
+
+    function drawHighlightTop() {
+      if (S.hlLine == null) return;
+      const segs = S.byLine.get(S.hlLine);
+      if (!segs || !segs.length) return;
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      for (const pass of [{ w: 7, color: C.halo }, { w: 3, color: C.highlight }]) {
+        ctx.strokeStyle = pass.color; ctx.fillStyle = pass.color; ctx.lineWidth = pass.w;
+        for (const seg of segs) {
+          const [ax, ay] = toScreen(seg.from.x, seg.from.y);
+          const [bx, by] = toScreen(seg.to.x, seg.to.y);
+          ctx.beginPath();
+          if (!seg.arc && Math.hypot(bx - ax, by - ay) < 0.75) { ctx.arc(ax, ay, pass.w * 0.9, 0, TAU); ctx.fill(); }
+          else { tracePathTop(seg, ax, ay, bx, by); ctx.stroke(); }
+        }
+      }
+      // 終點
+      const last = segs[segs.length - 1];
+      const [ex, ey] = toScreen(last.to.x, last.to.y);
+      ctx.fillStyle = C.highlight; ctx.beginPath(); ctx.arc(ex, ey, 3.5, 0, TAU); ctx.fill();
+    }
+
+    function renderTop() {
+      if (S.visible.stock) drawStockTop();
+      drawGrid();
+      drawOriginTop();
+      drawSectionIndicator();
+      drawSegmentsTop();
+      drawHighlightTop();
+    }
+
+    // ---- 剖面 --------------------------------------------------------------
+    /** 落在剖面帶內的段，投影成 (h, z) 的假段 {from:{x,y}, to:{x,y}, seg} */
+    function projectedSegments() {
+      const ha = hAxis(), ca = cutAxis(), v = S.section;
+      const cell = S.data.sim ? S.data.sim.cell : 0.5;
+      const out = [];
+      for (const seg of S.data.segments) {
+        if (seg.arc || seg.refReturn) continue;
+        const band = Math.max(cell, 0.25) / 2 + (S.toolRadius.get(seg.tool) || 0) + 1e-6;
+        if (Math.abs(seg.from[ca] - v) > band || Math.abs(seg.to[ca] - v) > band) continue;
+        out.push({ from: { x: seg.from[ha], y: seg.from.z }, to: { x: seg.to[ha], y: seg.to.z }, seg });
+      }
+      return out;
+    }
+
+    function drawStockSection() {
+      const { sim, stock } = S.data;
+      const ha = hAxis(), ca = cutAxis(), v = S.section;
+      ctx.lineWidth = 1.5; ctx.setLineDash([]);
+      if (stock) {
+        const inside = v >= stock.min[ca] - 1e-9 && v <= stock.max[ca] + 1e-9;
+        const r = rectW(stock.min[ha], stock.min.z, stock.max[ha], stock.max.z);
+        ctx.fillStyle = inside ? C.stockFill : C.stockFillOut; ctx.fillRect(r[0], r[1], r[2], r[3]);
+        ctx.strokeStyle = C.stockLine; ctx.setLineDash(inside ? [] : [4, 4]); ctx.strokeRect(r[0], r[1], r[2], r[3]);
+        ctx.setLineDash([]);
+        for (const f of stock.fixtures || []) {
+          if (v < f.min[ca] - 1e-9 || v > f.max[ca] + 1e-9) continue;
+          const fr = rectW(f.min[ha], f.min.z, f.max[ha], f.max.z);
+          ctx.fillStyle = C.fixtureFill; ctx.fillRect(fr[0], fr[1], fr[2], fr[3]);
+          ctx.strokeStyle = C.fixtureLine; ctx.strokeRect(fr[0], fr[1], fr[2], fr[3]);
+        }
+      }
+      if (sim && S.heightArr) {
+        const prof = sectionProfile(sim, S.heightArr, ca, v);
+        if (prof) {
+          const floor = sim.floorZ;
+          ctx.beginPath();
+          let [sx, sy] = toScreen(prof.pos[0], floor);
+          ctx.moveTo(sx, sy);
+          for (let i = 0; i < prof.pos.length; i++) { [sx, sy] = toScreen(prof.pos[i], prof.z[i]); ctx.lineTo(sx, sy); }
+          [sx, sy] = toScreen(prof.pos[prof.pos.length - 1], floor);
+          ctx.lineTo(sx, sy); ctx.closePath();
+          ctx.fillStyle = C.profileFill; ctx.fill();
+          ctx.beginPath();
+          for (let i = 0; i < prof.pos.length; i++) { [sx, sy] = toScreen(prof.pos[i], prof.z[i]); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+          ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+      }
+    }
+
+    function drawSegmentsSection(items) {
+      for (const it of items) {
+        const seg = it.seg;
+        if (!isVisible(seg)) continue;
+        const isRapid = seg.kind === 'rapid';
+        const dim = S.hlTool != null && seg.tool !== S.hlTool;
+        const [ax, ay] = toScreen(it.from.x, it.from.y);
+        const [bx, by] = toScreen(it.to.x, it.to.y);
+        ctx.globalAlpha = dim ? 0.12 : (seg.path === 'programmed' && S.compLines.has(seg.line) ? 0.55 : 1);
+        ctx.strokeStyle = isRapid ? C.rapid : toolColor(seg.tool);
+        ctx.lineWidth = isRapid ? 1 : (seg.path === 'compensated' ? 2 : (seg.kind === 'drill' ? 1.5 : 1));
+        ctx.setLineDash(isRapid ? [4, 3] : []);
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+        if (Math.hypot(bx - ax, by - ay) < 0.75) { ctx.fillStyle = ctx.strokeStyle; ctx.beginPath(); ctx.arc(ax, ay, 2, 0, TAU); ctx.fill(); }
+      }
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+    }
+
+    function drawHighlightSection(items) {
+      if (S.hlLine == null) return;
+      const hits = items.filter((it) => it.seg.line === S.hlLine);
+      if (!hits.length) return;
+      for (const pass of [{ w: 7, color: C.halo }, { w: 3, color: C.highlight }]) {
+        ctx.strokeStyle = pass.color; ctx.lineWidth = pass.w;
+        ctx.beginPath();
+        for (const it of hits) {
+          const [ax, ay] = toScreen(it.from.x, it.from.y);
+          const [bx, by] = toScreen(it.to.x, it.to.y);
+          ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+        }
+        ctx.stroke();
+      }
+    }
+
+    function renderSection() {
+      if (S.visible.stock) drawStockSection();
+      drawGrid();
+      // Z = 0 基準線
+      const [px, , pw] = plotRect();
+      const [, zy] = toScreen(0, 0);
+      ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(px, zy); ctx.lineTo(px + pw, zy); ctx.stroke();
+      ctx.setLineDash([]);
+      const items = projectedSegments();
+      drawSegmentsSection(items);
+      drawHighlightSection(items);
+    }
+
+    // ---- 主繪圖 ------------------------------------------------------------
+    function render() {
+      if (S.destroyed) return;
+      if (!syncSize()) return;
+      if (S.needFit) fit(false);
+      const { w, h } = S.size;
+      ctx.setTransform(S.dpr, 0, 0, S.dpr, 0, 0);
+      ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
+      if (!curView()) { drawHud(); return; }
+      const [px, py, pw, ph] = plotRect();
+      ctx.save();
+      ctx.beginPath(); ctx.rect(px, py, pw, ph); ctx.clip();
+      if (S.mode === 'top') renderTop(); else renderSection();
+      ctx.restore();
+      if (S.mode === 'top') drawRulers('X', 'Y'); else drawRulers(hAxis().toUpperCase(), 'Z');
+      drawHud();
+    }
+
+    function fit(rerender = true) {
+      if (!(S.size.w > 0)) syncSize();
+      const { w, h } = S.size;
+      if (!(w > 0 && h > 0)) { S.needFit = true; return api; }
+      const b = S.mode === 'top' ? topBounds(S.data) : sectionBounds(S.data, hAxis());
+      let V;
+      if (b) V = fitTransform(b, w, h, PAD);
+      else { const [px, py, pw, ph] = plotRect(); V = { scale: 2, ox: px + pw / 2, oy: py + ph / 2, empty: true }; }
+      S.view[S.mode] = V;
+      S.needFit = false;
+      if (rerender) requestRender();
+      return api;
+    }
+
+    // ---- 互動 --------------------------------------------------------------
+    function eventPos(ev) {
+      const r = typeof canvas.getBoundingClientRect === 'function' ? canvas.getBoundingClientRect() : { left: 0, top: 0, width: S.size.w, height: S.size.h };
+      const kx = r.width ? S.size.w / r.width : 1, ky = r.height ? S.size.h / r.height : 1;
+      return [(ev.clientX - r.left) * kx, (ev.clientY - r.top) * ky];
+    }
+
+    function zoomAt(mx, my, f) {
+      const V = curView();
+      if (!V) return;
+      const ns = clamp(V.scale * f, 0.01, 5000);
+      f = ns / V.scale;
+      V.ox = mx - (mx - V.ox) * f;
+      V.oy = my - (my - V.oy) * f;
+      V.scale = ns;
+      requestRender();
+    }
+
+    function pickAt(mx, my) {
+      const V = curView();
+      if (!V) return null;
+      const [wx, wy] = toWorld(mx, my);
+      let hit = null;
+      if (S.mode === 'top') hit = pickSegment(S.data.segments, wx, wy, V.scale, PICK_PX, isVisible);
+      else {
+        const items = projectedSegments().filter((it) => isVisible(it.seg));
+        const r = pickSegment(items, wx, wy, V.scale, PICK_PX, null);
+        hit = r ? { seg: r.seg.seg, dist: r.dist } : null;
+      }
+      if (hit && S.pickCb) S.pickCb(hit.seg.line, hit.seg);
+      return hit;
+    }
+
+    function setDragClass(on) {
+      if (canvas.classList && typeof canvas.classList.toggle === 'function') canvas.classList.toggle('is-dragging', on);
+    }
+
+    function onWheel(ev) {
+      if (ev.preventDefault) ev.preventDefault();
+      const [mx, my] = eventPos(ev);
+      const f = Math.exp(-(ev.deltaY || 0) * 0.0015);
+      zoomAt(mx, my, f);
+    }
+    function onDown(ev) {
+      if (ev.button != null && ev.button !== 0) return;
+      const [mx, my] = eventPos(ev);
+      const V = curView();
+      S.drag = { sx: mx, sy: my, ox: V ? V.ox : 0, oy: V ? V.oy : 0, moved: false };
+      if (ev.pointerId != null && typeof canvas.setPointerCapture === 'function') { try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ } }
+    }
+    function onMove(ev) {
+      const [mx, my] = eventPos(ev);
+      const d = S.drag, V = curView();
+      if (d) {
+        const dx = mx - d.sx, dy = my - d.sy;
+        if (!d.moved && Math.hypot(dx, dy) > DRAG_PX) { d.moved = true; setDragClass(true); }
+        if (d.moved && V) { V.ox = d.ox + dx; V.oy = d.oy + dy; }
+      }
+      S.hover = { sx: mx, sy: my };
+      requestRender();
+    }
+    function onUp(ev) {
+      const d = S.drag;
+      S.drag = null;
+      setDragClass(false);
+      if (ev.pointerId != null && typeof canvas.releasePointerCapture === 'function') { try { canvas.releasePointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ } }
+      if (d && !d.moved) { const [mx, my] = eventPos(ev); pickAt(mx, my); }
+      requestRender();
+    }
+    function onLeave() {
+      S.hover = null;
+      S.drag = null;
+      setDragClass(false);
+      requestRender();
+    }
+    function onDbl(ev) { if (ev.preventDefault) ev.preventDefault(); fit(); }
+    function onCtx(ev) { if (ev.preventDefault) ev.preventDefault(); }
+
+    const usePointer = typeof PointerEvent !== 'undefined';
+    const evNames = usePointer ? ['pointerdown', 'pointermove', 'pointerup', 'pointerleave'] : ['mousedown', 'mousemove', 'mouseup', 'mouseleave'];
+    const listeners = [
+      ['wheel', onWheel, { passive: false }],
+      [evNames[0], onDown], [evNames[1], onMove], [evNames[2], onUp], [evNames[3], onLeave],
+      ['dblclick', onDbl], ['contextmenu', onCtx],
+    ];
+    if (typeof canvas.addEventListener === 'function') for (const l of listeners) canvas.addEventListener(l[0], l[1], l[2]);
+
+    let ro = null, winResize = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => { if (!S.destroyed && syncSize()) requestRender(); });
+      ro.observe(canvas);
+    } else if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      winResize = () => { if (!S.destroyed && syncSize()) requestRender(); };
+      window.addEventListener('resize', winResize);
+    }
+
+    // ---- 公開 API ----------------------------------------------------------
+    const api = {
+      canvas,
+      setData(d) {
+        d = d || {};
+        S.data = {
+          segments: Array.isArray(d.segments) ? d.segments : [],
+          sim: d.sim || null,
+          stock: d.stock || null,
+          toolTable: d.toolTable || null,
+          scenario: d.scenario || 'off',
+          simStale: !!d.simStale,
+        };
+        S.snapshotIndex = null;
+        S.heightArr = S.data.sim ? S.data.sim.height : null;
+        S.imageCache = null;
+        rebuildIndex();
+        const V = curView();
+        if (!V || V.empty) S.needFit = true;
+        requestRender();
+        return api;
+      },
+      setMode(m) {
+        if (!MODES.includes(m)) throw new Error(`未知的視圖模式：${m}`);
+        S.mode = m;
+        if (m !== 'top') S.sectionAxis = m;
+        const V = curView();
+        if (!V || V.empty) S.needFit = true;
+        requestRender();
+        return api;
+      },
+      getMode() { return S.mode; },
+      setSection(v) { S.section = Number(v) || 0; requestRender(); return api; },
+      getSection() { return S.section; },
+      /** 顯示第 i 個 snapshot 的高度（null → 最終高度） */
+      setSnapshot(i) {
+        const sim = S.data.sim;
+        if (!sim) return api;
+        const snap = i != null && Array.isArray(sim.snapshots) ? sim.snapshots[i] : null;
+        S.snapshotIndex = snap ? i : null;
+        S.heightArr = snap ? snap.height : sim.height;
+        S.imageCache = null;
+        requestRender();
+        return api;
+      },
+      highlightLine(n) { S.hlLine = n == null ? null : Number(n); requestRender(); return api; },
+      highlightTool(t) { S.hlTool = t == null ? null : Number(t); requestRender(); return api; },
+      setVisible(o) {
+        o = o || {};
+        if ('rapid' in o) S.visible.rapid = !!o.rapid;
+        if ('feed' in o) S.visible.feed = !!o.feed;
+        if ('refReturn' in o) S.visible.refReturn = !!o.refReturn;
+        if ('stock' in o) S.visible.stock = !!o.stock;
+        if ('tools' in o) S.visible.tools = o.tools == null ? null : (o.tools instanceof Set ? o.tools : new Set(o.tools));
+        requestRender();
+        return api;
+      },
+      getVisible() { return { rapid: S.visible.rapid, feed: S.visible.feed, refReturn: S.visible.refReturn, stock: S.visible.stock, tools: S.visible.tools ? new Set(S.visible.tools) : null }; },
+      onPick(cb) { S.pickCb = typeof cb === 'function' ? cb : null; return api; },
+      fit() { return fit(true); },
+      render() { render(); return api; },
+      requestRender() { requestRender(); return api; },
+      /** 目前模式的變換 {scale, ox, oy} */
+      getTransform() { const V = curView(); return V ? { scale: V.scale, ox: V.ox, oy: V.oy } : null; },
+      worldToScreen(h, v) { return curView() ? toScreen(h, v) : null; },
+      screenToWorld(sx, sy) { return curView() ? toWorld(sx, sy) : null; },
+      pickAt(sx, sy) { return pickAt(sx, sy); },
+      getSize() { return { w: S.size.w, h: S.size.h, dpr: S.dpr }; },
+      destroy() {
+        S.destroyed = true;
+        if (typeof canvas.removeEventListener === 'function') for (const l of listeners) canvas.removeEventListener(l[0], l[1], l[2]);
+        if (ro) { try { ro.disconnect(); } catch (e) { /* 忽略 */ } ro = null; }
+        if (winResize) { window.removeEventListener('resize', winResize); winResize = null; }
+        S.imageCache = null;
+      },
+    };
+
+    syncSize();
+    requestRender();
+    return api;
+  }
+
+  NC.ui.createView2D = createView2D;
+})(globalThis.NC = globalThis.NC || {});

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>NC 預演台 — 面板示範（panels.js）</title>
+<link rel="stylesheet" href="../css/panels.css">
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", Arial, sans-serif; background: #eef0f3; color: #1f2429; }
+  header { padding: 10px 16px; background: #fff; border-bottom: 1px solid #d9dde3; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .hint { color: #6b7480; font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 16px; }
+  section { background: #fff; border: 1px solid #d9dde3; border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; min-height: 200px; }
+  section > h2 { margin: 0; padding: 6px 10px; font-size: 13px; background: #f6f7f9; border-bottom: 1px solid #d9dde3; }
+  section > .body { flex: 1; overflow: auto; max-height: 420px; }
+  section.wide { grid-column: 1 / -1; }
+  #log { font-family: Consolas, Menlo, monospace; font-size: 12px; white-space: pre-wrap; padding: 8px 10px; max-height: 220px; overflow: auto; margin: 0; }
+  #log .t { color: #6b7480; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NC 預演台 — 面板示範</h1>
+  <span class="hint">假資料展示 NC.ui.panels 六個面板；所有 onChange / onJump 都會印在最下方的紀錄區。</span>
+</header>
+<main>
+  <section class="wide"><h2>刀具表 panels.toolTable</h2><div class="body" id="p-tools"></div></section>
+  <section><h2>錯誤清單 panels.diagnostics</h2><div class="body" id="p-diag"></div></section>
+  <section><h2>模態 panels.modal</h2><div class="body" id="p-modal"></div></section>
+  <section class="wide"><h2>作業摘要 panels.ops</h2><div class="body" id="p-ops"></div></section>
+  <section><h2>素材與夾具 panels.stock</h2><div class="body" id="p-stock"></div></section>
+  <section><h2>設定 panels.settings</h2><div class="body" id="p-settings"></div></section>
+  <section class="wide"><h2>事件紀錄</h2><pre id="log"></pre></section>
+</main>
+<script src="../js/core/ns.js"></script>
+<script src="../js/ui/panels.js"></script>
+<script>
+(function () {
+  'use strict';
+  const P = NC.ui.panels;
+  const logEl = document.getElementById('log');
+  function log(name, payload) {
+    const t = new Date().toLocaleTimeString();
+    const s = payload === undefined ? '' : ' ' + JSON.stringify(payload, (k, v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v));
+    logEl.textContent = `[${t}] ${name}${s}\n` + logEl.textContent;
+  }
+
+  // ---- 假資料（形狀依 ns.js 的 typedef） ----
+  const table = {
+    programKey: 'O1001',
+    tools: [
+      { t: 20, label: '100MM', type: 'facemill', diameter: 100, angle: null, fluteLen: null, stickout: null, pitch: null, resident: true, probe: false, source: { type: 'comment', diameter: 'comment' } },
+      { t: 11, label: '12MM', type: 'endmill', diameter: 12, angle: null, fluteLen: 36, stickout: null, pitch: null, resident: false, probe: false, source: { type: 'comment', diameter: 'comment', fluteLen: 'default' } },
+      { t: 12, label: '10MM', type: 'endmill', diameter: 10, angle: null, fluteLen: 30, stickout: null, pitch: null, resident: false, probe: false, source: { type: 'motion', diameter: 'comment', fluteLen: 'default' } },
+      { t: 7, label: 'SG-4.5', type: 'drill', diameter: 4.5, angle: 118, fluteLen: 13.5, stickout: null, pitch: null, resident: false, probe: false, source: { type: 'comment', diameter: 'comment', angle: 'default', fluteLen: 'default' } },
+      { t: 9, label: 'M4*P0.7', type: 'tap', diameter: 4, angle: null, fluteLen: null, stickout: null, pitch: 0.7, resident: false, probe: false, source: { type: 'motion', diameter: 'comment', pitch: 'comment' } },
+      { t: 3, label: '8V', type: 'chamfer', diameter: 8, angle: 90, fluteLen: null, stickout: null, pitch: null, resident: false, probe: false, source: { type: 'comment', diameter: 'comment', angle: 'default' } },
+      { t: 15, label: 'T15', type: 'unknown', diameter: 10, angle: null, fluteLen: null, stickout: null, pitch: null, resident: false, probe: true, source: { type: 'default', diameter: 'default' } },
+    ],
+    offsets: [
+      { n: 11, lenGeom: 0, lenWear: 0, radGeom: 6, radWear: 0, source: 'default' },
+      { n: 31, lenGeom: 0, lenWear: 0, radGeom: 5.98, radWear: -0.02, source: 'user' },
+      { n: 12, lenGeom: 0, lenWear: 0, radGeom: 5, radWear: 0, source: 'default' },
+    ],
+    updatedAt: new Date().toISOString(),
+  };
+  const ops = [
+    { index: 0, tool: 20, toolComment: '100MM', h: 20, dList: [], lineStart: 4, lineEnd: 12, zMin: 0, feeds: [800], rpms: [1200], gCodes: ['G0', 'G1'], kindGuess: 'face' },
+    { index: 1, tool: 11, toolComment: '12MM', h: 11, dList: [11, 31], lineStart: 13, lineEnd: 80, zMin: -30, feeds: [200, 400], rpms: [3000], gCodes: ['G1', 'G2', 'G41'], kindGuess: 'contour' },
+    { index: 2, tool: 12, toolComment: '10MM', h: 12, dList: [12], lineStart: 81, lineEnd: 140, zMin: -12, feeds: [300], rpms: [3500], gCodes: ['G1', 'G3'], kindGuess: 'pocket' },
+    { index: 3, tool: 7, toolComment: 'SG-4.5', h: 7, dList: [], lineStart: 141, lineEnd: 160, zMin: -7, feeds: [50], rpms: [1050], gCodes: ['G83'], kindGuess: 'drill' },
+    { index: 4, tool: 9, toolComment: 'M4*P0.7', h: 9, dList: [], lineStart: 161, lineEnd: 175, zMin: -8, feeds: [350], rpms: [500], gCodes: ['G84'], kindGuess: 'tap' },
+    { index: 5, tool: 3, toolComment: '8V', h: 3, dList: [3], lineStart: 176, lineEnd: 210, zMin: -1.2, feeds: [80], rpms: [1500], gCodes: ['G1', 'G81'], kindGuess: 'chamfer' },
+    { index: 6, tool: 15, toolComment: null, h: 15, dList: [], lineStart: 211, lineEnd: 220, zMin: null, feeds: [], rpms: [], gCodes: ['G0'], kindGuess: 'unknown' },
+  ];
+  const diags = [
+    { id: 'R11:40', ruleId: 'R11', line: 40, severity: 'error', message: '內凹圓弧半徑 5 小於刀徑補正量 6', detail: '補正後刀心路徑會自交，機台會停在這一節。建議改用 Ø10 以下的刀，或把圓角放大。', fanucAlarm: 'PS0041' },
+    { id: 'R06:325', ruleId: 'R06', line: 325, severity: 'error', scenario: 'on', message: '跳過 /G0Z5. 後，下一段 G1 直接在 Z-12 橫移', detail: '開關開時這節不執行，刀具會在材料內移動到下一點。' , fix: { label: '把 Z 提升寫進下一節', edits: [] } },
+    { id: 'R27:227', ruleId: 'R27', line: 227, severity: 'error', message: 'G0 下刀終點低於該處材料高度（碰撞）', detail: '模擬時 X12 Y-8 處高度 0，G0 到 Z-2 會撞料。', pos: { x: 12, y: -8, z: -2 } },
+    { id: 'R05:810', ruleId: 'R05', line: 810, severity: 'warning', message: '節首有 3 個斜線 ///', detail: '多數 Fanuc 只認第一個斜線，其餘視為 /1；設定「多斜線」可改為整節忽略或警報。', fix: { label: '改成單斜線', edits: [{ line: 810, text: '/G0Y3.' }] } },
+    { id: 'R07:254', ruleId: 'R07', line: 254, severity: 'warning', scenario: 'on', message: '被跳過的節含模態字 G91，後續解讀會不同' },
+    { id: 'R16:20', ruleId: 'R16', line: 20, severity: 'warning', message: 'G43 同節沒有 Z，刀長補正要到下一個 Z 移動才生效' },
+    { id: 'R10:14', ruleId: 'R10', line: 14, severity: 'needsInput', message: 'T11 的 D11 尚未輸入，暫用直徑/2 = 6', detail: '請在刀具表填入機台實際的 D11 半徑形狀／摩耗。' },
+    { id: 'R14:30', ruleId: 'R14', line: 30, severity: 'info', message: 'D31 與 T11 不同號（第二組補正）' },
+    { id: 'R29:708', ruleId: 'R29', line: 708, severity: 'info', message: '預選 T12 與下一次 M6 的 T11 不同' },
+    { id: 'R32:0', ruleId: 'R32', line: 0, severity: 'warning', message: '程式沒有 O 號' },
+  ];
+  const modalState = {
+    motion: 'G1', distance: 'G90', plane: 'G17', units: 'G21', feedMode: 'G94', wcs: 'G54', comp: 'G41', d: 11, lengthComp: 'G43', h: 11,
+    cycle: null, retractMode: 'G98', feed: 400, spindle: { dir: 'M3', rpm: 3000 }, coolant: true, toolInSpindle: 11, toolStaged: 12,
+    aicc: true, rigidTap: false, rigidTapS: null, pos: { x: 58, y: -80.5, z: -30 }, lengthCompActive: true,
+  };
+  const modalCycle = Object.assign({}, modalState, {
+    motion: 'G0', comp: 'G40', d: 0, h: 7, toolInSpindle: 7, toolStaged: 9, feed: 50, spindle: { dir: 'M3', rpm: 1050 }, aicc: false,
+    cycle: { code: 'G83', r: 2, z: -7, q: 1, p: null, retract: 'G98', initialZ: 25 }, pos: { x: 15, y: 48.4, z: 25 },
+  });
+  const stock = { min: { x: -65, y: -30, z: -15 }, max: { x: 65, y: 30, z: 0 }, source: 'estimated', fixtures: [] };
+
+  // ---- 建立面板 ----
+  const tools = P.toolTable(document.getElementById('p-tools'), { table, ops, onChange: (t) => log('toolTable.onChange', { updatedAt: t.updatedAt, tools: t.tools.map((x) => ({ t: x.t, type: x.type, dia: x.diameter, resident: x.resident, src: x.source })), offsets: t.offsets }) });
+  const diag = P.diagnostics(document.getElementById('p-diag'), { items: diags, onJump: (line, it) => { log('diagnostics.onJump', { line, id: it.id }); opsPanel.select(opsAtLine(line)); }, onFix: (it) => log('diagnostics.onFix', { id: it.id, fix: it.fix }) });
+  let modalToggle = false;
+  const modal = P.modal(document.getElementById('p-modal'), modalState, { line: 40, text: 'G1X58.Y-80.5', opIndex: 1 });
+  const opsPanel = P.ops(document.getElementById('p-ops'), { ops, toolTable: table, time: { perOp: [30, 185, 240, 61, 45, 40, 5], total: 606 }, onJump: (line, op) => { log('ops.onJump', { line, index: op.index }); modalToggle = !modalToggle; modal.update(modalToggle ? modalCycle : modalState, { line, opIndex: op.index, text: modalToggle ? 'G98R2.G83Q1.Z-7.F50' : 'G1X58.Y-80.5' }); } });
+  P.stock(document.getElementById('p-stock'), { stock, onChange: (s) => log('stock.onChange', s) });
+  P.settings(document.getElementById('p-settings'), { settings: NC.util.defaultSettings(), scenario: 'off', cell: 0.5, onChange: (s) => { log('settings.onChange', s); if (s.scenario === 'on') diag.setFilter({ onlyScenarioOn: true }); } });
+
+  function opsAtLine(line) { const op = ops.find((o) => line >= o.lineStart && line <= o.lineEnd); return op ? op.index : null; }
+  log('ready', { panels: Object.keys(P).filter((k) => typeof P[k] === 'function') });
+  void tools;
+})();
+</script>
+</body>
+</html>
