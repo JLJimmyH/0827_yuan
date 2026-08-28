@@ -508,6 +508,14 @@
         // 展開圖沒有第三個維度可以查高度圖（同一個 XY 在不同角度是工件的不同部位）
         return `X ${fmt(hh)}  A ${fmt(vv / angK())}°`;
       }
+      if (rotaryOn()) {
+        // 圓棒橫截面：現場真正想知道的是「離軸心多遠、切進去多深」
+        const c = S.data.rotaryCenter || { y: 0, z: 0 };
+        const rr = Math.hypot(hh - (c.y || 0), vv - (c.z || 0));
+        const rad = rotaryRadius();
+        return `Y ${fmt(hh)}  Z ${fmt(vv)}　離中心 ${fmt(rr)}`
+          + (rad > 0 ? `　（表面 R${fmt(rad)}，深 ${fmt(rad - rr)}）` : '');
+      }
       if (S.mode === 'top') { t = `X ${fmt(hh)}  Y ${fmt(vv)}`; wx = hh; wy = vv; }
       else {
         t = `${hAxis().toUpperCase()} ${fmt(hh)}  Z ${fmt(vv)}`;
@@ -531,6 +539,9 @@
         const c = S.data.rotaryCenter || { y: 0, z: 0 };
         const ctr = (c.y || c.z) ? `　迴轉中心 Y${fmt(c.y)} Z${fmt(c.z)}` : '';
         modeText = `展開圖（圓柱表面攤平）${rad}${ctr}`;
+      } else if (rotaryOn()) {
+        const r = rotaryRadius();
+        modeText = `圓棒橫截面　X = ${fmt(S.section)}${r > 0 ? `　（外圓 R${fmt(r)}）` : ''}`;
       } else modeText = `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
       let head = `${modeText} · ${scen}`;
       if (S.snapshotIndex != null) head += ` · 快照 ${S.snapshotIndex}`;
@@ -901,23 +912,73 @@
 
     // ---- 剖面 --------------------------------------------------------------
     /** 落在剖面帶內的段，投影成 (h, z) 的假段 {from:{x,y}, to:{x,y}, seg} */
+    /**
+     * 剖面 X 在第四軸下的意義：**圓棒的橫截面**。
+     * A 繞 X 轉，所以 X 不受旋轉影響——「哪些段落在這個 X 位置」的判斷完全不用改，
+     * 只要把 (Y, Z) 換成轉到工件座標的值，孔就會從圓周指向中心。
+     * 這樣剖面 X、3D、展開圖三張圖用的是同一套座標，不會互相矛盾。
+     * 剖面 Y 與俯視在四軸下沒有意義（工件轉了，那兩個投影面跟著工件跑），由 app 停用。
+     */
+    function rotaryOn() {
+      if (S.mode !== 'sectionX') return false;
+      const R = NC.geometry && NC.geometry.rotary;
+      return !!(S.data.rotaryOn && R && typeof R.samples === 'function');
+    }
+    function rotaryRadius() {
+      const u = unrollData();
+      return (u && u.radius && u.radius.radius > 0) ? u.radius.radius : 0;
+    }
+
     function projectedSegments() {
       const ha = hAxis(), ca = cutAxis(), v = S.section;
       const cell = S.data.sim ? S.data.sim.cell : 0.5;
+      const rot = rotaryOn();
+      const R = rot ? NC.geometry.rotary : null;
+      const center = S.data.rotaryCenter || { y: 0, z: 0 };
       const out = [];
       for (const seg of S.data.segments) {
-        if (seg.arc || seg.refReturn) continue;
+        if (seg.refReturn) continue;
+        if (seg.arc && !rot) continue;   // 四軸時圓弧也要畫（samples 會細分）
         const band = Math.max(cell, 0.25) / 2 + (S.toolRadius.get(seg.tool) || 0) + 1e-6;
         if (Math.abs(seg.from[ca] - v) > band || Math.abs(seg.to[ca] - v) > band) continue;
+        if (rot) {
+          const pw = R.samples(seg, { center });
+          for (let i = 0; i + 1 < pw.length; i++) {
+            out.push({ from: { x: pw[i].y, y: pw[i].z }, to: { x: pw[i + 1].y, y: pw[i + 1].z }, seg });
+          }
+          continue;
+        }
         out.push({ from: { x: seg.from[ha], y: seg.from.z }, to: { x: seg.to[ha], y: seg.to.z }, seg });
       }
       return out;
+    }
+
+    /** 第四軸的剖面素材：圓棒的橫截面（一個圓），不是方塊 */
+    function drawStockSectionRotary() {
+      const r = rotaryRadius();
+      if (!(r > 0)) return;
+      const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      const V = curView();
+      const [cx, cy] = toScreen(c.y || 0, c.z || 0);
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(cx, cy, r * V.scale, 0, TAU);
+      ctx.fillStyle = C.stockFill; ctx.fill();
+      ctx.strokeStyle = C.stockLine; ctx.lineWidth = 1.5; ctx.stroke();
+      // 迴轉中心的十字：分度加工的一切都繞著它
+      ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      const t = Math.min(r * V.scale, 40) + 8;
+      ctx.beginPath();
+      ctx.moveTo(cx - t, cy); ctx.lineTo(cx + t, cy);
+      ctx.moveTo(cx, cy - t); ctx.lineTo(cx, cy + t);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     function drawStockSection() {
       const { sim, stock } = S.data;
       const ha = hAxis(), ca = cutAxis(), v = S.section;
       ctx.lineWidth = 1.5; ctx.setLineDash([]);
+      if (rotaryOn()) { drawStockSectionRotary(); return; }
       if (stock) {
         const inside = v >= stock.min[ca] - 1e-9 && v <= stock.max[ca] + 1e-9;
         const r = rectW(stock.min[ha], stock.min.z, stock.max[ha], stock.max.z);
@@ -983,15 +1044,33 @@
       }
     }
 
+    /** 四軸剖面的包絡：圓棒外圓 + 切削段（rapid 在工件座標下是繞著工件的大弧，不算） */
+    function rotarySectionBounds() {
+      const b = newBounds();
+      const r = rotaryRadius();
+      const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      if (r > 0) {
+        extend(b, (c.y || 0) - r, (c.z || 0) - r);
+        extend(b, (c.y || 0) + r, (c.z || 0) + r);
+      }
+      for (const it of projectedSegments()) {
+        if (it.seg.kind === 'rapid') continue;
+        extend(b, it.from.x, it.from.y); extend(b, it.to.x, it.to.y);
+      }
+      return validBounds(b);
+    }
+
     function renderSection() {
       if (S.visible.stock) drawStockSection();
       drawGrid();
-      // Z = 0 基準線
-      const [px, , pw] = plotRect();
-      const [, zy] = toScreen(0, 0);
-      ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
-      ctx.beginPath(); ctx.moveTo(px, zy); ctx.lineTo(px + pw, zy); ctx.stroke();
-      ctx.setLineDash([]);
+      // Z = 0 基準線；四軸的基準是迴轉中心（drawStockSectionRotary 已經畫了十字），不是 Z0
+      if (!rotaryOn()) {
+        const [px, , pw] = plotRect();
+        const [, zy] = toScreen(0, 0);
+        ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+        ctx.beginPath(); ctx.moveTo(px, zy); ctx.lineTo(px + pw, zy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
       const items = projectedSegments();
       drawSegmentsSection(items);
       drawHighlightSection(items);
@@ -1015,6 +1094,7 @@
       ctx.restore();
       if (S.mode === 'top') drawRulers('X', 'Y');
       else if (S.mode === 'unroll') drawRulersUnroll();
+      else if (rotaryOn()) drawRulers('Y（工件）', 'Z（工件）');
       else drawRulers(hAxis().toUpperCase(), 'Z');
       drawHud();
     }
@@ -1025,7 +1105,8 @@
       if (!(w > 0 && h > 0)) { S.needFit = true; return api; }
       const b = S.mode === 'top' ? topBounds(S.data)
         : S.mode === 'unroll' ? unrollBounds()
-          : sectionBounds(S.data, hAxis());
+          : rotaryOn() ? rotarySectionBounds()
+            : sectionBounds(S.data, hAxis());
       let V;
       if (b) V = fitTransform(b, w, h, PAD);
       else { const [px, py, pw, ph] = plotRect(); V = { scale: 2, ox: px + pw / 2, oy: py + ph / 2, empty: true }; }
@@ -1154,6 +1235,8 @@
           // 半徑 0 = 由程式推估；使用者在設定填了直徑就以他填的為準。
           rotaryCenter: d.rotaryCenter || (d.rotary && d.rotary.center) || { y: 0, z: 0 },
           rotaryRadius: (d.rotary && d.rotary.radius > 0) ? d.rotary.radius : 0,
+          // 有第四軸時剖面 X 改畫圓棒橫截面（與 3D／展開圖同一套工件座標，不互相矛盾）
+          rotaryOn: !!d.rotary,
         };
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;

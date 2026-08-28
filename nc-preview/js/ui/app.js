@@ -865,7 +865,21 @@
       el.btnModeUnroll.title = on
         ? `第四軸展開圖：把圓柱工件的表面攤平（橫軸＝X 軸向位置，縱軸＝${rot.axis} 角度）。分度孔的角度等不等分，這張圖一眼就看得出來。`
         : '這支程式沒有用到第四軸（或 A 從頭到尾沒轉過），展開圖沒有東西可以畫';
-      // 停用的時候如果正停在展開圖，要退回俯視，不然畫面會卡在一張空圖
+
+      // 四軸時所有視圖必須是同一套座標，不然兩張圖會互相矛盾。
+      // 剖面 X 轉得過去（A 繞 X 轉，X 不受影響）→ 變成圓棒橫截面，與 3D／展開圖一致。
+      // 俯視與剖面 Y 的投影面會跟著工件轉，轉過去之後畫出來的東西沒有意義 → 停用。
+      const NO_ROTARY_MODES = { top: '俯視', sectionY: '剖面 Y' };
+      for (const b of document.querySelectorAll('.app-seg__btn')) {
+        const m = b.dataset.mode;
+        if (!NO_ROTARY_MODES[m]) continue;
+        b.disabled = on;
+        b.title = on
+          ? `第四軸程式不適用：工件會轉，${NO_ROTARY_MODES[m]}的投影面跟著工件跑，畫出來的東西沒有意義。請用「剖面 X」（圓棒橫截面）、3D 或展開圖。`
+          : '';
+      }
+      // 停用時如果正停在那個模式，換到還能看的那一張
+      if (on && (viewMode === 'top' || viewMode === 'sectionY')) setViewMode('sectionX');
       if (!on && viewMode === 'unroll') setViewMode('top');
     }
 

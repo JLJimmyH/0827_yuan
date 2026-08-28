@@ -463,3 +463,58 @@ test('沒有 sim 只畫素材填色與外框；沒有 canvas 拋錯', () => {
   assert.ok(c.ctx.ops.some((o) => o.op === 'fillRect' && o.fill === 'rgba(214,214,214,0.55)'));
   assert.throws(() => NC.ui.createView2D(null), /canvas/);
 });
+
+// ---------------------------------------------------------------------------
+// 第四軸：剖面 X → 圓棒橫截面（與 3D／展開圖同一套工件座標）
+// ---------------------------------------------------------------------------
+function rotaryData() {
+  // A0 與 A90 各一個徑向孔：從 R 點 Z25 鑽到 Z10（工件半徑 25）
+  const mk = (line, a, fromZ, toZ) => ({
+    id: line, line, opIndex: 0, tool: 1, kind: 'drill', sub: 'plunge',
+    from: { x: 20, y: 0, z: fromZ }, to: { x: 20, y: 0, z: toZ },
+    feed: 70, path: 'programmed', a,
+  });
+  return {
+    segments: [mk(1, 0, 25, 10), mk(2, 90, 25, 10)],
+    sim: null, stock: null,
+    toolTable: { programKey: 'r', tools: [{ t: 1, diameter: 8 }], offsets: [], updatedAt: '' },
+    scenario: 'off',
+    rotary: { center: { y: 0, z: 0 }, radius: 25 },
+    rotaryCenter: { y: 0, z: 0 },
+  };
+}
+
+test('四軸剖面 X：孔轉到工件座標——A0 在正上方、A90 在 +Y 側', () => {
+  const { view } = makeView(rotaryData());
+  view.setMode('sectionX').setSection(20).fit(false).render();
+  // 內部投影不外露，改由「畫出來的線」驗證：兩個孔應該互相垂直（一個沿 Z、一個沿 Y）
+  const R = NC.geometry.rotary;
+  const segs = rotaryData().segments;
+  const p0 = R.samples(segs[0], { center: { y: 0, z: 0 } });
+  const p1 = R.samples(segs[1], { center: { y: 0, z: 0 } });
+  // A0：Y 不動、Z 從 25 到 10（正上方往中心）
+  assert.ok(Math.abs(p0[0].y) < 1e-9 && Math.abs(p0[p0.length - 1].y) < 1e-9);
+  assert.ok(p0[0].z > p0[p0.length - 1].z);
+  // A90：Z 不動、Y 從 25 到 10（+Y 側往中心）
+  assert.ok(Math.abs(p1[0].z) < 1e-9 && Math.abs(p1[p1.length - 1].z) < 1e-9);
+  assert.ok(p1[0].y > p1[p1.length - 1].y);
+});
+
+test('四軸剖面 X：素材畫成圓（不是方塊），HUD 標明是橫截面', () => {
+  const { c, view } = makeView(rotaryData());
+  view.setMode('sectionX').setSection(20).fit(false).render();
+  const arcs = c.ctx.ops.filter((o) => o.op === 'arc');
+  assert.ok(arcs.length >= 1, '應該有圓（圓棒外圓）');
+  assert.ok(texts(c).some((t) => /圓棒橫截面/.test(t)), 'HUD 要說明這是橫截面');
+  assert.ok(texts(c).some((t) => /Y（工件）/.test(t)), '軸名要標明是工件座標');
+});
+
+test('沒有第四軸時剖面 X 維持原本行為（方塊素材、Z 基準線）', () => {
+  const d = rotaryData();
+  delete d.rotary; delete d.rotaryCenter;
+  d.stock = { min: { x: 0, y: -10, z: -5 }, max: { x: 40, y: 10, z: 0 }, source: 'user', fixtures: [] };
+  const { c, view } = makeView(d);
+  view.setMode('sectionX').setSection(20).fit(false).render();
+  assert.ok(!texts(c).some((t) => /圓棒橫截面/.test(t)));
+  assert.ok(c.ctx.ops.some((o) => o.op === 'fillRect'), '三軸剖面的素材仍是方塊');
+});
