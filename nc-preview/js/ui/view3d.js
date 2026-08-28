@@ -55,9 +55,10 @@
   // 下半圈永遠是死角（現場回報「有 A 軸的物件看了會有死角」）。放到 ±89°：正上方與正下方
   // 都看得到，只留最後 1° 不給，因為 up 向量（0,0,1）在正負 90° 剛好退化、lookAt 會算不出來。
   const EL_MIN = -89 * DEG, EL_MAX = 89 * DEG;
-  // 剖切至少要留下工件的多少比例。剖面拉到端面附近時，「相機那一側」可能就是整根工件，
-  // 照切下去畫面會整個空掉（現場回報「轉到一定角度他就消失」）——這時候改切另一邊。
-  const CLIP_KEEP_MIN = 0.2;
+  // 剖切預設切掉哪一側（+1 = 丟掉座標大的那半邊）。挑的是預設相機（az −60°、el 28°，
+  // 眼睛在 +X／−Y 側）看得到斷面的那一邊：剖面 X 丟 +X、剖面 Y 丟 −Y。
+  // **這是固定值，不跟相機也不跟滑桿走**——見 clipPlaneFor 的說明。
+  const CLIP_SIGN = { x: 1, y: -1 };
 
   function hexRgb(hex) {
     const s = String(hex).replace('#', '');
@@ -986,27 +987,17 @@
   /**
    * 剖切平面 [nx, ny, nz, d]：著色器丟掉 `dot(pos, n) > d` 的片段。
    *
-   * 法線原則上朝**相機那一側**——不管把工件轉到哪個角度，被切掉的都是擋住斷面的那半邊，
-   * 所以拖剖面滑桿的時候一定看得到剛切出來的那個面。
-   *
-   * 但剖面拉到工件端面附近時，「相機那一側」可能就是整根工件，照切下去畫面會整個空掉。
-   * 所以給了 `range`（工件在這一軸的範圍）時會檢查留下來的厚度：不到 `CLIP_KEEP_MIN`
-   * 就改切另一邊——斷面雖然背對相機，至少工件還在，轉一下就看得到。
+   * **方向是固定的，不跟相機也不跟剖面位置走。** 早期版本兩者都跟過：
+   * 跟相機的話，繞到平面另一側時整塊料會瞬間換邊（剖面靠近端面時那一換就等於整個消失）；
+   * 跟「留下來夠不夠多」的話，滑桿拉過某個值也會換邊。現場兩種都回報過同一句話——
+   * 換邊會讓人瞬間認不出自己在看哪一面。所以寧可讓人自己按「換一邊切」。
    *
    * @param {'x'|'y'} axis
-   * @param {number[]} eye 相機位置
-   * @param {number[]} [range] 工件在這一軸的 [min, max]
+   * @param {boolean} [flip] 使用者按過「換一邊切」
    */
-  function clipPlaneFor(axis, value, eye, range) {
+  function clipPlaneFor(axis, value, flip) {
     if ((axis !== 'x' && axis !== 'y') || !Number.isFinite(value)) return null;
-    const k = axis === 'x' ? 0 : 1;
-    let sign = (eye && eye[k] < value) ? -1 : 1;
-    if (range && Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0]) {
-      const span = range[1] - range[0];
-      // sign > 0 → 丟掉 p > value，留下 range[0]…value；sign < 0 → 留下 value…range[1]
-      const keep = sign > 0 ? (value - range[0]) : (range[1] - value);
-      if (keep < span * CLIP_KEEP_MIN) sign = -sign;
-    }
+    const sign = CLIP_SIGN[axis] * (flip ? -1 : 1);
     return axis === 'x' ? [sign, 0, 0, sign * value] : [0, sign, 0, sign * value];
   }
 
@@ -1231,9 +1222,8 @@
       path: null, pathBuf: null,
       stockBuf: null, axesBuf: null,
       // 剖面：axis 為 null 時整組不畫。clip = 把靠相機那半邊切掉，直接看斷面。
-      section: { axis: null, value: 0, clip: false },
+      section: { axis: null, value: 0, clip: false, flip: false },
       sectionFillBuf: null, sectionEdgeBuf: null,
-      sectionRange: null,   // 工件在剖面軸上的範圍（剖切要靠它判斷會不會把工件切光）
       zRange: [0, -10],
       building: false, buildToken: 0, buildProgress: 1,
       pickCb: null, progressCb: null,
@@ -1432,14 +1422,12 @@
     function rebuildSection() {
       freeLineBuf(S.sectionFillBuf); freeLineBuf(S.sectionEdgeBuf);
       S.sectionFillBuf = S.sectionEdgeBuf = null;
-      S.sectionRange = null;
       const sec = S.section;
       if (!sec.axis) return;
       // 用工件的包絡、不是整個場景：含刀具路徑的話平面會被撐成一大片，看起來像切歪了
       const b = solidBounds(S.data);
       const plane = buildSectionPlane(b, sec.axis, sec.value);
       if (!plane) return;
-      S.sectionRange = sec.axis === 'x' ? [b.min.x, b.max.x] : [b.min.y, b.max.y];
       S.sectionFillBuf = makeLineBuf(plane.fill);
       S.sectionEdgeBuf = makeLineBuf(plane.edge);
     }
@@ -1532,7 +1520,7 @@
       gl.uniform3f(ML.uDeep, DEEP_RGB[0] / 255, DEEP_RGB[1] / 255, DEEP_RGB[2] / 255);
       gl.uniform3f(ML.uFixture, FIXTURE_RGB[0] / 255, FIXTURE_RGB[1] / 255, FIXTURE_RGB[2] / 255);
       gl.uniform2f(ML.uZRange, S.zRange[0], S.zRange[1]);
-      const clip = S.section.clip ? clipPlaneFor(S.section.axis, S.section.value, eyePos(), S.sectionRange) : null;
+      const clip = S.section.clip ? clipPlaneFor(S.section.axis, S.section.value, S.section.flip) : null;
       gl.uniform1f(ML.uClipOn, clip ? 1 : 0);
       gl.uniform4f(ML.uClip, clip ? clip[0] : 0, clip ? clip[1] : 0, clip ? clip[2] : 0, clip ? clip[3] : 1e9);
       gl.uniform3f(ML.uCut, CUT_RGB[0] / 255, CUT_RGB[1] / 255, CUT_RGB[2] / 255);
@@ -1921,22 +1909,24 @@
       },
       /**
        * 剖面標示。`axis` 給 'x'／'y' 就在那個位置畫一片半透明的平面，
-       * `clip:true` 再把靠相機那半邊切掉——旁邊的 2D 剖面圖畫的就是這個斷面。
+       * `clip:true` 再把其中一邊切掉——旁邊的 2D 剖面圖畫的就是這個斷面。
+       * 切掉哪一邊由 `flip` 決定（見 clipPlaneFor），**不會自己換邊**。
        * `axis:null`（或不給）關掉整組。
-       * @param {{axis?:'x'|'y'|null, value?:number, clip?:boolean}|null} o
+       * @param {{axis?:'x'|'y'|null, value?:number, clip?:boolean, flip?:boolean}|null} o
        */
       setSection(o) {
         o = o || {};
         const axis = (o.axis === 'x' || o.axis === 'y') ? o.axis : null;
         const value = Number.isFinite(o.value) ? Number(o.value) : S.section.value;
         const clip = 'clip' in o ? !!o.clip : S.section.clip;
+        const flip = 'flip' in o ? !!o.flip : S.section.flip;
         const changed = axis !== S.section.axis || value !== S.section.value;
-        S.section = { axis, value, clip };
+        S.section = { axis, value, clip, flip };
         if (changed) rebuildSection();
         requestRender();
         return api;
       },
-      getSection() { return { axis: S.section.axis, value: S.section.value, clip: S.section.clip }; },
+      getSection() { return { axis: S.section.axis, value: S.section.value, clip: S.section.clip, flip: S.section.flip }; },
       highlightLine(n) { S.hlLine = n == null ? null : Number(n); requestRender(); return api; },
       highlightTool(t) { S.hlTool = t == null ? null : Number(t); requestRender(); return api; },
       onPick(cb) { S.pickCb = typeof cb === 'function' ? cb : null; return api; },

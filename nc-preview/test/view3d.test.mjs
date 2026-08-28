@@ -757,34 +757,23 @@ test('buildSectionPlane：軸或位置不合法回 null', () => {
   assert.equal(V.buildSectionPlane(null, 'x', 0), null);
 });
 
-test('clipPlaneFor：切掉的永遠是相機那一側，斷面才看得到', () => {
-  // 相機在 +X 側 → 丟掉 x > value
-  const a = V.clipPlaneFor('x', 5, [100, 0, 0]);
+test('clipPlaneFor：方向固定，不跟相機也不跟剖面位置換邊', () => {
+  // 剖面 X 預設丟掉 +X 那半邊（預設相機在 +X 側，斷面朝著人）
+  const a = V.clipPlaneFor('x', 5);
   assert.deepEqual(a, [1, 0, 0, 5]);
-  assert.ok(6 * a[0] > a[3], 'x=6（相機側）被丟掉');
+  assert.ok(6 * a[0] > a[3], 'x=6 被丟掉');
   assert.ok(!(4 * a[0] > a[3]), 'x=4 留著');
-  // 相機在 -X 側 → 反過來
-  const b = V.clipPlaneFor('x', 5, [-100, 0, 0]);
-  assert.deepEqual(b, [-1, 0, 0, -5]);
-  assert.ok(4 * b[0] > b[3], 'x=4（這時候才是相機側）被丟掉');
-  assert.ok(!(6 * b[0] > b[3]), 'x=6 留著');
-  // Y 軸同理
-  assert.deepEqual(V.clipPlaneFor('y', -2, [0, 50, 0]), [0, 1, 0, -2]);
-  assert.equal(V.clipPlaneFor('z', 0, [0, 0, 1]), null);
-});
-
-test('clipPlaneFor：剖面拉到端面時不把工件切光（現場的「轉到一定角度就消失」）', () => {
-  const range = [-28, 28];   // 工件在 X 上的範圍
-  // 剖面就在最左端、相機在 +X：照相機規則會丟掉 x > -28 = 整根工件 → 要翻過來
-  const a = V.clipPlaneFor('x', -28, [100, 0, 0], range);
-  assert.deepEqual(a, [-1, 0, 0, 28], '改切左邊那一小片，工件留著');
-  assert.ok(!(0 * a[0] > a[3]), '工件中段留著（沒有被切光）');
-  // 剖面在中間：留下來夠多，維持「切掉相機那一側」
-  const b = V.clipPlaneFor('x', 0, [100, 0, 0], range);
-  assert.deepEqual(b, [1, 0, 0, 0]);
-  assert.deepEqual(V.clipPlaneFor('x', 0, [-100, 0, 0], range), [-1, 0, 0, -0]);
-  // 沒給 range 就維持純相機規則（舊行為）
-  assert.deepEqual(V.clipPlaneFor('x', -28, [100, 0, 0]), [1, 0, 0, -28]);
+  // 剖面 Y 預設丟掉 −Y 那半邊（預設相機在 −Y 側）
+  assert.deepEqual(V.clipPlaneFor('y', 5), [0, -1, 0, -5]);
+  // 同一個位置無論剖面值大小、無論相機在哪，結果都一樣——不會自己換邊
+  for (const v of [-28, -5, 0, 13, 24, 28]) {
+    assert.equal(V.clipPlaneFor('x', v)[0], 1, `X=${v} 的方向不變`);
+    assert.equal(V.clipPlaneFor('y', v)[1], -1, `Y=${v} 的方向不變`);
+  }
+  // 只有使用者按「換邊」才翻
+  assert.deepEqual(V.clipPlaneFor('x', 5, true), [-1, 0, 0, -5]);
+  assert.deepEqual(V.clipPlaneFor('y', 5, true), [0, 1, 0, 5]);
+  assert.equal(V.clipPlaneFor('z', 0), null);
 });
 
 test('solidBounds：只看工件，不把換刀點那種高處的路徑算進去', () => {

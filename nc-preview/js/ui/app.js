@@ -244,6 +244,7 @@
       viewHost: $('viewHost'), view3dHost: $('view3dHost'), viewCanvas3d: $('viewCanvas3d'),
       viewSplit: $('viewSplit'), viewSplitBar: $('viewSplitBar'),
       chkSplit: $('chkSplit'), chkClip: $('chkClip'), lblSplit: $('lblSplit'), lblClip: $('lblClip'),
+      btnClipFlip: $('btnClipFlip'),
       btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'), rotaryBanner: $('rotaryBanner'),
       btnModeUnroll: $('btnModeUnroll'), chkRotary: $('chkRotary'), lblRotary: $('lblRotary'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
@@ -275,7 +276,7 @@
       simStale: false,     // 目前畫面上的 heightmap 是不是上一輪的（HUD 會標「更新中」）
       rotary: null,        // 第四軸裝夾參數（跟著程式走，見 ROTARY_KEY）；null = 用推估值
       // 視圖版面偏好（機台層級，跟著 SETTINGS_KEY 一起存）。ratio = 並排時左邊 2D 佔的比例。
-      viewPref: { split: true, clip: true, ratio: 0.5 },
+      viewPref: { split: true, clip: true, clipFlip: false, ratio: 0.5 },
     };
 
     // ---- 還原設定 ----
@@ -291,6 +292,7 @@
           const v = o.view;
           if ('split' in v) state.viewPref.split = !!v.split;
           if ('clip' in v) state.viewPref.clip = !!v.clip;
+          if ('clipFlip' in v) state.viewPref.clipFlip = !!v.clipFlip;
           if (v.ratio > 0.15 && v.ratio < 0.85) state.viewPref.ratio = Number(v.ratio);
         }
       } catch (e) { /* 壞掉就用預設 */ }
@@ -1281,6 +1283,7 @@
         el.lblSplit.title = '這個瀏覽器／裝置開不了 WebGL，沒有 3D 可以並排';
       }
       show(el.lblClip, split && sectionMode());
+      show(el.btnClipFlip, split && sectionMode() && state.viewPref.clip);
       if (show3d && v3) {
         // 只有剛建好的才補餵資料——setData 會整組重建網格，每按一次模式鈕就重建太貴了
         // （平常的資料更新走 refresh() 的 eachView）
@@ -1297,7 +1300,12 @@
       const shown = el.view3dHost && !el.view3dHost.classList.contains('nc-hidden');
       const on = sectionMode() && shown;
       view3d.setSection(on
-        ? { axis: viewMode === 'sectionX' ? 'x' : 'y', value: Number(el.rngSection.value), clip: state.viewPref.clip }
+        ? {
+          axis: viewMode === 'sectionX' ? 'x' : 'y',
+          value: Number(el.rngSection.value),
+          clip: state.viewPref.clip,
+          flip: state.viewPref.clipFlip,
+        }
         : { axis: null });
     }
 
@@ -1338,6 +1346,14 @@
     });
     el.chkClip.addEventListener('change', () => {
       state.viewPref.clip = el.chkClip.checked;
+      persistSettings();
+      show(el.btnClipFlip, el.chkClip.checked && sectionMode() && !el.view3dHost.classList.contains('nc-hidden'));
+      syncSection3D();
+    });
+    // 剖切方向刻意不自動判斷——跟相機或跟剖面位置自己換邊，換的那一瞬間會讓人認不出
+    // 自己在看哪一面（現場兩種都回報過）。要換就由使用者按。
+    el.btnClipFlip.addEventListener('click', () => {
+      state.viewPref.clipFlip = !state.viewPref.clipFlip;
       persistSettings();
       syncSection3D();
     });
