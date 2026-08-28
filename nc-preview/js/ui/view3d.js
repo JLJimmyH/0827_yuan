@@ -695,12 +695,15 @@
         indices[t++] = a; indices[t++] = c; indices[t++] = d;
       }
     }
+    // 端面繞向：θ 增加的方向繞出來的法線是 +X（右手定則），
+    // 所以 xMax 那端照 (心, i0, i1) 走、xMin 那端要反過來，兩端的正面才都朝外。
+    // 寫反的話背面剔除會把端面剃掉，從某些角度就會直接看穿進圓棒內部。
     for (let c = 0; c < 2; c++) {
       const b = capBase[c];
       for (let iy = 0; iy < ny; iy++) {
         const i0 = b + 1 + iy, i1 = b + 1 + ((iy + 1) % ny);
-        if (c === 0) { indices[t++] = b; indices[t++] = i1; indices[t++] = i0; }
-        else { indices[t++] = b; indices[t++] = i0; indices[t++] = i1; }
+        if (c === 0) { indices[t++] = b; indices[t++] = i0; indices[t++] = i1; }
+        else { indices[t++] = b; indices[t++] = i1; indices[t++] = i0; }
       }
     }
     return {

@@ -592,3 +592,30 @@ test('analyze：三軸程式維持方塊素材', () => {
   assert.notEqual(res.stock.kind, 'cylinder');
   assert.ok(res.stock.min && res.stock.max);
 });
+
+test('圓柱素材：鑽穿軸心時對面那半也要被挖掉（貫穿孔）', async () => {
+  // 圓棒半徑 20，從 A0 鑽到 Z-6 → 穿過軸心 6 mm，對面（A180）應該被挖到剩 6
+  const prog2 = [
+    'M6T6(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+    'G98G81Z-6.R25.F70M8',
+    'G80',
+  ].join('\n');
+  const res = NC.analyzeSync({ text: `%\nO1\n${prog2}\nM30\n%` });
+  const sim = cylSim(0.5, 20);
+  const out = await NC.sim.run(sim, res.scenarios.off, res.toolTable, NC.util.defaultSettings(), {});
+  const k = Math.PI / 180 * 20;
+  near(NC.sim.heightAt(out, 20, 0), 0, 1e-6, 'A0 側鑽到軸心');
+  near(NC.sim.heightAt(out, 20, 180 * k), 6, 0.5, 'A180 側應該被穿出一個剩 6 的孔');
+  // 沒穿到的角度不受影響
+  near(NC.sim.heightAt(out, 20, 90 * k), 20, 1e-6);
+});
+
+test('圓柱素材：沒鑽到軸心就不會動到對面', async () => {
+  const res = NC.analyzeSync({ text: `%\nO1\n${CYL_PROG}\nM30\n%` });
+  const sim = cylSim(0.5, 20);
+  const out = await NC.sim.run(sim, res.scenarios.off, res.toolTable, NC.util.defaultSettings(), {});
+  const k = Math.PI / 180 * 20;
+  // CYL_PROG 只鑽到剩半徑 10（沒過軸心），四個孔彼此不該互相挖穿
+  for (const a of [0, 90, 180, 270]) near(NC.sim.heightAt(out, 20, a * k), 10, 0.5);
+});

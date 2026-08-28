@@ -322,13 +322,25 @@
           const s = zb < za ? Math.min(1, t + w) : Math.max(0, t - w);
           h = za + (zb - za) * s;
         }
-        if (h < floorZ) h = floorZ;
+        // 圓柱素材：h 是「離軸心多遠」。刀尖切到負的代表**穿過軸心**（貫穿孔），
+        // 對面那半圈也被挖穿了——高度圖一格只記一個半徑，不補這一刀的話
+        // 鑽穿的孔在成品上只會有一半。穿出去多深，對面就挖到多深。
+        let through = 0;
+        if (h < floorZ) {
+          if (wrapY) through = floorZ - h;
+          h = floorZ;
+        }
         const idx = rowY * nx + ix;
         const old = height[idx];
         if (h < old - 1e-7) {
           if (mask[idx]) { acc.fixtureHit = mask[idx]; acc.fixturePos = { x: cx, y: cy, z: old }; continue; }
           removed += old - h;
           height[idx] = h;
+        }
+        if (through > 0) {
+          const oi = (((rowY + (ny >> 1)) % ny) * nx) + ix;
+          const oldO = height[oi];
+          if (through < oldO - 1e-7) { removed += oldO - through; height[oi] = through; }
         }
       }
     }
@@ -388,23 +400,11 @@
    */
   function unrollPoints(sim, seg) {
     const RG = NC.geometry && NC.geometry.rotary;
-    if (!RG || typeof RG.samples !== 'function') return [];
+    if (!RG || typeof RG.samples !== 'function' || typeof RG.unrollPath !== 'function') return [];
     const pw = RG.samples(seg, { center: sim.center, tol: sim.cell / 2 });
     const k = Math.PI / 180 * sim.radius;
-    const out = [];
-    let prev = null;
-    for (const q of pw) {
-      const u = RG.unrollPoint(q, sim.center);
-      let th = u.theta;
-      // 相鄰取樣點跨過 ±180 時要接起來，否則會在展開圖上憑空多一條橫越整圈的線
-      if (prev != null) {
-        while (th - prev > 180) th -= 360;
-        while (th - prev < -180) th += 360;
-      }
-      prev = th;
-      out.push({ x: u.x, s: th * k, r: u.r });
-    }
-    return out;
+    // unrollPath 已經處理跨 ±180 與穿過軸心（r 變號），這裡只換算成弧長
+    return RG.unrollPath(pw, sim.center).map((u) => ({ x: u.x, s: u.theta * k, r: u.r }));
   }
 
   /** 圓柱模式的切削：映射之後就是一般的平面蓋章 */

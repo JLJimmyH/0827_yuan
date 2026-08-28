@@ -953,14 +953,31 @@
     return { x: pw.x, theta: Math.atan2(dy, dz) * RAD2DEG, r: Math.hypot(dy, dz) };
   }
 
-  /** 讓一串角度連續（跨 ±180 時補 360，展開圖才不會出現整條垂直的假線） */
-  function unwrapAngles(list) {
-    for (let i = 1; i < list.length; i++) {
-      let d = list[i].theta - list[i - 1].theta;
-      while (d > 180) { list[i].theta -= 360; d -= 360; }
-      while (d < -180) { list[i].theta += 360; d += 360; }
+  /**
+   * 一串工件座標點 → 展開座標，並把路徑連續化。兩件事：
+   *
+   * 1. **跨 ±180**：補 360，否則展開圖上會憑空多一條橫越整圈的假線。
+   * 2. **穿過軸心**：θ 在軸心是未定義的，刀從一側鑽穿過去時 `atan2` 會瞬間跳 180 度、
+   *    r 從 0 反彈回升——照字面讀就變成「刀沿著圓周掃了半圈」，完全不是那回事。
+   *    正確的描述是**角度不變、半徑變號**：r < 0 代表刀尖已經穿到軸心的另一邊。
+   *    模擬靠這個號誌才知道要把對面那半也挖掉（貫穿孔）。
+   */
+  function unrollPath(pw, center) {
+    const out = [];
+    let prev = null;
+    for (const p of pw) {
+      const u = unrollPoint(p, center);
+      let th = u.theta, r = u.r;
+      if (prev != null) {
+        let d = th - prev;
+        while (d > 180) { th -= 360; d -= 360; }
+        while (d < -180) { th += 360; d += 360; }
+        if (Math.abs(d) > 90) { th = prev; r = -r; }   // 穿過軸心
+      }
+      prev = th;
+      out.push({ x: u.x, theta: th, r });
     }
-    return list;
+    return out;
   }
 
   /**
@@ -977,7 +994,7 @@
     for (const seg of segments || []) {
       const pw = rotarySamples(seg, { center, tol: (opts && opts.tol) || 0.05 });
       if (!pw.length) continue;
-      const pts = unwrapAngles(pw.map((p) => unrollPoint(p, center)));
+      const pts = unrollPath(pw, center);
       // 對齊到程式寫的 A 值那一圈：atan2 給的是 -180…180，A270 會變成 -90。
       // 現場寫 A270 就想在圖上看到 270，所以整條折線平移到最接近 seg.a 的那一圈
       // （折線內部的連續性不受影響，因為是整條加同一個 360 的倍數）。
@@ -1086,6 +1103,7 @@
       point: rotaryPoint,
       samples: rotarySamples,
       unrollPoint,
+      unrollPath,
       unrollSegments,
       estimateRadius: estimateRotaryRadius,
       estimateCenter: estimateRotaryCenter,

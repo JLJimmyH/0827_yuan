@@ -698,3 +698,35 @@ test('buildCylinderMesh：downsample 會減少頂點數', () => {
   assert.ok(half.counts.vertices < full.counts.vertices);
   assert.equal(half.downsample, 2);
 });
+
+test('buildCylinderMesh：所有三角形都朝外（背面剔除才不會看穿）', () => {
+  // 未加工的圓柱是凸體：每個三角形的法線與「重心 → 物體中心」的反方向點積都該 > 0。
+  // 端面繞向寫反的話這條會抓到——症狀是從某些角度直接看穿進圓棒內部。
+  const sim = fakeCylSim(20, 7, 24);
+  const m = NC.ui.view3d.buildCylinderMesh(sim);
+  const P = m.positions;
+  const cx = (sim.origin.x + (sim.nx - 1) * sim.cellX) / 2;
+  let bad = 0;
+  for (let t = 0; t < m.indices.length; t += 3) {
+    const a = m.indices[t] * 3, b = m.indices[t + 1] * 3, c = m.indices[t + 2] * 3;
+    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz);
+    if (len < 1e-9) continue;   // 退化三角形（挖到軸心）不算
+    const gx = (P[a] + P[b] + P[c]) / 3 - cx;
+    const gy = (P[a + 1] + P[b + 1] + P[c + 1]) / 3;
+    const gz = (P[a + 2] + P[b + 2] + P[c + 2]) / 3;
+    if (nx * gx + ny * gy + nz * gz <= 0) bad++;
+  }
+  assert.equal(bad, 0, `${bad} 個三角形朝內`);
+});
+
+test('buildCylinderMesh：兩端封口的法線分別朝 ∓X', () => {
+  const sim = fakeCylSim(20, 5, 16);
+  const m = NC.ui.view3d.buildCylinderMesh(sim);
+  const side = sim.nx * 16;          // 側面頂點數（downsample 1 時 ny 不變）
+  const capA = side, capB = side + 17;
+  assert.equal(m.normals[capA * 3], -1, 'xMin 端法線朝 -X');
+  assert.equal(m.normals[capB * 3], 1, 'xMax 端法線朝 +X');
+});
