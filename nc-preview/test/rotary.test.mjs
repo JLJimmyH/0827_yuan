@@ -595,22 +595,42 @@ test('analyze：三軸程式維持方塊素材', () => {
   assert.ok(res.stock.min && res.stock.max);
 });
 
-test('圓柱素材：鑽穿軸心時對面那半也要被挖掉（貫穿孔）', async () => {
-  // 圓棒半徑 20，從 A0 鑽到 Z-6 → 穿過軸心 6 mm，對面（A180）應該被挖到剩 6
-  const prog2 = [
+async function runCyl(src, radius) {
+  const res = NC.analyzeSync({ text: `%
+O1
+${src}
+M30
+%` });
+  const sim = cylSim(0.5, radius);
+  return NC.sim.run(sim, res.scenarios.off, res.toolTable, NC.util.defaultSettings(), {});
+}
+
+test('圓柱素材：只越過軸心一點點 → 對面的材料不能動（洞在工件內部）', async () => {
+  // 圓棒半徑 20，鑽到 Z-6：刀尖越過軸心 6mm，但離對面表面還有 14mm。
+  // 對面那一段材料好好的——高度圖表達不了內部空洞，記成「表面挖低」會憑空削掉一大塊。
+  const out = await runCyl([
     'M6T6(SG-8.5)',
     'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
     'G98G81Z-6.R25.F70M8',
     'G80',
-  ].join('\n');
-  const res = NC.analyzeSync({ text: `%\nO1\n${prog2}\nM30\n%` });
-  const sim = cylSim(0.5, 20);
-  const out = await NC.sim.run(sim, res.scenarios.off, res.toolTable, NC.util.defaultSettings(), {});
+  ].join('\n'), 20);
   const k = Math.PI / 180 * 20;
   near(NC.sim.heightAt(out, 20, 0), 0, 1e-6, 'A0 側鑽到軸心');
-  near(NC.sim.heightAt(out, 20, 180 * k), 6, 0.5, 'A180 側應該被穿出一個剩 6 的孔');
-  // 沒穿到的角度不受影響
+  near(NC.sim.heightAt(out, 20, 180 * k), 20, 1e-6, 'A180 側的材料應該完好');
   near(NC.sim.heightAt(out, 20, 90 * k), 20, 1e-6);
+});
+
+test('圓柱素材：真的鑽穿出對面表面 → 對面才有開口', async () => {
+  const out = await runCyl([
+    'M6T6(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+    'G98G81Z-25.R25.F70M8',
+    'G80',
+  ].join('\n'), 20);
+  const k = Math.PI / 180 * 20;
+  near(NC.sim.heightAt(out, 20, 0), 0, 1e-6, 'A0 側');
+  near(NC.sim.heightAt(out, 20, 180 * k), 0, 1e-6, 'A180 側被穿出開口');
+  near(NC.sim.heightAt(out, 20, 90 * k), 20, 1e-6, '沒鑽到的角度不受影響');
 });
 
 test('圓柱素材：沒鑽到軸心就不會動到對面', async () => {

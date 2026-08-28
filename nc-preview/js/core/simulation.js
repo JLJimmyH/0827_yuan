@@ -340,7 +340,10 @@
         if (through > 0) {
           const oi = (((rowY + (ny >> 1)) % ny) * nx) + ix;
           const oldO = height[oi];
-          if (through < oldO - 1e-7) { removed += oldO - through; height[oi] = through; }
+          // 刀尖要**真的穿出對面表面**才會有開口。只是越過軸心一點點的話，
+          // 對面那一段材料還好好的（洞在工件內部），高度圖表達不了那種內部空洞——
+          // 若照「表面被挖低」記進去，會憑空削掉一大塊還在的材料。
+          if (through >= oldO - 1e-7) { removed += oldO; height[oi] = 0; }
         }
       }
     }
