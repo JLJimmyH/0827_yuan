@@ -233,10 +233,13 @@
    * 注意：這裡**不做**工件旋轉的座標轉換——段的 XYZ 一律是程式座標。
    * `a` 只是「畫這一段時 A 轉到幾度」，供畫面分面顯示與 R37 檢查用（CONTRACT §13）。
    */
-  function tagRot(seg, act) {
+  function tagRot(seg, act, withFrom) {
     if (!seg || !act || act.a === undefined) return seg;
     seg.a = act.a;
-    if (act.aFrom !== undefined) seg.aFrom = act.aFrom;
+    // aFrom 代表「這一段期間 A 在轉」。一個動作展開成多段時（固定循環、G28），
+    // 轉動只發生在最前面的定位段——Fanuc 是先定位到位（含旋轉）再鑽。
+    // 每一段都掛 aFrom 的話，鑽孔段會被當成「邊轉邊鑽」，展開圖上整組孔會差一格角度。
+    if (act.aFrom !== undefined && withFrom !== false) seg.aFrom = act.aFrom;
     return seg;
   }
 
@@ -285,8 +288,8 @@
             const to = act.to ? c3(act.to) : c3(via);
             const s1 = Object.assign({}, base, { kind: 'rapid', from, to: via, feed: null, path: 'programmed', refReturn: true });
             const s2 = Object.assign({}, base, { kind: 'rapid', from: c3(via), to, feed: null, path: 'programmed', refReturn: true });
-            items.push(makeItem(blk, tagRot(s1, act), act, { flush: true }));
-            items.push(makeItem(blk, tagRot(s2, act), act, { flush: true }));
+            items.push(makeItem(blk, tagRot(s1, act, true), act, { flush: true }));
+            items.push(makeItem(blk, tagRot(s2, act, false), act, { flush: true }));
             cur = c3(to);
             n += 2;
             break;
@@ -294,9 +297,10 @@
           case 'hole': {
             const st = blk.after || blk.before || {};
             const segs = expandHole(act, { pos: cur, feed: st.feed });
-            for (const s of segs) {
+            for (let si = 0; si < segs.length; si++) {
+              const s = segs[si];
               Object.assign(s, base);
-              tagRot(s, act);
+              tagRot(s, act, si === 0);   // 只有第一段（定位到孔上方）才是轉動中
               items.push(makeItem(blk, s, act, { flush: true }));
               n++;
             }
@@ -865,11 +869,183 @@
     return { segments, diagnostics, bounds: computeBounds(segments) };
   }
 
+  // ---------------------------------------------------------------------------
+  // 第四軸：把「機台座標的刀尖位置」換算成「工件上被切到的位置」
+  //
+  // A 繞 X 軸轉，迴轉中心線平行 X 軸、位在 (y = center.y, z = center.z)。
+  // 工件轉 +A 度，等價於刀具繞著工件轉 -A 度，所以把刀尖繞中心線反轉 A 度就是答案。
+  // 中心預設 (0,0)：四軸的裝夾慣例是 G54 的 Y0/Z0 對到夾頭中心線。
+  //
+  // 這一段是「分度視圖」與「3D 圓棒」共用的核心。段本身（`Segment.from/to`）**不會**被改動，
+  // 那仍然是程式座標；要看工件上的樣子一律走這裡的函式。
+  // ---------------------------------------------------------------------------
+  const ROT_STEP_DEG = 3;        // A 轉動時的取樣角距（度）
+  const DEG2RAD = Math.PI / 180;
+  const RAD2DEG = 180 / Math.PI;
+
+  function rotCenter(opts) {
+    const c = (opts && opts.center) || {};
+    return { y: num(c.y, 0), z: num(c.z, 0) };
+  }
+
+  /**
+   * 單點：機台座標 → 工件座標（把刀尖繞迴轉中心線反轉 aDeg）。
+   * @param {Vec3} p
+   * @param {number} aDeg   第四軸角度（度）
+   * @param {{y:number,z:number}} [center]
+   * @returns {Vec3}
+   */
+  function rotaryPoint(p, aDeg, center) {
+    const cy = center ? num(center.y, 0) : 0;
+    const cz = center ? num(center.z, 0) : 0;
+    const t = num(aDeg, 0) * DEG2RAD;
+    const cs = Math.cos(t), sn = Math.sin(t);
+    const dy = p.y - cy, dz = p.z - cz;
+    return { x: p.x, y: cy + dy * cs + dz * sn, z: cz - dy * sn + dz * cs };
+  }
+
+  /** 沿取樣折線依索引比例內插（圓弧已被 sampleSegment 細分過，線性內插誤差可忽略） */
+  function lerpPoly(pts, t) {
+    if (pts.length === 1) return pts[0];
+    const f = clamp01(t) * (pts.length - 1);
+    const i = Math.min(pts.length - 2, Math.floor(f));
+    const u = f - i;
+    const a = pts[i], b = pts[i + 1];
+    return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u, z: a.z + (b.z - a.z) * u };
+  }
+  function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+  /**
+   * 一段 → 工件座標的取樣點。
+   * A 沒轉時只是把端點（圓弧仍照 sampleSegment 細分）搬過去；
+   * A 有轉時路徑在工件上是曲線，依 ROT_STEP_DEG 補足取樣點。
+   * @param {Segment} seg
+   * @param {{center?:{y:number,z:number}, tol?:number}} [opts]
+   * @returns {Vec3[]}  工件座標
+   */
+  function rotarySamples(seg, opts) {
+    const center = rotCenter(opts);
+    const tol = (opts && opts.tol > 0) ? opts.tol : 0.05;
+    const a1 = num(seg.a, 0);
+    const a0 = seg.aFrom !== undefined ? num(seg.aFrom, a1) : a1;
+    const pts = sampleSegment(seg, tol);
+    if (Math.abs(a1 - a0) < EPS) return pts.map((p) => rotaryPoint(p, a1, center));
+    const need = Math.ceil(Math.abs(a1 - a0) / ROT_STEP_DEG) + 1;
+    const n = Math.max(pts.length, need);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const t = n === 1 ? 1 : i / (n - 1);
+      out.push(rotaryPoint(lerpPoly(pts, t), a0 + (a1 - a0) * t, center));
+    }
+    return out;
+  }
+
+  /**
+   * 工件座標點 → 展開圖座標。
+   * 圓柱攤平：橫軸 = X（軸向），縱軸 = 繞一圈的角度，r = 離迴轉中心的距離
+   * （r 小於工件半徑就是切進去了）。刀在正上方時 theta 剛好等於程式的 A 值。
+   * @returns {{x:number, theta:number, r:number}}  theta 為度，從正上方 +Z 量起、往 +Y 為正
+   */
+  function unrollPoint(pw, center) {
+    const cy = center ? num(center.y, 0) : 0;
+    const cz = center ? num(center.z, 0) : 0;
+    const dy = pw.y - cy, dz = pw.z - cz;
+    return { x: pw.x, theta: Math.atan2(dy, dz) * RAD2DEG, r: Math.hypot(dy, dz) };
+  }
+
+  /** 讓一串角度連續（跨 ±180 時補 360，展開圖才不會出現整條垂直的假線） */
+  function unwrapAngles(list) {
+    for (let i = 1; i < list.length; i++) {
+      let d = list[i].theta - list[i - 1].theta;
+      while (d > 180) { list[i].theta -= 360; d -= 360; }
+      while (d < -180) { list[i].theta += 360; d += 360; }
+    }
+    return list;
+  }
+
+  /**
+   * 全部段 → 展開圖折線。
+   * @param {Segment[]} segments
+   * @param {{center?:{y:number,z:number}, tol?:number}} [opts]
+   * @returns {{polylines:Array, bounds:{minX:number,maxX:number,minT:number,maxT:number,minR:number,maxR:number}|null}}
+   *   每條折線帶原段的 line／kind／tool／path／sub／refReturn，點選與著色才對得起來。
+   */
+  function unrollSegments(segments, opts) {
+    const center = rotCenter(opts);
+    const polylines = [];
+    let minX = Infinity, maxX = -Infinity, minT = Infinity, maxT = -Infinity, minR = Infinity, maxR = -Infinity;
+    for (const seg of segments || []) {
+      const pw = rotarySamples(seg, { center, tol: (opts && opts.tol) || 0.05 });
+      if (!pw.length) continue;
+      const pts = unwrapAngles(pw.map((p) => unrollPoint(p, center)));
+      // 對齊到程式寫的 A 值那一圈：atan2 給的是 -180…180，A270 會變成 -90。
+      // 現場寫 A270 就想在圖上看到 270，所以整條折線平移到最接近 seg.a 的那一圈
+      // （折線內部的連續性不受影響，因為是整條加同一個 360 的倍數）。
+      const aRef = seg.a;
+      if (typeof aRef === 'number' && pts.length) {
+        const k = Math.round((aRef - pts[pts.length - 1].theta) / 360);
+        if (k !== 0) for (const p of pts) p.theta += k * 360;
+      }
+      const pl = {
+        id: seg.id, line: seg.line, opIndex: seg.opIndex, tool: seg.tool,
+        kind: seg.kind, path: seg.path, pts,
+      };
+      if (seg.sub) pl.sub = seg.sub;
+      if (seg.refReturn) pl.refReturn = true;
+      if (seg.inserted) pl.inserted = true;
+      polylines.push(pl);
+      // bounds 只算切削段，與 CONTRACT §3 的 GeometryResult.bounds 同一個語意：
+      // 從換刀點下來的 G0 起點在 Z150，算進去的話整張圖會被壓成一條線。
+      if (seg.refReturn || seg.kind === 'rapid') continue;
+      for (const p of pts) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.theta < minT) minT = p.theta;
+        if (p.theta > maxT) maxT = p.theta;
+        if (p.r < minR) minR = p.r;
+        if (p.r > maxR) maxR = p.r;
+      }
+    }
+    const bounds = polylines.length ? { minX, maxX, minT, maxT, minR, maxR } : null;
+    return { polylines, bounds };
+  }
+
+  /**
+   * 從程式推估工件半徑（3D 圓棒要畫多粗）。
+   * 取切削段（feed/arc/drill）端點離中心最遠的距離——下刀是從工件表面開始的，
+   * 所以那個最大值就落在表面附近。推估值一律標 `estimated`，由 UI 講明可以改。
+   * @returns {{radius:number, source:'cut'|'rapid'|'default'}|null}
+   */
+  function estimateRotaryRadius(segments, opts) {
+    const center = rotCenter(opts);
+    let cut = -Infinity, rap = -Infinity;
+    for (const seg of segments || []) {
+      if (seg.refReturn) continue;
+      const isCut = seg.kind === 'feed' || seg.kind === 'arc' || seg.kind === 'drill';
+      for (const p of rotarySamples(seg, { center, tol: 0.2 })) {
+        const r = Math.hypot(p.y - center.y, p.z - center.z);
+        if (isCut) { if (r > cut) cut = r; } else if (r > rap) rap = r;
+      }
+    }
+    if (cut > 0 && Number.isFinite(cut)) return { radius: cut, source: 'cut' };
+    if (rap > 0 && Number.isFinite(rap)) return { radius: rap, source: 'rapid' };
+    return null;
+  }
+
   NC.buildSegments = buildSegments;
   NC.geometry = {
     buildSegments,
     expandHole,
     sampleSegment,
+    /** 第四軸：程式座標 → 工件座標 → 展開圖（見上方區塊註解） */
+    rotary: {
+      point: rotaryPoint,
+      samples: rotarySamples,
+      unrollPoint,
+      unrollSegments,
+      estimateRadius: estimateRotaryRadius,
+      STEP_DEG: ROT_STEP_DEG,
+    },
     segmentLength,
     arcFromR,
     arcSweep,

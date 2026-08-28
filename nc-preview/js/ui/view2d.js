@@ -274,7 +274,13 @@
     on: 'Block skip：開（跳過 / 節）',
     multiIgnored: 'Block skip：只跳過多斜線節',
   };
-  const MODES = ['top', 'sectionX', 'sectionY'];
+  const MODES = ['top', 'sectionX', 'sectionY', 'unroll'];
+
+  /** 角度格線的級距（展開圖的縱軸是度，不是 mm，不能跟 niceStep 共用） */
+  function niceAngleStep(raw) {
+    for (const c of [1, 2, 5, 10, 15, 30, 45, 60, 90, 180]) if (c >= raw) return c;
+    return 360;
+  }
 
   function createView2D(canvas) {
     if (!canvas || typeof canvas.getContext !== 'function') throw new Error('createView2D 需要 canvas 元素');
@@ -291,7 +297,8 @@
       hlLine: null,
       hlTool: null,
       visible: { rapid: true, feed: true, refReturn: false, stock: true, tools: null },
-      view: { top: null, sectionX: null, sectionY: null },   // 各模式獨立的 {scale, ox, oy}
+      view: { top: null, sectionX: null, sectionY: null, unroll: null },   // 各模式獨立的 {scale, ox, oy}
+      unrollCache: null,        // 展開圖資料（段或迴轉中心變了才重算）
       size: { w: 0, h: 0 },
       dpr: 1,
       hover: null,
@@ -355,6 +362,7 @@
       if (tt && Array.isArray(tt.tools)) for (const t of tt.tools) if (t && t.diameter > 0) S.toolRadius.set(t.t, t.diameter / 2);
       S.compLines = new Set();
       S.byLine = new Map();
+      S.unrollCache = null;
       for (const s of S.data.segments) {
         if (s.path === 'compensated') S.compLines.add(s.line);
         let arr = S.byLine.get(s.line);
@@ -496,6 +504,10 @@
       const { sim } = S.data;
       const [zTop] = depthRange();
       let t, wx, wy;
+      if (S.mode === 'unroll') {
+        // 展開圖沒有第三個維度可以查高度圖（同一個 XY 在不同角度是工件的不同部位）
+        return `X ${fmt(hh)}  A ${fmt(vv / angK())}°`;
+      }
       if (S.mode === 'top') { t = `X ${fmt(hh)}  Y ${fmt(vv)}`; wx = hh; wy = vv; }
       else {
         t = `${hAxis().toUpperCase()} ${fmt(hh)}  Z ${fmt(vv)}`;
@@ -510,7 +522,13 @@
       const { w, h } = S.size;
       const [px, py, , ph] = plotRect();
       const scen = SCENARIO_LABEL[S.data.scenario] || S.data.scenario;
-      const modeText = S.mode === 'top' ? '俯視' : `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
+      let modeText;
+      if (S.mode === 'top') modeText = '俯視';
+      else if (S.mode === 'unroll') {
+        const u = unrollData();
+        const rad = u && u.radius ? `　工件半徑推估 R${fmt(u.radius.radius)}` : '';
+        modeText = `展開圖（圓柱表面攤平）${rad}`;
+      } else modeText = `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
       let head = `${modeText} · ${scen}`;
       if (S.snapshotIndex != null) head += ` · 快照 ${S.snapshotIndex}`;
       if (S.hlTool != null) head += ` · 只看 T${S.hlTool}`;
@@ -651,6 +669,230 @@
       drawHighlightTop();
     }
 
+    // ---- 展開圖（第四軸）----------------------------------------------------
+    // 把圓柱工件的表面攤平成一張紙：橫軸 = X（軸向位置），縱軸 = 繞一圈的角度。
+    // 這是分度加工唯一看得懂的視圖——俯視圖會把四個角度的加工疊在一起。
+    // 幾何在 geometry.rotary（段的 XYZ 沒有被改動，那仍然是程式座標）。
+
+    /** 展開資料（段或迴轉中心變了才重算） */
+    function unrollData() {
+      const R = NC.geometry && NC.geometry.rotary;
+      if (!R || typeof R.unrollSegments !== 'function') return null;
+      const segs = S.data.segments || [];
+      const c = S.data.rotaryCenter || { y: 0, z: 0 };
+      const cy = c.y || 0, cz = c.z || 0;
+      const cache = S.unrollCache;
+      if (cache && cache.segs === segs && cache.cy === cy && cache.cz === cz) return cache.val;
+      const val = R.unrollSegments(segs, { center: { y: cy, z: cz } });
+      val.radius = R.estimateRadius(segs, { center: { y: cy, z: cz } });
+      S.unrollCache = { segs, cy, cz, val };
+      return val;
+    }
+
+    /**
+     * 展開圖的縱軸單位：**弧長（mm）**，不是角度。
+     * 兩軸都是 mm 才能沿用整個視圖的等比例縮放——直接拿「度」當縱座標的話，
+     * 50 mm 對上 270 度會被壓成一條線。用弧長也比較貼近實物：
+     * 圓周上兩個孔差幾 mm，圖上量得出來。刻度標籤仍然標角度（程式寫的是角度）。
+     */
+    function angK() {
+      const u = unrollData();
+      const r = (u && u.radius && u.radius.radius > 0) ? u.radius.radius : 10;
+      return r * Math.PI / 180;
+    }
+
+    /** 展開圖包絡：h = X（mm）、v = 弧長（mm） */
+    function unrollBounds() {
+      const u = unrollData();
+      if (!u || !u.bounds) return null;
+      const k = angK();
+      const b = newBounds();
+      extend(b, u.bounds.minX, u.bounds.minT * k);
+      extend(b, u.bounds.maxX, u.bounds.maxT * k);
+      const v = validBounds(b);
+      if (!v) return null;
+      // 只有一個角度時（例如整支只在 A0 加工）縱軸會是一條線，補一點高度才看得出來
+      const minSpan = 30 * k;
+      if (v.maxV - v.minV < minSpan) { const c = (v.minV + v.maxV) / 2; v.minV = c - minSpan / 2; v.maxV = c + minSpan / 2; }
+      if (v.maxH - v.minH < 1) { const c = (v.minH + v.maxH) / 2; v.minH = c - 5; v.maxH = c + 5; }
+      return v;
+    }
+
+    /** 展開圖的點選項目（折線拆成小段餵給 pickSegment） */
+    function unrollPickItems() {
+      const u = unrollData();
+      if (!u) return [];
+      const out = [];
+      const k = angK();
+      for (const pl of u.polylines) {
+        if (!isVisible(pl)) continue;
+        if (pl.pts.length === 1) {
+          const p = pl.pts[0];
+          out.push({ from: { x: p.x, y: p.theta * k }, to: { x: p.x, y: p.theta * k }, seg: pl });
+          continue;
+        }
+        for (let i = 0; i + 1 < pl.pts.length; i++) {
+          out.push({
+            from: { x: pl.pts[i].x, y: pl.pts[i].theta * k },
+            to: { x: pl.pts[i + 1].x, y: pl.pts[i + 1].theta * k },
+            seg: pl,
+          });
+        }
+      }
+      return out;
+    }
+
+    /** 角度格線：每 90 度加粗，一眼看出分度是不是等分 */
+    function drawGridUnroll() {
+      const V = curView();
+      const [px, py, pw, ph] = plotRect();
+      const k = angK();
+      const stepH = niceStep(70 / V.scale);
+      const stepV = niceAngleStep(40 / (V.scale * k));
+      const [h0] = toWorld(px, 0), [h1] = toWorld(px + pw, 0);
+      const [, av1] = toWorld(0, py), [, av0] = toWorld(0, py + ph);
+      const v1 = av1 / k, v0 = av0 / k;   // 螢幕範圍換算成角度
+      ctx.save();
+      ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.strokeStyle = C.grid;
+      ctx.beginPath();
+      for (let k = Math.ceil(h0 / stepH); k * stepH <= h1; k++) { const [sx] = toScreen(k * stepH, 0); ctx.moveTo(sx, py); ctx.lineTo(sx, py + ph); }
+      for (let k = Math.ceil(v0 / stepV); k * stepV <= v1; k++) {
+        const t = k * stepV;
+        if (t % 90 === 0) continue;
+        const [, sy] = toScreen(0, t * k); ctx.moveTo(px, sy); ctx.lineTo(px + pw, sy);
+      }
+      ctx.stroke();
+      // 每 90 度（正上／正側／正下）用實線標出來
+      ctx.strokeStyle = C.zero;
+      ctx.beginPath();
+      for (let q = Math.ceil(v0 / 90); q * 90 <= v1; q++) { const [, sy] = toScreen(0, q * 90 * k); ctx.moveTo(px, sy); ctx.lineTo(px + pw, sy); }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawSegmentsUnroll() {
+      const u = unrollData();
+      if (!u) return;
+      const drawn = new Set();
+      const k = angK();
+      for (const pl of u.polylines) {
+        if (!isVisible(pl)) continue;
+        const isRapid = pl.kind === 'rapid';
+        const dim = S.hlTool != null && pl.tool !== S.hlTool;
+        ctx.globalAlpha = dim ? 0.12 : (pl.path === 'programmed' && S.compLines.has(pl.line) ? 0.55 : 1);
+        const p0 = pl.pts[0], pN = pl.pts[pl.pts.length - 1];
+        const [ax, ay] = toScreen(p0.x, p0.theta * k);
+        const [bx, by] = toScreen(pN.x, pN.theta * k);
+        // 原地下刀在展開圖上是一個點（X 與角度都不動，只有深度在變）
+        if (Math.hypot(bx - ax, by - ay) < 0.75) {
+          if (pl.kind === 'drill') drawHoleMarkerUnroll(pl, ax, ay, drawn);
+          else if (!isRapid) { ctx.fillStyle = toolColor(pl.tool); ctx.beginPath(); ctx.arc(ax, ay, 2.5, 0, TAU); ctx.fill(); }
+          continue;
+        }
+        ctx.strokeStyle = isRapid ? C.rapid : toolColor(pl.tool);
+        ctx.lineWidth = isRapid ? 1 : (pl.path === 'compensated' ? 2 : (pl.kind === 'drill' ? 1.5 : 1));
+        ctx.setLineDash(isRapid ? [4, 3] : []);
+        if (pl.refReturn) { ctx.globalAlpha *= 0.35; ctx.setLineDash([2, 6]); }
+        ctx.beginPath();
+        for (let i = 0; i < pl.pts.length; i++) {
+          const [sx, sy] = toScreen(pl.pts[i].x, pl.pts[i].theta * k);
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+    }
+
+    function drawHoleMarkerUnroll(pl, ax, ay, drawn) {
+      const key = `${pl.line}:${Math.round(pl.pts[0].x * 100)},${Math.round(pl.pts[0].theta * 100)}`;
+      if (drawn.has(key)) return;
+      drawn.add(key);
+      const V = curView();
+      const r = S.toolRadius.get(pl.tool);
+      // 縱軸是弧長、橫軸是 mm，兩軸同單位，所以刀徑可以照真實比例畫成正圓
+      const rp = Math.max(r ? r * V.scale : 0, 3);
+      ctx.strokeStyle = toolColor(pl.tool); ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(ax, ay, rp, 0, TAU); ctx.stroke();
+      const t = rp + 3;
+      ctx.beginPath();
+      ctx.moveTo(ax - t, ay); ctx.lineTo(ax + t, ay);
+      ctx.moveTo(ax, ay - t); ctx.lineTo(ax, ay + t);
+      ctx.stroke();
+    }
+
+    function drawHighlightUnroll() {
+      if (S.hlLine == null) return;
+      const u = unrollData();
+      if (!u) return;
+      const hits = u.polylines.filter((p) => p.line === S.hlLine);
+      if (!hits.length) return;
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      const k = angK();
+      for (const pass of [{ w: 7, color: C.halo }, { w: 3, color: C.highlight }]) {
+        ctx.strokeStyle = pass.color; ctx.fillStyle = pass.color; ctx.lineWidth = pass.w;
+        for (const pl of hits) {
+          const p0 = pl.pts[0], pN = pl.pts[pl.pts.length - 1];
+          const [ax, ay] = toScreen(p0.x, p0.theta * k);
+          const [bx, by] = toScreen(pN.x, pN.theta * k);
+          ctx.beginPath();
+          if (Math.hypot(bx - ax, by - ay) < 0.75) { ctx.arc(ax, ay, pass.w * 0.9, 0, TAU); ctx.fill(); }
+          else {
+            for (let i = 0; i < pl.pts.length; i++) {
+              const [sx, sy] = toScreen(pl.pts[i].x, pl.pts[i].theta * k);
+              if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+            }
+            ctx.stroke();
+          }
+        }
+      }
+    }
+
+    /** 展開圖的標尺：縱軸座標是弧長，但刻度一律標角度（程式寫的是角度） */
+    function drawRulersUnroll() {
+      const V = curView();
+      const k = angK();
+      const { w, h } = S.size;
+      const [px, py, pw, ph] = plotRect();
+      const stepH = niceStep(70 / V.scale);
+      const stepV = niceAngleStep(40 / (V.scale * k));
+      const [h0] = toWorld(px, 0), [h1] = toWorld(px + pw, 0);
+      const [, av1] = toWorld(0, py), [, av0] = toWorld(0, py + ph);
+      const v1 = av1 / k, v0 = av0 / k;
+      ctx.save();
+      ctx.font = FONT; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.strokeStyle = C.ruler; ctx.fillStyle = C.rulerText;
+      ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.beginPath();
+      for (let q = Math.ceil(h0 / stepH); q * stepH <= h1; q++) {
+        const t = q * stepH; const [sx] = toScreen(t, 0);
+        ctx.moveTo(sx, py + ph); ctx.lineTo(sx, py + ph + 5);
+        ctx.fillText(fmt(t, 3), sx, py + ph + 7);
+      }
+      ctx.stroke();
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.beginPath();
+      for (let q = Math.ceil(v0 / stepV); q * stepV <= v1; q++) {
+        const t = q * stepV; const [, sy] = toScreen(0, t * k);
+        ctx.moveTo(px - 5, sy); ctx.lineTo(px, sy);
+        ctx.fillText(fmt(t, 3) + '°', px - 7, sy);
+      }
+      ctx.stroke();
+      ctx.fillStyle = C.text;
+      ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+      ctx.fillText('X 軸向', w - 4, h - 4);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('A 角度', 4, py - 14);
+      ctx.restore();
+    }
+
+    function renderUnroll() {
+      drawGridUnroll();
+      drawSegmentsUnroll();
+      drawHighlightUnroll();
+    }
+
     // ---- 剖面 --------------------------------------------------------------
     /** 落在剖面帶內的段，投影成 (h, z) 的假段 {from:{x,y}, to:{x,y}, seg} */
     function projectedSegments() {
@@ -761,9 +1003,13 @@
       const [px, py, pw, ph] = plotRect();
       ctx.save();
       ctx.beginPath(); ctx.rect(px, py, pw, ph); ctx.clip();
-      if (S.mode === 'top') renderTop(); else renderSection();
+      if (S.mode === 'top') renderTop();
+      else if (S.mode === 'unroll') renderUnroll();
+      else renderSection();
       ctx.restore();
-      if (S.mode === 'top') drawRulers('X', 'Y'); else drawRulers(hAxis().toUpperCase(), 'Z');
+      if (S.mode === 'top') drawRulers('X', 'Y');
+      else if (S.mode === 'unroll') drawRulersUnroll();
+      else drawRulers(hAxis().toUpperCase(), 'Z');
       drawHud();
     }
 
@@ -771,7 +1017,9 @@
       if (!(S.size.w > 0)) syncSize();
       const { w, h } = S.size;
       if (!(w > 0 && h > 0)) { S.needFit = true; return api; }
-      const b = S.mode === 'top' ? topBounds(S.data) : sectionBounds(S.data, hAxis());
+      const b = S.mode === 'top' ? topBounds(S.data)
+        : S.mode === 'unroll' ? unrollBounds()
+          : sectionBounds(S.data, hAxis());
       let V;
       if (b) V = fitTransform(b, w, h, PAD);
       else { const [px, py, pw, ph] = plotRect(); V = { scale: 2, ox: px + pw / 2, oy: py + ph / 2, empty: true }; }
@@ -805,7 +1053,14 @@
       const [wx, wy] = toWorld(mx, my);
       let hit = null;
       if (S.mode === 'top') hit = pickSegment(S.data.segments, wx, wy, V.scale, PICK_PX, isVisible);
-      else {
+      else if (S.mode === 'unroll') {
+        const r = pickSegment(unrollPickItems(), wx, wy, V.scale, PICK_PX, null);
+        // 點到的是展開折線，換回真正的 Segment（下游要 from/to 的程式座標）
+        if (r) {
+          const real = S.byLine.get(r.seg.seg.line);
+          hit = { seg: (real && real.length) ? real[0] : r.seg.seg, dist: r.dist };
+        }
+      } else {
         const items = projectedSegments().filter((it) => isVisible(it.seg));
         const r = pickSegment(items, wx, wy, V.scale, PICK_PX, null);
         hit = r ? { seg: r.seg.seg, dist: r.dist } : null;
@@ -889,6 +1144,8 @@
           toolTable: d.toolTable || null,
           scenario: d.scenario || 'off',
           simStale: !!d.simStale,
+          // 第四軸迴轉中心（展開圖用）。預設 (0,0)：四軸裝夾慣例是 Y0/Z0 對到夾頭中心線。
+          rotaryCenter: d.rotaryCenter || { y: 0, z: 0 },
         };
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;
@@ -902,7 +1159,8 @@
       setMode(m) {
         if (!MODES.includes(m)) throw new Error(`未知的視圖模式：${m}`);
         S.mode = m;
-        if (m !== 'top') S.sectionAxis = m;
+        // 只有剖面模式才記成「最近用過的剖面」（俯視的剖面指示線靠它）；展開圖不是剖面
+        if (m === 'sectionX' || m === 'sectionY') S.sectionAxis = m;
         const V = curView();
         if (!V || V.empty) S.needFit = true;
         requestRender();

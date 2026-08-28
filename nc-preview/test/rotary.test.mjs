@@ -177,10 +177,11 @@ test('dpi = true 時不報 A 的小數點', () => {
 // ---------------------------------------------------------------------------
 // R37
 // ---------------------------------------------------------------------------
-test('R37：分度程式一定有一則「路徑照工件不轉畫」的總體標示', () => {
+test('R37：分度程式一定有一則總體標示，並指向展開圖', () => {
   const res = full('G0G90G54X10.Y0.A0.Z50.\nG0A90.');
-  const d = byRule(res.diagnostics, 'R37', 'warning').filter((x) => /工件不轉/.test(x.message));
+  const d = byRule(res.diagnostics, 'R37', 'warning').filter((x) => /展開圖/.test(x.message));
   assert.equal(d.length, 1);
+  assert.match(d[0].message, /2 個角度/);
 });
 
 test('R37：連續四軸標成「畫不出來」', () => {
@@ -274,4 +275,102 @@ test('固定循環展開的每一段都帶該孔的角度', () => {
   const segs = res.scenarios.off.geometry.segments.filter((x) => x.line === 5);
   assert.ok(segs.length > 0);
   for (const s of segs) assert.equal(s.a, 90);
+});
+
+// ---------------------------------------------------------------------------
+// 座標轉換與展開圖（geometry.rotary）
+// ---------------------------------------------------------------------------
+const R = NC.geometry.rotary;
+
+test('rotaryPoint：刀在正上方，工件轉 90 度就打到工件的 +Y 側', () => {
+  const p = R.point({ x: 5, y: 0, z: 20 }, 90);
+  near(p.x, 5); near(p.y, 20); near(p.z, 0);
+});
+
+test('rotaryPoint：A0 是恆等變換', () => {
+  const p = R.point({ x: 1, y: 2, z: 3 }, 0);
+  near(p.x, 1); near(p.y, 2); near(p.z, 3);
+});
+
+test('rotaryPoint：迴轉中心不在原點時繞著中心轉', () => {
+  // 中心在 (y=0, z=10)，刀在 (0, 0, 20) → 離中心 10；轉 90 度後應該在 (0, 10, 10)
+  const p = R.point({ x: 0, y: 0, z: 20 }, 90, { y: 0, z: 10 });
+  near(p.y, 10); near(p.z, 10);
+});
+
+test('unrollPoint：刀在正上方時 theta 就是程式的 A 值', () => {
+  for (const a of [0, 90, 180]) {
+    const u = R.unrollPoint(R.point({ x: 0, y: 0, z: 20 }, a));
+    near(u.theta, a);
+    near(u.r, 20);
+  }
+});
+
+test('unrollPoint：r 是離迴轉中心的距離，切得越深越小', () => {
+  near(R.unrollPoint({ x: 0, y: 0, z: 20 }).r, 20);
+  near(R.unrollPoint({ x: 0, y: 0, z: 8 }).r, 8);
+});
+
+test('展開圖：分度鑽孔的四個孔落在正確的角度上', () => {
+  const res = full([
+    'M6T1(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
+    'G98G81Z10.R25.F70M8',
+    'A90.',
+    'A180.',
+    'A270.',
+    'G80',
+  ].join('\n'));
+  const { polylines } = R.unrollSegments(res.scenarios.off.geometry.segments);
+  const holes = polylines.filter((p) => p.kind === 'drill' && p.sub === 'plunge');
+  assert.equal(holes.length, 4);
+  assert.deepEqual(holes.map((h) => Math.round(h.pts[0].theta)), [0, 90, 180, 270]);
+  // 四個孔的軸向位置一樣
+  for (const h of holes) near(h.pts[0].x, 20);
+  // 下刀是從表面（R 點 Z25）往中心切到 Z10
+  for (const h of holes) { near(h.pts[0].r, 25); near(h.pts[h.pts.length - 1].r, 10); }
+});
+
+test('展開圖：A270 畫在 270，不是 atan2 給的 −90', () => {
+  const res = full('G0G90G54X10.Y0.A0.Z25.\nG0A270.\nG1Z20.F100.');
+  const { polylines } = R.unrollSegments(res.scenarios.off.geometry.segments);
+  const last = polylines[polylines.length - 1];
+  near(last.pts[last.pts.length - 1].theta, 270);
+});
+
+test('展開圖：A 轉動的段會被細分成曲線，不是一條直線', () => {
+  const res = full('G0G90G54X0.Y0.A0.Z25.\nG1X50.A90.F200.');
+  const { polylines } = R.unrollSegments(res.scenarios.off.geometry.segments);
+  const turning = polylines.find((p) => p.pts.length > 2 && p.pts[0].theta !== p.pts[p.pts.length - 1].theta);
+  assert.ok(turning, '同動段應該被細分');
+  assert.ok(turning.pts.length >= 30, `90 度每 ${R.STEP_DEG} 度一點，至少 30 點，實際 ${turning.pts.length}`);
+});
+
+test('展開圖 bounds 不含 G28 與 rapid（否則會被參考點 Z150 撐爆）', () => {
+  const res = full([
+    'G0G90G54X20.Y0.A0.Z50.',
+    'G98G81Z10.R25.F70',
+    'A90.',
+    'G80',
+    'G91G28Z0.',
+    'G28A0.',
+  ].join('\n'));
+  const { bounds } = R.unrollSegments(res.scenarios.off.geometry.segments);
+  assert.ok(bounds.maxR <= 25 + 1e-6, `maxR ${bounds.maxR} 應該不超過 R 點 25`);
+  near(bounds.minX, 20);
+  near(bounds.maxX, 20);
+});
+
+test('estimateRadius：取切削段離中心最遠的距離（R 點附近）', () => {
+  const res = full('M6T1(6MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1000\nZ25.\nG1Z17.F200\nX60.F250');
+  const est = R.estimateRadius(res.scenarios.off.geometry.segments);
+  assert.equal(est.source, 'cut');
+  near(est.radius, 25);
+});
+
+test('三軸程式也能算展開圖（不會炸），只是全部落在同一條角度線上', () => {
+  const res = full('G0G90G54X0.Y10.Z5.\nG1X50.F200.');
+  const { polylines } = R.unrollSegments(res.scenarios.off.geometry.segments);
+  assert.ok(polylines.length > 0);
+  for (const pl of polylines) for (const p of pl.pts) assert.ok(Number.isFinite(p.theta));
 });

@@ -240,6 +240,7 @@
       viewCanvas: $('viewCanvas'),
       viewHost: $('viewHost'), view3dHost: $('view3dHost'), viewCanvas3d: $('viewCanvas3d'),
       btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'), rotaryBanner: $('rotaryBanner'),
+      btnModeUnroll: $('btnModeUnroll'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
       rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'),
       chkRapid: $('chkRapid'), chkFeed: $('chkFeed'), chkStock: $('chkStock'),
@@ -589,8 +590,11 @@
         stock: res.stock,
         toolTable: res.toolTable,
         scenario: state.scenario,
+        rotaryCenter: rotaryCenterOf(),
+        rotary: rotaryOptOf(run),
       };
       eachView((v) => v.setData(viewData));
+      syncRotaryUI(run);
       syncSectionRange(res.stock);
       syncSnapshotSlider(simForView, run.ops, state.simStale);
       renderToolFilter(res.toolTable, sr.geometry.segments);
@@ -775,6 +779,43 @@
     }
 
     /**
+     * 第四軸的迴轉中心（工件座標的 Y/Z）。
+     * 四軸的裝夾慣例是 G54 的 Y0／Z0 對到夾頭中心線，所以預設 (0,0)；
+     * 現場對不上時由設定覆寫（settings.rotary.center）。
+     */
+    function rotaryCenterOf() {
+      const r = state.settings && state.settings.rotary;
+      const c = r && r.center;
+      return { y: (c && Number(c.y)) || 0, z: (c && Number(c.z)) || 0 };
+    }
+
+    /**
+     * 3D 視圖的第四軸選項：只有 A 真的轉過才給，否則三軸程式會被當成四軸畫。
+     * 給了之後 3D 會把路徑換算到工件座標、素材改畫圓棒、不建高度圖成品。
+     */
+    function rotaryOptOf(run) {
+      const rot = run && run.rotary;
+      if (!rot || !rot.used || !rot.rotateLines.length) return null;
+      const r = state.settings && state.settings.rotary;
+      return { center: rotaryCenterOf(), radius: (r && Number(r.radius)) || 0 };
+    }
+
+    /**
+     * 展開圖只有在第四軸真的轉過的時候才有意義——三軸程式的每一段角度都是 0，
+     * 攤平之後會變成一條沒有資訊的橫線，還會讓人以為工具壞了。所以按鈕預設停用。
+     */
+    function syncRotaryUI(run) {
+      const rot = run && run.rotary;
+      const on = !!(rot && rot.used && rot.rotateLines.length);
+      el.btnModeUnroll.disabled = !on;
+      el.btnModeUnroll.title = on
+        ? `第四軸展開圖：把圓柱工件的表面攤平（橫軸＝X 軸向位置，縱軸＝${rot.axis} 角度）。分度孔的角度等不等分，這張圖一眼就看得出來。`
+        : '這支程式沒有用到第四軸（或 A 從頭到尾沒轉過），展開圖沒有東西可以畫';
+      // 停用的時候如果正停在展開圖，要退回俯視，不然畫面會卡在一張空圖
+      if (!on && viewMode === 'unroll') setViewMode('top');
+    }
+
+    /**
      * 第四軸橫幅。這條是三條橫幅裡最不能省的一條：
      * 本工具不套用工件旋轉，四軸程式的畫面會把不同角度的加工全部疊在同一面上，
      * 看起來完全正常。錯誤清單裡雖然有 R37，但現場多半是先看圖才看清單——
@@ -787,13 +828,15 @@
       if (!on) return;
       const sim = rot.mode === 'simultaneous';
       el.rotaryBanner.textContent = sim
-        ? `第四軸 ${rot.axis} 與 XYZ 同動，這幾段沒有預演`
-        : `第四軸 ${rot.axis} 分度 ${rot.angles.length} 個角度，立體圖與素材不可信`;
+        ? `有 ${rot.axis} 軸同動切削，這幾段沒有預演`
+        : `有 ${rot.axis} 軸分度 ${rot.angles.length} 個角度 → 請看「展開圖」`;
       el.rotaryBanner.title = (sim
-        ? `第 ${rot.simLines.slice(0, 8).join('、')} 行是 ${rot.axis} 軸與 XYZ 同時進給的四軸插補，實際刀路是繞著旋轉中心展開的，本工具畫不出來。\n`
-        : `這支程式把工件轉到 ${rot.angles.map((v) => rot.axis + fmt(v)).join('、')} 這幾個角度加工，但預演是照「工件不轉」畫的，各角度的加工會疊在同一面上。\n`)
+        ? `第 ${rot.simLines.slice(0, 8).join('、')} 行是 ${rot.axis} 軸與 XYZ 同時進給的四軸插補，實際刀路是繞著旋轉中心展開的曲面，本工具畫不出來。\n`
+        : `這支程式把工件轉到 ${rot.angles.map((v) => rot.axis + fmt(v)).join('、')} 這幾個角度加工。\n\n`
+          + '【展開圖】把圓棒表面攤平，各角度分開畫——分度對不對看這張。\n'
+          + '【俯視／剖面／3D】沒有把工件轉過去，各角度會疊在同一面上，不要當成品看。\n')
         + '仍然有效：G 碼語法、模態、刀長／刀徑補正、固定循環參數、進給轉速、換刀順序、逐行的孔位與深度。\n'
-        + '不要採信：3D 立體圖、素材殘料、碰撞結果、加工時間。\n'
+        + '不要採信：素材殘料、碰撞結果、加工時間（高度圖是 2.5D 的，工件一轉就對不上）。\n'
         + '點一下看錯誤清單裡的 R37。';
     }
 
@@ -1097,7 +1140,7 @@
       const is3d = mode === '3d';
       show(el.viewHost, !is3d);
       show(el.view3dHost, is3d);
-      el.rngSection.disabled = is3d || !state.result;
+      el.rngSection.disabled = is3d || mode === 'unroll' || !state.result;
       if (is3d) {
         // 建好之後要把目前的資料餵給它（它是在切過來的這一刻才誕生的）
         feedView3D();
@@ -1122,6 +1165,7 @@
         stock: state.result.stock,
         toolTable: state.result.toolTable,
         scenario: state.scenario,
+        rotary: rotaryOptOf(sr.run),
       });
       applyVisible();
     }

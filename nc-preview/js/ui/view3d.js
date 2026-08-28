@@ -521,6 +521,9 @@
     opts = opts || {};
     const tol = opts.arcTol > 0 ? opts.arcTol : ARC_TOL;
     const segs = Array.isArray(segments) ? segments : [];
+    // 第四軸：整段換算到「跟著工件轉」的座標，畫出來才是圓棒上真的被切到的位置。
+    // 沒有 rotary 就走原本的直線／圓弧路徑（三軸程式一切不變）。
+    const rotFn = rotarySampler(opts.rotary, tol);
     // 同一行若已經有 compensated 段，programmed 段淡化（與 view2d.drawSegmentsTop 的 alpha 0.55 一致）
     const compLines = new Set();
     for (const seg of segs) if (seg && seg.path === 'compensated') compLines.add(seg.line);
@@ -529,13 +532,15 @@
     for (const seg of segs) {
       if (!seg || !seg.from || !seg.to) continue;
       if (opts.skipRefReturn && seg.refReturn) continue;
-      const n = seg.arc ? arcSteps(seg, tol) : 1;
+      const pw = rotFn ? rotFn(seg) : null;
+      if (pw && pw.length < 2) continue;   // 轉換後退化成一個點（零長度段）
+      const n = pw ? pw.length - 1 : (seg.arc ? arcSteps(seg, tol) : 1);
       const cls = seg.kind === 'rapid' ? 'rapid' : 'feed';
       const faded = seg.path === 'programmed' && compLines.has(seg.line);
       const key = cls + ':' + (seg.tool == null ? 'x' : seg.tool) + ':' + (faded ? 'f' : 'n');
       let b = buckets.get(key);
       if (!b) { b = { cls, tool: seg.tool == null ? null : seg.tool, faded, list: [], verts: 0 }; buckets.set(key, b); }
-      b.list.push({ seg, n });
+      b.list.push({ seg, n, pw });
       b.verts += n * 2;
       total += n * 2;
     }
@@ -557,7 +562,15 @@
       const rgb = b.cls === 'rapid' ? rapidRgb : hexRgb(toolColor(b.tool));
       for (const it of b.list) {
         const seg = it.seg, sFirst = v;
-        if (seg.arc) {
+        if (it.pw) {
+          const pts = it.pw;
+          for (let i = 0; i + 1 < pts.length; i++) {
+            const o = v * 3, a = pts[i], c = pts[i + 1];
+            positions[o] = a.x; positions[o + 1] = a.y; positions[o + 2] = a.z;
+            positions[o + 3] = c.x; positions[o + 4] = c.y; positions[o + 5] = c.z;
+            v += 2;
+          }
+        } else if (seg.arc) {
           const n = it.n;
           const pts = n + 1 <= 800 ? buf : new Float32Array((n + 1) * 3);
           arcPoints(seg, n, pts);
@@ -584,6 +597,65 @@
       ranges.push({ cls: b.cls, tool: b.tool, faded: b.faded, first, count: v - first });
     }
     return { positions, colors, ranges, segRanges, byLine, compLines, vertexCount: v };
+  }
+
+  /**
+   * 第四軸取樣器：回傳 seg → 工件座標折線的函式；沒有第四軸就回 null。
+   * 幾何在 geometry.rotary（core），這裡只是接線。
+   */
+  function rotarySampler(rotary, tol) {
+    if (!rotary) return null;
+    const R = NC.geometry && NC.geometry.rotary;
+    if (!R || typeof R.samples !== 'function') return null;
+    const center = rotary.center || { y: 0, z: 0 };
+    return (seg) => R.samples(seg, { center, tol });
+  }
+
+  /**
+   * 圓棒素材線框（兩個端面圓 + 幾條母線）。
+   * 四軸的工件是夾在分度頭上的圓柱，用方塊線框畫會完全對不上。
+   */
+  function buildCylinderLines(opts) {
+    const o = opts || {};
+    const radius = o.radius > 0 ? o.radius : 0;
+    if (!(radius > 0) || !(o.xMax > o.xMin)) return { positions: new Float32Array(0), colors: new Float32Array(0), vertexCount: 0 };
+    const cy = (o.center && o.center.y) || 0, cz = (o.center && o.center.z) || 0;
+    const rgb = hexRgb(o.color || C.stockLine);
+    const N = 64, RIBS = 8;
+    const pos = [], col = [];
+    const pt = (x, t) => [x, cy + radius * Math.sin(t), cz + radius * Math.cos(t)];
+    const push = (a, b) => { pos.push(a[0], a[1], a[2], b[0], b[1], b[2]); col.push(rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]); };
+    for (const x of [o.xMin, o.xMax]) {
+      for (let i = 0; i < N; i++) push(pt(x, i / N * TAU), pt(x, (i + 1) / N * TAU));
+    }
+    for (let i = 0; i < RIBS; i++) { const t = i / RIBS * TAU; push(pt(o.xMin, t), pt(o.xMax, t)); }
+    return { positions: new Float32Array(pos), colors: new Float32Array(col), vertexCount: pos.length / 3 };
+  }
+
+  /**
+   * 圓棒素材的參數：半徑用推估（或設定值），軸向範圍取切削段的 X 加餘量。
+   * 推估半徑落在「工件表面附近」（下刀是從表面開始的），畫出來的圓棒粗細只是示意，
+   * 現場要精確的話在設定裡填實際直徑。
+   */
+  function cylinderOf(data) {
+    const rot = (data && data.rotary) || {};
+    const center = rot.center || { y: 0, z: 0 };
+    const segs = (data && data.segments) || [];
+    let radius = rot.radius > 0 ? rot.radius : 0;
+    if (!radius) {
+      const R = NC.geometry && NC.geometry.rotary;
+      const est = (R && typeof R.estimateRadius === 'function') ? R.estimateRadius(segs, { center }) : null;
+      radius = est ? est.radius : 0;
+    }
+    let x0 = Infinity, x1 = -Infinity;
+    for (const s of segs) {
+      if (!s || s.refReturn || s.kind === 'rapid' || !s.from || !s.to) continue;
+      x0 = Math.min(x0, s.from.x, s.to.x);
+      x1 = Math.max(x1, s.from.x, s.to.x);
+    }
+    if (!Number.isFinite(x0)) { x0 = -10; x1 = 10; }
+    const pad = Math.max(5, (x1 - x0) * 0.15);
+    return { radius, xMin: x0 - pad, xMax: x1 + pad, center, color: C.stockLine };
   }
 
   /** Stock 線框（12 稜邊切成短線做出虛線感）＋治具 */
@@ -653,7 +725,17 @@
       if (z < b.min.z) b.min.z = z; if (z > b.max.z) b.max.z = z;
     };
     const ext = (x, y, z) => { extXY(x, y); extZ(z); };
-    const stock = data && data.stock, sim = data && data.sim;
+    let rz0 = Infinity, rz1 = -Infinity;
+    // 第四軸：路徑要換算到工件座標；方塊素材與高度圖在四軸下是錯的模型，不列入取景
+    const rotFn = rotarySampler(data && data.rotary, ARC_TOL);
+    const stock = rotFn ? null : (data && data.stock), sim = rotFn ? null : (data && data.sim);
+    if (rotFn) {
+      const cyl = cylinderOf(data);
+      if (cyl.radius > 0) {
+        const cy = cyl.center.y, cz = cyl.center.z, r = cyl.radius;
+        ext(cyl.xMin, cy - r, cz - r); ext(cyl.xMax, cy + r, cz + r);
+      }
+    }
     if (stock) {
       ext(stock.min.x, stock.min.y, stock.min.z); ext(stock.max.x, stock.max.y, stock.max.z);
       for (const f of stock.fixtures || []) { ext(f.min.x, f.min.y, f.min.z); ext(f.max.x, f.max.y, f.max.z); }
@@ -663,9 +745,17 @@
       ext(sim.origin.x - h, sim.origin.y - h, sim.floorZ);
       ext(sim.origin.x + (sim.nx - 0.5) * sim.cell, sim.origin.y + (sim.ny - 0.5) * sim.cell, sim.floorZ);
     }
-    let rz0 = Infinity, rz1 = -Infinity;
     for (const s of (data && data.segments) || []) {
       if (s.refReturn) continue;
+      if (rotFn) {
+        for (const p of rotFn(s)) {
+          // 四軸的 G0：刀停在高處、工件在轉，換算到工件座標就變成一圈半徑等於刀高的大圓弧。
+          // 那是真實的相對運動（也是撞刀要看的東西），但算進取景會把工件擠成一個小點。
+          if (s.kind === 'rapid') { if (p.z < rz0) rz0 = p.z; if (p.z > rz1) rz1 = p.z; continue; }
+          extXY(p.x, p.y); extZ(p.z);
+        }
+        continue;
+      }
       extXY(s.from.x, s.from.y); extXY(s.to.x, s.to.y);
       if (s.arc) {
         extXY(s.arc.center.x - s.arc.r, s.arc.center.y - s.arc.r);
@@ -687,6 +777,7 @@
     toolColor, hexRgb, mat4, mat4Mul, mat4Perspective, mat4LookAt, projectPoint, distPointSeg2D,
     resolveDownsample, downsampleHeights, buildMesh, buildMeshAsync, planChunks,
     updateHeights, canUpdateHeights, arcSteps, arcPoints, buildPathLines, buildStockLines, buildAxesLines, sceneBounds,
+    buildCylinderLines, cylinderOf, rotarySampler,
   };
   NC.ui.view3d = Object.assign(NC.ui.view3d || {}, view3dUtil);
 
@@ -995,6 +1086,8 @@
       const sim = S.data.sim;
       const token = ++S.buildToken;
       freeMesh();
+      // 第四軸：高度圖是 2.5D 的，工件一轉就對不上——畫出來的實體是假的，寧可不畫
+      if (S.data.rotary) { S.building = false; reportProgress(1); requestRender(); return; }
       if (!sim || !S.heightArr) { S.building = false; reportProgress(1); requestRender(); return; }
       S.building = true;
       reportProgress(0);
@@ -1050,12 +1143,15 @@
 
     function rebuildPath() {
       freeLineBuf(S.pathBuf); S.pathBuf = null;
-      S.path = buildPathLines(S.data.segments, { arcTol: ARC_TOL });
+      S.path = buildPathLines(S.data.segments, { arcTol: ARC_TOL, rotary: S.data.rotary });
       S.pathBuf = makeLineBuf(S.path);
     }
     function rebuildStock() {
       freeLineBuf(S.stockBuf); S.stockBuf = null;
-      S.stockBuf = makeLineBuf(buildStockLines(S.data.stock));
+      // 四軸的工件是夾在分度頭上的圓棒，用方塊線框畫會完全對不上
+      S.stockBuf = makeLineBuf(S.data.rotary
+        ? buildCylinderLines(cylinderOf(S.data))
+        : buildStockLines(S.data.stock));
     }
     function rebuildAxes() {
       freeLineBuf(S.axesBuf); S.axesBuf = null;
@@ -1453,6 +1549,9 @@
           stock: d.stock || null,
           toolTable: d.toolTable || null,
           scenario: d.scenario || 'off',
+          // 第四軸：{center:{y,z}, radius?}。有值就把路徑換算到工件座標、素材改畫圓棒、
+          // 不建高度圖成品（那在四軸下是把所有角度疊在一起的錯誤模型）。
+          rotary: d.rotary || null,
         };
         if (typeof d.onProgress === 'function') S.progressCb = d.onProgress;
         S.snapshotIndex = null;
