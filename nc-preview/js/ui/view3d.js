@@ -535,7 +535,9 @@
       const pw = rotFn ? rotFn(seg) : null;
       if (pw && pw.length < 2) continue;   // 轉換後退化成一個點（零長度段）
       const n = pw ? pw.length - 1 : (seg.arc ? arcSteps(seg, tol) : 1);
-      const cls = seg.kind === 'rapid' ? 'rapid' : 'feed';
+      // 轉動期間的移動要獨立成一類：在工件座標下它是一條繞著工件的大弧，
+      // 但那不是刀走過的路——刀只走直線，是工件在轉。混在 rapid 裡會被誤讀成「刀在轉彎」。
+      const cls = (pw && seg.aFrom !== undefined) ? 'rotate' : (seg.kind === 'rapid' ? 'rapid' : 'feed');
       const faded = seg.path === 'programmed' && compLines.has(seg.line);
       const key = cls + ':' + (seg.tool == null ? 'x' : seg.tool) + ':' + (faded ? 'f' : 'n');
       let b = buckets.get(key);
@@ -546,7 +548,7 @@
     }
     // 先 rapid 再 feed，各自依刀號排序，讓 draw call 數量少且穩定
     const order = Array.from(buckets.values()).sort((a, b) => {
-      if (a.cls !== b.cls) return a.cls === 'rapid' ? -1 : 1;
+      if (a.cls !== b.cls) return (a.cls === 'rapid' || (a.cls === 'rotate' && b.cls !== 'rapid')) ? -1 : 1;
       const ta = a.tool == null ? 1e9 : a.tool, tb = b.tool == null ? 1e9 : b.tool;
       if (ta !== tb) return ta - tb;
       return (a.faded ? 1 : 0) - (b.faded ? 1 : 0);
@@ -967,7 +969,8 @@
       data: { sim: null, segments: [], stock: null, toolTable: null, scenario: 'off' },
       heightArr: null,
       snapshotIndex: null,
-      visible: { rapid: true, feed: true, stock: true, surface: true, tools: null },
+      // rotary = 工件轉動時刀的相對軌跡（那些大弧）。預設關：現場看到會以為刀在轉彎。
+      visible: { rapid: true, feed: true, stock: true, surface: true, rotary: false, tools: null },
       hlLine: null,
       hlTool: null,
       cam: { az: -60 * DEG, el: 28 * DEG, dist: 300, target: [0, 0, 0], fov: 45 * DEG },
@@ -1222,7 +1225,9 @@
     }
     function rangeVisible(r) {
       const vis = S.visible;
-      if (r.cls === 'rapid') { if (!vis.rapid) return false; } else if (!vis.feed) return false;
+      if (r.cls === 'rotate') { if (!vis.rotary) return false; } else if (r.cls === 'rapid') {
+        if (!vis.rapid) return false;
+      } else if (!vis.feed) return false;
       if (vis.tools && r.tool != null && !vis.tools.has(r.tool)) return false;
       return true;
     }
@@ -1281,7 +1286,7 @@
         if (!rangeVisible(r)) continue;
         const dim = S.hlTool != null && r.tool !== S.hlTool;
         // 淡化順序與 view2d 一致：先看「非高亮刀」，再看「同一行已有補正段的 programmed 段」
-        gl.uniform1f(LL.uAlpha, dim ? 0.12 : (r.faded ? 0.35 : (r.cls === 'rapid' ? 0.55 : 0.95)));
+        gl.uniform1f(LL.uAlpha, dim ? 0.12 : (r.faded ? 0.35 : (r.cls === 'feed' ? 0.95 : (r.cls === 'rotate' ? 0.3 : 0.55))));
         gl.drawArrays(gl.LINES, r.first, r.count);
       }
       gl.disableVertexAttribArray(LL.aPos);
@@ -1590,12 +1595,13 @@
         if ('feed' in o) S.visible.feed = !!o.feed;
         if ('stock' in o) S.visible.stock = !!o.stock;
         if ('surface' in o) S.visible.surface = !!o.surface;
+        if ('rotary' in o) S.visible.rotary = !!o.rotary;
         if ('tools' in o) S.visible.tools = o.tools == null ? null : (o.tools instanceof Set ? o.tools : new Set(o.tools));
         requestRender();
         return api;
       },
       getVisible() {
-        return { rapid: S.visible.rapid, feed: S.visible.feed, stock: S.visible.stock, surface: S.visible.surface, tools: S.visible.tools ? new Set(S.visible.tools) : null };
+        return { rapid: S.visible.rapid, feed: S.visible.feed, stock: S.visible.stock, surface: S.visible.surface, rotary: S.visible.rotary, tools: S.visible.tools ? new Set(S.visible.tools) : null };
       },
       highlightLine(n) { S.hlLine = n == null ? null : Number(n); requestRender(); return api; },
       highlightTool(t) { S.hlTool = t == null ? null : Number(t); requestRender(); return api; },

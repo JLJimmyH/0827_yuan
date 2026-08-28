@@ -243,7 +243,7 @@
       viewCanvas: $('viewCanvas'),
       viewHost: $('viewHost'), view3dHost: $('view3dHost'), viewCanvas3d: $('viewCanvas3d'),
       btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'), rotaryBanner: $('rotaryBanner'),
-      btnModeUnroll: $('btnModeUnroll'),
+      btnModeUnroll: $('btnModeUnroll'), chkRotary: $('chkRotary'), lblRotary: $('lblRotary'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
       rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'),
       chkRapid: $('chkRapid'), chkFeed: $('chkFeed'), chkStock: $('chkStock'),
@@ -878,6 +878,9 @@
           ? `第四軸程式不適用：工件會轉，${NO_ROTARY_MODES[m]}的投影面跟著工件跑，畫出來的東西沒有意義。請用「剖面 X」（圓棒橫截面）、3D 或展開圖。`
           : '';
       }
+      // 「工件轉動軌跡」只有四軸才有意義
+      show(el.lblRotary, on);
+      if (!on && el.chkRotary.checked) { el.chkRotary.checked = false; applyVisible(); }
       // 停用時如果正停在那個模式，換到還能看的那一張
       if (on && (viewMode === 'top' || viewMode === 'sectionY')) setViewMode('sectionX');
       if (!on && viewMode === 'unroll') setViewMode('top');
@@ -1032,6 +1035,7 @@
         feed: el.chkFeed.checked,
         refReturn: el.chkRef.checked,
         stock: el.chkStock.checked,
+        rotary: el.chkRotary.checked,
         tools,
       };
       eachView((v) => v.setVisible(vis));
@@ -1264,7 +1268,7 @@
         : (snaps[v].afterOpIndex == null ? v : snaps[v].afterOpIndex);
       applySnapshot(v);
     });
-    for (const c of [el.chkRapid, el.chkFeed, el.chkRef, el.chkStock]) c.addEventListener('change', applyVisible);
+    for (const c of [el.chkRapid, el.chkFeed, el.chkRef, el.chkStock, el.chkRotary]) c.addEventListener('change', applyVisible);
 
     // 分頁
     function selectTab(name) {

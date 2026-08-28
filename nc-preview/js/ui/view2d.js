@@ -296,7 +296,8 @@
       sectionAxis: null,        // 最近用過的剖面模式（俯視時畫指示線）
       hlLine: null,
       hlTool: null,
-      visible: { rapid: true, feed: true, refReturn: false, stock: true, tools: null },
+      // rotary = 工件轉動時刀的相對軌跡。預設關（見 view3d 的同名開關）。
+      visible: { rapid: true, feed: true, refReturn: false, stock: true, rotary: false, tools: null },
       view: { top: null, sectionX: null, sectionY: null, unroll: null },   // 各模式獨立的 {scale, ox, oy}
       unrollCache: null,        // 展開圖資料（段或迴轉中心變了才重算）
       size: { w: 0, h: 0 },
@@ -376,6 +377,9 @@
       // G28／G30 回原點：中間點與參考點都在 Z150 的空中，畫成一般 G0 就是兩條橫跨整個
       // 工件的大對角線，把版面切成兩半（15 把刀的程式會變成一團看不懂的線）。預設不畫。
       if (seg.refReturn) return !!vis.refReturn;
+      // 工件座標的視圖（展開圖、四軸剖面 X）裡，轉動期間的移動是繞著工件的弧，
+      // 那不是刀走過的路——刀只走直線，是工件在轉。預設不畫。
+      if (seg.aFrom !== undefined && (S.mode === 'unroll' || rotaryOn()) && !vis.rotary) return false;
       if (seg.kind === 'rapid') { if (!vis.rapid) return false; } else if (!vis.feed) return false;
       if (vis.tools && seg.tool != null && !vis.tools.has(seg.tool)) return false;
       return true;
@@ -1279,11 +1283,12 @@
         if ('feed' in o) S.visible.feed = !!o.feed;
         if ('refReturn' in o) S.visible.refReturn = !!o.refReturn;
         if ('stock' in o) S.visible.stock = !!o.stock;
+        if ('rotary' in o) S.visible.rotary = !!o.rotary;
         if ('tools' in o) S.visible.tools = o.tools == null ? null : (o.tools instanceof Set ? o.tools : new Set(o.tools));
         requestRender();
         return api;
       },
-      getVisible() { return { rapid: S.visible.rapid, feed: S.visible.feed, refReturn: S.visible.refReturn, stock: S.visible.stock, tools: S.visible.tools ? new Set(S.visible.tools) : null }; },
+      getVisible() { return { rapid: S.visible.rapid, feed: S.visible.feed, refReturn: S.visible.refReturn, stock: S.visible.stock, rotary: S.visible.rotary, tools: S.visible.tools ? new Set(S.visible.tools) : null }; },
       onPick(cb) { S.pickCb = typeof cb === 'function' ? cb : null; return api; },
       fit() { return fit(true); },
       render() { render(); return api; },
