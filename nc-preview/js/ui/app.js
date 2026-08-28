@@ -24,6 +24,9 @@
   const SETTINGS_KEY = 'ncPreview.appSettings.v1';
   // 刀庫是整台機共用的，不跟著程式號走 → 自己一個 key，換程式不會被洗掉。
   const MACHINE_KEY = 'ncPreview.machine';
+  // 第四軸的裝夾參數（迴轉中心、工件直徑）**跟著程式走**，不是機台設定：
+  // 現場說「Z 高度不一定，會依案子調整」，放進機台設定的話換一支程式就帶著上一支的值。
+  const ROTARY_KEY = 'ncPreview.rotary.v1';
 
   /** 數字顯示（panels.logic.fmt 修掉了 NC.util.fmt 的去尾 0 問題，優先用它）。 */
   const fmt = (NC.ui.panels && NC.ui.panels.logic && NC.ui.panels.logic.fmt)
@@ -268,6 +271,7 @@
       selectedLine: 0,
       simCache: {},        // 上一輪完整分析的 SimResult（依情境），編輯途中沿用免得成品圖整片消失
       simStale: false,     // 目前畫面上的 heightmap 是不是上一輪的（HUD 會標「更新中」）
+      rotary: null,        // 第四軸裝夾參數（跟著程式走，見 ROTARY_KEY）；null = 用推估值
     };
 
     // ---- 還原設定 ----
@@ -281,10 +285,45 @@
         if (o && o.cell > 0) state.cell = o.cell;
       } catch (e) { /* 壞掉就用預設 */ }
     })();
+    /** 這支程式存過的第四軸設定（沒有就 null） */
+    function loadRotary(key) {
+      if (!key) return null;
+      try {
+        const all = JSON.parse(store.get(ROTARY_KEY) || '{}');
+        const o = all && all[key];
+        if (!o || !o.center) return null;
+        return { center: { y: Number(o.center.y) || 0, z: Number(o.center.z) || 0 }, radius: Number(o.radius) || 0 };
+      } catch (e) { return null; }
+    }
+    function persistRotary() {
+      if (!state.programKey || !state.rotary) return;
+      let all = {};
+      try { all = JSON.parse(store.get(ROTARY_KEY) || '{}') || {}; } catch (e) { all = {}; }
+      all[state.programKey] = state.rotary;
+      store.set(ROTARY_KEY, JSON.stringify(all));
+    }
+    /**
+     * 這支程式目前生效的第四軸參數。
+     *
+     * **不從程式反推。** 一律「使用者填過就用他的，沒填就用 (0,0)」——
+     * (0,0) 對應四軸的標準對刀方式：G54 的 Y0／Z0 就對在夾頭中心線上，
+     * 那時候程式裡的 Z 值本身就是「離軸心多遠」，不需要任何額外輸入。
+     *
+     * 反推的那支演算法（geometry.rotary.estimateCenter）只拿來**檢查**
+     * ——查各個分度孔是不是都在同一條母線上（R37），不拿來當設定值。
+     * 猜出來的裝夾參數會安靜地把整張圖畫歪，而現場看不出是猜的。
+     */
+    function effectiveRotary() {
+      if (state.rotary) return state.rotary;
+      return { center: { y: 0, z: 0 }, radius: 0 };
+    }
+
     function persistSettings() {
-      // 刀庫另外存（機台層級），這裡剔掉免得兩邊各留一份、改了其中一份就對不起來
+      // 刀庫（機台層級）與第四軸（程式層級）都另外存，這裡剔掉免得兩邊各留一份、
+      // 改了其中一份就對不起來
       const s = Object.assign({}, state.settings);
       delete s.magazine;
+      delete s.rotary;
       store.set(SETTINGS_KEY, JSON.stringify({ settings: s, scenario: state.scenario, cell: state.cell }));
     }
 
@@ -336,6 +375,12 @@
       settings: state.settings, scenario: state.scenario, cell: state.cell,
       onChange: (o) => {
         state.settings = o.settings;
+        // 第四軸是「這個案子怎麼裝夾」，抽出來跟著程式存，不要混進機台設定
+        if (o.settings && o.settings.rotary) {
+          state.rotary = U.deepClone(o.settings.rotary);
+          delete state.settings.rotary;
+          persistRotary();
+        }
         state.scenario = o.scenario;
         state.cell = o.cell;
         el.selScenario.value = state.scenario;
@@ -439,7 +484,9 @@
       if (ids.indexOf(state.scenario) < 0) ids.push(state.scenario);
       return {
         text: state.text,
-        settings: state.settings,
+        // rotary 不存在機台設定裡（見 ROTARY_KEY），但 core/rules 是從 settings 讀，
+        // 所以每次組 request 時把「這支程式生效的值」補進去
+        settings: Object.assign({}, state.settings, { rotary: effectiveRotary() }),
         toolTable: state.userTable,
         stock: state.stock,
         scenarios: ids,
@@ -554,6 +601,7 @@
       let keyChanged = false;
       if (key !== state.programKey) {
         state.programKey = key;
+        state.rotary = loadRotary(key);
         const saved = NC.tools.load(key);
         // saved 是 null 時一定要把舊程式的手填刀具表清掉，否則 O1004 的 Ø49.5
         // 會跟著跑到 O0999，而且下次存檔會把這份錯的資料存進新的 key。
@@ -605,7 +653,10 @@
       diagPanel.update({ items: res.diagnostics });
       opsPanel.update({ ops: run.ops, toolTable: res.toolTable, time: sr.sim ? sr.sim.time : null });
       stockPanel.update({ stock: res.stock });
-      settingsPanel.update({ settings: state.settings, scenario: state.scenario, cell: state.cell });
+      settingsPanel.update({
+        settings: Object.assign({}, state.settings, { rotary: effectiveRotary() }),
+        scenario: state.scenario, cell: state.cell, rotaryUsed: !!rotaryOptOf(run),
+      });
       magPanel.update({
         magazine: state.settings.magazine || null,
         toolTable: res.toolTable,
@@ -784,20 +835,23 @@
      * 現場對不上時由設定覆寫（settings.rotary.center）。
      */
     function rotaryCenterOf() {
-      const r = state.settings && state.settings.rotary;
-      const c = r && r.center;
-      return { y: (c && Number(c.y)) || 0, z: (c && Number(c.z)) || 0 };
+      const c = effectiveRotary().center;
+      return { y: Number(c.y) || 0, z: Number(c.z) || 0 };
     }
 
     /**
      * 3D 視圖的第四軸選項：只有 A 真的轉過才給，否則三軸程式會被當成四軸畫。
      * 給了之後 3D 會把路徑換算到工件座標、素材改畫圓棒、不建高度圖成品。
      */
+    function rotaryUsedNow() {
+      const sr = currentScenario();
+      return !!(sr && rotaryOptOf(sr.run));
+    }
+
     function rotaryOptOf(run) {
       const rot = run && run.rotary;
       if (!rot || !rot.used || !rot.rotateLines.length) return null;
-      const r = state.settings && state.settings.rotary;
-      return { center: rotaryCenterOf(), radius: (r && Number(r.radius)) || 0 };
+      return { center: rotaryCenterOf(), radius: Number(effectiveRotary().radius) || 0 };
     }
 
     /**
@@ -1024,12 +1078,14 @@
       state.fileName = fileName || '';
       state.hiddenTools.clear();
       state.stock = null;
+      state.rotary = null;   // 第四軸裝夾參數跟著程式走；換程式先清掉，稍後依 programKey 讀回
       state.selectedLine = 0;
       sectionTouched = false;
 
       let tok = null;
       try { tok = NC.tokenize(state.text); } catch (e) { tok = null; }
       state.programKey = programKeyOf(tok, state.fileName);
+      state.rotary = loadRotary(state.programKey);
       state.userTable = NC.tools.load(state.programKey) || null;
 
       el.fileLabel.textContent = (state.fileName || state.programKey) + (note ? ' · ' + note : '');
@@ -1112,7 +1168,7 @@
 
     el.selScenario.addEventListener('change', () => {
       state.scenario = el.selScenario.value;
-      settingsPanel.update({ settings: state.settings, scenario: state.scenario, cell: state.cell });
+      settingsPanel.update({ settings: state.settings, scenario: state.scenario, cell: state.cell, rotaryUsed: rotaryUsedNow() });
       persistSettings();
       refresh();
     });

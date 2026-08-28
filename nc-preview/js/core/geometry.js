@@ -990,6 +990,8 @@
         id: seg.id, line: seg.line, opIndex: seg.opIndex, tool: seg.tool,
         kind: seg.kind, path: seg.path, pts,
       };
+      if (seg.a !== undefined) pl.a = seg.a;
+      if (seg.aFrom !== undefined) pl.aFrom = seg.aFrom;
       if (seg.sub) pl.sub = seg.sub;
       if (seg.refReturn) pl.refReturn = true;
       if (seg.inserted) pl.inserted = true;
@@ -1032,6 +1034,48 @@
     return null;
   }
 
+  /**
+   * 從程式反推迴轉中心線的位置。
+   *
+   * 幾何：分度鑽孔在機台座標上是一條沿 Z 的垂直線，位置 (x_i, y_i)。
+   * 它在工件上要是「徑向孔」（刀沿半徑往軸心切），條件是這條線通過迴轉中心線，
+   * 也就是 **y_i 必須等於 center.y**。代進轉換式可以看得更清楚：dy = 0 時
+   *   θ = atan2(dz·sin A, dz·cos A) = A          （dz > 0，刀在中心線上方）
+   * 也就是說 **中心的 Z 不影響角度**，只影響「離中心多遠」與會不會穿過軸心。
+   *
+   * 所以這裡只推 Y，並回報兩件現場會想知道的事：
+   *   - 各個鑽孔的 Y 是否一致（不一致 = 這些孔不是徑向的，程式或裝夾有問題）
+   *   - 切削最低點（低於中心線代表刀尖穿過軸心，多半是 Z0 沒對在中心線上）
+   * @returns {{y:number, consistent:boolean, spread:number, minCutZ:number, holes:number}|null}
+   */
+  function estimateRotaryCenter(segments) {
+    const ys = [];
+    let minCutZ = Infinity;
+    for (const seg of segments || []) {
+      if (!seg || seg.refReturn) continue;
+      const cutting = seg.kind === 'drill' || seg.kind === 'feed' || seg.kind === 'arc';
+      if (!cutting) continue;
+      if (seg.to.z < minCutZ) minCutZ = seg.to.z;
+      if (seg.from.z < minCutZ) minCutZ = seg.from.z;
+      // 只有「原地往下扎」的段才是徑向孔的證據（XY 不動、Z 在變）
+      if (seg.kind !== 'drill') continue;
+      if (Math.abs(seg.to.x - seg.from.x) > EPS || Math.abs(seg.to.y - seg.from.y) > EPS) continue;
+      if (Math.abs(seg.to.z - seg.from.z) < EPS) continue;
+      ys.push(seg.from.y);
+    }
+    if (!ys.length) return null;
+    ys.sort((a, b) => a - b);
+    const spread = ys[ys.length - 1] - ys[0];
+    const mid = ys[Math.floor(ys.length / 2)];
+    return {
+      y: mid,
+      consistent: spread <= 0.01,
+      spread,
+      minCutZ: Number.isFinite(minCutZ) ? minCutZ : 0,
+      holes: ys.length,
+    };
+  }
+
   NC.buildSegments = buildSegments;
   NC.geometry = {
     buildSegments,
@@ -1044,6 +1088,7 @@
       unrollPoint,
       unrollSegments,
       estimateRadius: estimateRotaryRadius,
+      estimateCenter: estimateRotaryCenter,
       STEP_DEG: ROT_STEP_DEG,
     },
     segmentLength,

@@ -374,3 +374,137 @@ test('三軸程式也能算展開圖（不會炸），只是全部落在同一�
   assert.ok(polylines.length > 0);
   for (const pl of polylines) for (const p of pl.pts) assert.ok(Number.isFinite(p.theta));
 });
+
+// ---------------------------------------------------------------------------
+// 設定面板的第四軸欄位（panels.settings）
+// ---------------------------------------------------------------------------
+test('設定：第四軸區塊只在 rotaryUsed 時出現，改值會送出 settings.rotary', async () => {
+  const { default: fsx } = await import('node:fs');
+  const { default: pathx } = await import('node:path');
+  const { default: vmx } = await import('node:vm');
+  const { ROOT } = await import('./load.mjs');
+  // panels.js 需要 document；沿用 panels.test.mjs 建好的假 DOM（先跑過就有）
+  if (!globalThis.document) {
+    const t = pathx.join(ROOT, 'test', 'panels.test.mjs');
+    if (!fsx.existsSync(t)) return;
+  }
+  if (!NC.ui || !NC.ui.panels) {
+    const p = pathx.join(ROOT, 'js', 'ui', 'panels.js');
+    if (!globalThis.document) return;   // 沒有假 DOM 就跳過（panels 測試自己會測）
+    vmx.runInThisContext(fsx.readFileSync(p, 'utf8'), { filename: p });
+  }
+  const P = NC.ui && NC.ui.panels;
+  if (!P || !globalThis.document) return;
+  const container = () => globalThis.document.createElement('div');
+  const q = (el, sel) => (el.querySelector ? el.querySelector(sel) : null);
+
+  const plain = container();
+  P.settings(plain, { settings: NC.util.defaultSettings(), scenario: 'off', cell: 0.5 });
+  assert.ok(!q(plain, 'input[data-field="rotaryCenterZ"]'), '三軸程式不該出現第四軸設定');
+
+  const c = container();
+  const changes = [];
+  P.settings(c, {
+    settings: NC.util.defaultSettings(), scenario: 'off', cell: 0.5, rotaryUsed: true,
+    onChange: (o) => changes.push(o),
+  });
+  const cz = q(c, 'input[data-field="rotaryCenterZ"]');
+  assert.ok(cz, '有第四軸時應該出現迴轉中心 Z');
+  cz.value = '-25';
+  cz.dispatchEvent({ type: 'change' });
+  assert.equal(changes[0].settings.rotary.center.z, -25);
+
+  const dia = q(c, 'input[data-field="rotaryDiameter"]');
+  dia.value = '50';
+  dia.dispatchEvent({ type: 'change' });
+  assert.equal(changes[1].settings.rotary.radius, 25, '填直徑 50 → 半徑 25');
+});
+
+// ---------------------------------------------------------------------------
+// 反推迴轉中心（geometry.rotary.estimateCenter）
+//
+// 幾何：分度孔在機台座標上是沿 Z 的垂直線，要在工件上是徑向孔，這些線就得通過
+// 迴轉中心線 → 所有孔的 Y 必須相同。中心的 Z 不影響角度（推不出來，由現場填）。
+// ---------------------------------------------------------------------------
+const FOUR_HOLES = [
+  'M6T1(SG-8.5)',
+  'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
+  'G98G81Z10.R25.F70M8',
+  'A90.',
+  'A180.',
+  'A270.',
+  'G80',
+].join('\n');
+
+test('反推中心：分度孔都在 Y0 → 推出 Y0 且一致', () => {
+  const res = full(FOUR_HOLES);
+  const est = R.estimateCenter(res.scenarios.off.geometry.segments);
+  assert.equal(est.holes, 4);
+  assert.equal(est.consistent, true);
+  near(est.y, 0);
+  near(est.spread, 0);
+});
+
+test('反推中心：孔在 Y8 的母線上 → 推出 Y8', () => {
+  const res = full(FOUR_HOLES.replace(/Y0\./g, 'Y8.'));
+  const est = R.estimateCenter(res.scenarios.off.geometry.segments);
+  assert.equal(est.consistent, true);
+  near(est.y, 8);
+});
+
+test('反推中心：孔的 Y 不一致 → consistent = false，spread 是實際差距', () => {
+  const res = full([
+    'M6T1(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
+    'G98G81Z10.R25.F70M8',
+    'Y-10.A90.',
+    'Y10.A180.',
+    'G80',
+  ].join('\n'));
+  const est = R.estimateCenter(res.scenarios.off.geometry.segments);
+  assert.equal(est.consistent, false);
+  near(est.spread, 20);
+});
+
+test('R37：孔不在同一條母線上 → warning', () => {
+  const res = full([
+    'M6T1(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
+    'G98G81Z10.R25.F70M8',
+    'Y-10.A90.',
+    'Y10.A180.',
+    'G80',
+  ].join('\n'));
+  const d = byRule(res.diagnostics, 'R37', 'warning').filter((x) => /同一條母線/.test(x.message));
+  assert.equal(d.length, 1);
+  assert.match(d[0].message, /20/);
+});
+
+test('R37：正常的分度孔不報「母線」那條', () => {
+  const res = full(FOUR_HOLES);
+  assert.equal(byRule(res.diagnostics, 'R37').filter((x) => /母線/.test(x.message)).length, 0);
+});
+
+test('R37：刀尖穿過迴轉中心 → info，填對中心 Z 之後就不報', () => {
+  // Z0 對在圓棒頂端（中心其實在 Z-25），但設定還是預設 0 → 孔底 Z-5 穿過中心線
+  const prog2 = [
+    'M6T1(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
+    'G98G81Z-5.R2.F70M8',
+    'A90.',
+    'G80',
+  ].join('\n');
+  const before = full(prog2);
+  const d = byRule(before.diagnostics, 'R37', 'info').filter((x) => /穿過/.test(x.message));
+  assert.equal(d.length, 1);
+
+  const after = full(prog2, {
+    settings: Object.assign(NC.util.defaultSettings(), { rotary: { center: { y: 0, z: -25 }, radius: 25 } }),
+  });
+  assert.equal(byRule(after.diagnostics, 'R37').filter((x) => /穿過/.test(x.message)).length, 0);
+});
+
+test('反推中心：三軸程式（沒有鑽孔）回 null', () => {
+  const res = full('G0G90G54X0.Y0.Z5.\nG1X50.F200.');
+  assert.equal(R.estimateCenter(res.scenarios.off.geometry.segments), null);
+});

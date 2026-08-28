@@ -1651,6 +1651,33 @@
       root.appendChild(row('快速速率', num('rapidRate', { attrs: { step: '1000', min: '1' }, title: 'G0 速率，時間估算用' }), ' mm/min'));
       root.appendChild(row('下刀進給上限', num('plungeFeedMax', { attrs: { step: '10', min: '1' }, title: 'G1 向下且在材料內超過此值 → 警告' }), ' mm/min'));
       root.appendChild(row('先讀節數', num('lookahead', { attrs: { step: '1', min: '1' }, title: '刀徑補正先讀節數（參數 19625）' })));
+      // 第四軸：只有程式真的轉過 A 才顯示——三軸程式看到這一區只會困惑。
+      // 這幾個值決定「工件在哪裡轉」，展開圖與 3D 圓棒完全靠它們；填錯的話圖會歪掉，
+      // 但改個數字就立刻重畫，現場可以用試的把對的值找出來（比問座標系術語快）。
+      if (state.opts.rotaryUsed) {
+        if (!s.rotary) s.rotary = { center: { y: 0, z: 0 }, radius: 0 };
+        if (!s.rotary.center) s.rotary.center = { y: 0, z: 0 };
+        const rc = s.rotary.center;
+        root.appendChild(h('div', { class: 'nc-sub-title' }, '第四軸（A 繞 X 軸）'));
+        const mk = (field, get, set, title) => numberInput(get(), (n) => {
+          set(n == null ? 0 : n);
+          commit();
+        }, { attrs: { step: '0.5' }, title, dataset: { field } });
+        root.appendChild(row('迴轉中心 Y',
+          mk('rotaryCenterY', () => rc.y, (v) => { rc.y = v; }, '分度頭中心線在工件座標的 Y。對刀時 Y0 就對在中心線的話填 0。'),
+          ' mm'));
+        root.appendChild(row('迴轉中心 Z',
+          mk('rotaryCenterZ', () => rc.z, (v) => { rc.z = v; }, 'Z0 對在中心線 → 填 0；Z0 對在圓棒最頂端 → 填「−半徑」（例如 Ø50 就填 −25）。'),
+          ' mm'));
+        root.appendChild(row('工件直徑',
+          numberInput(s.rotary.radius > 0 ? s.rotary.radius * 2 : '', (n) => {
+            s.rotary.radius = (n != null && n > 0) ? n / 2 : 0;
+            commit();
+          }, { attrs: { step: '1', min: '0' }, title: '空白 = 由程式推估（取切削段離中心最遠的距離）', dataset: { field: 'rotaryDiameter' } }),
+          ' mm'));
+        root.appendChild(h('div', { class: 'nc-muted' },
+          '填錯不會怎樣，圖會立刻重畫。分度孔在展開圖上排成一直線、r 從表面往中心遞減，就是對了。'));
+      }
       root.appendChild(h('div', { class: 'nc-sub-title' }, '模擬'));
       const cellOpts = CELL_OPTIONS.includes(state.cell) ? CELL_OPTIONS : CELL_OPTIONS.concat([state.cell]).sort((a, b) => a - b);
       root.appendChild(row('格距', select(cellOpts.map((c) => [c, `${c} mm`]), state.cell, (v) => { state.cell = parseFloat(v); commit(); }, { dataset: { field: 'cell' } }), h('span', { class: 'nc-muted' }, ' 越小越準、越慢')));

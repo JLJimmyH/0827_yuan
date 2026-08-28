@@ -526,8 +526,11 @@
       if (S.mode === 'top') modeText = '俯視';
       else if (S.mode === 'unroll') {
         const u = unrollData();
-        const rad = u && u.radius ? `　工件半徑推估 R${fmt(u.radius.radius)}` : '';
-        modeText = `展開圖（圓柱表面攤平）${rad}`;
+        let rad = '';
+        if (u && u.radius) rad = `　工件半徑 R${fmt(u.radius.radius)}${u.radius.source === 'user' ? '' : '（推估）'}`;
+        const c = S.data.rotaryCenter || { y: 0, z: 0 };
+        const ctr = (c.y || c.z) ? `　迴轉中心 Y${fmt(c.y)} Z${fmt(c.z)}` : '';
+        modeText = `展開圖（圓柱表面攤平）${rad}${ctr}`;
       } else modeText = `剖面 ${cutAxis().toUpperCase()} = ${fmt(S.section)}`;
       let head = `${modeText} · ${scen}`;
       if (S.snapshotIndex != null) head += ` · 快照 ${S.snapshotIndex}`;
@@ -681,11 +684,14 @@
       const segs = S.data.segments || [];
       const c = S.data.rotaryCenter || { y: 0, z: 0 };
       const cy = c.y || 0, cz = c.z || 0;
+      const rad = S.data.rotaryRadius || 0;
       const cache = S.unrollCache;
-      if (cache && cache.segs === segs && cache.cy === cy && cache.cz === cz) return cache.val;
+      if (cache && cache.segs === segs && cache.cy === cy && cache.cz === cz && cache.rad === rad) return cache.val;
       const val = R.unrollSegments(segs, { center: { y: cy, z: cz } });
-      val.radius = R.estimateRadius(segs, { center: { y: cy, z: cz } });
-      S.unrollCache = { segs, cy, cz, val };
+      val.radius = rad > 0
+        ? { radius: rad, source: 'user' }
+        : R.estimateRadius(segs, { center: { y: cy, z: cz } });
+      S.unrollCache = { segs, cy, cz, rad, val };
       return val;
     }
 
@@ -1144,8 +1150,10 @@
           toolTable: d.toolTable || null,
           scenario: d.scenario || 'off',
           simStale: !!d.simStale,
-          // 第四軸迴轉中心（展開圖用）。預設 (0,0)：四軸裝夾慣例是 Y0/Z0 對到夾頭中心線。
-          rotaryCenter: d.rotaryCenter || { y: 0, z: 0 },
+          // 第四軸（展開圖用）。中心預設 (0,0)：四軸裝夾慣例是 Y0/Z0 對到夾頭中心線。
+          // 半徑 0 = 由程式推估；使用者在設定填了直徑就以他填的為準。
+          rotaryCenter: d.rotaryCenter || (d.rotary && d.rotary.center) || { y: 0, z: 0 },
+          rotaryRadius: (d.rotary && d.rotary.radius > 0) ? d.rotary.radius : 0,
         };
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;

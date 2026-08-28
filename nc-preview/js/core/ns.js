@@ -352,6 +352,13 @@
       controller: '0i-D', dpi: false, maxOffsets: 64, lookahead: 3, multiSlash: 'asSingle', skipLevelsOn: [1],
       requireM5BeforeM6: false, m0StopsSpindle: true, rapidRate: 20000, plungeFeedMax: 300,
       refPosition: { x: 0, y: 0, z: 150 }, softLimits: null, disabledRules: [], dToleranceMm: 0.5,
+      /**
+       * 第四軸（A 繞 X）。只有程式真的用到 A 才有作用。
+       *   center  迴轉中心線在工件座標的 Y／Z。預設 (0,0) = G54 的 Y0/Z0 對到夾頭中心線（四軸裝夾慣例）；
+       *           若現場把 Z0 對在圓棒最頂端，這裡要填 z = −半徑。
+       *   radius  工件半徑（畫圓棒、展開圖縱軸換算用）。0 = 由程式推估。
+       */
+      rotary: { center: { y: 0, z: 0 }, radius: 0 },
     }),
     /** 深拷貝（純資料） */
     deepClone: (o) => JSON.parse(JSON.stringify(o)),

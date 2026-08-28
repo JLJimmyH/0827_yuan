@@ -1560,6 +1560,39 @@
       }
     }
 
+    // ---- (e) 迴轉中心：從程式反推，對不上就講出來 ----
+    // 分度孔在機台座標上是沿 Z 的垂直線，要在工件上是徑向孔，這些線就得通過迴轉中心線，
+    // 也就是所有孔的 Y 必須相同。這是不必知道任何設定就能查的幾何事實。
+    const geo = geoOf(ctx, 'off');
+    const RG = NC.geometry && NC.geometry.rotary;
+    const est = (geo && RG && typeof RG.estimateCenter === 'function') ? RG.estimateCenter(geo.segments) : null;
+    if (est && est.holes >= 2) {
+      const cfg = (settingsOf(ctx).rotary && settingsOf(ctx).rotary.center) || { y: 0, z: 0 };
+      const cy = Number(cfg.y) || 0, cz = Number(cfg.z) || 0;
+      if (!est.consistent) {
+        out.push(diag('R37', first, 'warning',
+          `這 ${est.holes} 個分度孔不在同一條母線上（Y 座標差了 ${f(est.spread)} mm），不是垂直於工件表面的徑向孔`, {
+            detail: `${A} 軸繞 X 轉的時候，只有「Y 對準迴轉中心線」的那一條母線是垂直於工件表面的。\n`
+              + '這些孔的 Y 不一樣，代表刀是斜著切進圓周的——可能是：\n'
+              + '・工件裝夾的位置和程式假設的不同（對刀的 Y 沒對到中心線）\n'
+              + '・程式本來就是要斜孔／側面的槽（那這一則可以忽略）\n'
+              + '・程式的 XY 和 A 值各寫各的，湊不成一個分度加工\n'
+              + '展開圖上這種孔會畫成斜線而不是一個點，一看就知道。',
+          }));
+      }
+      if (est.minCutZ < cz - EPS) {
+        out.push(diag('R37', first, 'info',
+          `刀尖最深切到 Z${f(est.minCutZ)}，已經穿過目前設定的迴轉中心線（Z${f(cz)}）`, {
+            detail: '兩種可能，請確認是哪一種：\n'
+              + `・**這是貫穿孔**——鑽穿工件本來就會經過軸心，那這一則忽略即可。\n`
+              + `・**迴轉中心的 Z 設錯了**——如果對刀時 Z0 是對在圓棒最頂端（不是夾頭中心線），`
+              + '那迴轉中心應該填「−半徑」（例如 Ø50 的料填 Z−25）。\n'
+              + '設錯的話展開圖的角度會在孔底翻轉 180 度，3D 圓棒的粗細也會不對。\n'
+              + '到「素材與設定」的「第四軸」把迴轉中心 Z 填進去，圖會立刻重畫。',
+          }));
+      }
+    }
+
     // ---- (c) 程式結束時第四軸沒有回到 0 ----
     const finalA = off.finalState ? off.finalState.a : null;
     if (typeof finalA === 'number' && Math.abs(finalA) > EPS) {
