@@ -20,7 +20,20 @@ const NAMES = ORDER.filter((n) => found.includes(n)).concat(found.filter((n) => 
 
 /** 讀檔並正規化：一律 LF 結尾、去掉 UTF-8 BOM（程式本身是純 ASCII） */
 function readProgram(name) {
-  let text = fs.readFileSync(path.join(SAMPLE_DIR, name), 'latin1');
+  const buf = fs.readFileSync(path.join(SAMPLE_DIR, name));
+  // NC 程式一律當純 ASCII 讀（Fanuc 控制器也不吃非 ASCII 的註解）。
+  // 用 UTF-8 寫中文註解的話，這裡會照 latin1 逐位元組讀成一堆亂碼，
+  // 而且畫面上看起來「只是字很怪」，不會有任何錯誤——所以在這裡擋下來。
+  const bad = [];
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] > 0x7e && buf[i] !== 0x0d && buf[i] !== 0x0a) { bad.push(i); if (bad.length > 4) break; }
+  }
+  if (bad.length) {
+    const at = bad.slice(0, 4).map((i) => '0x' + buf[i].toString(16)).join(' ');
+    throw new Error(`${name} 含非 ASCII 位元組（${at}…）。範例程式的註解請用英數字，`
+      + '中文寫進去傳到機台會變亂碼，畫面上也只會看到一堆怪字而不報錯。');
+  }
+  let text = buf.toString('latin1');
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   return text.replace(/\r\n/g, '\n');
 }
