@@ -21,11 +21,25 @@
   // ---------------------------------------------------------------------------
   // 常數與顯示文字
   // ---------------------------------------------------------------------------
-  const TOOL_TYPES = [
-    ['endmill', '端銑刀'], ['facemill', '面銑刀'], ['drill', '鑽頭'], ['chamfer', '倒角刀'],
-    ['reamer', '鉸刀'], ['tap', '絲攻'], ['spot', '中心鑽'], ['ballmill', '球刀'], ['unknown', '未知'],
-  ];
+  // 型式清單直接跟著 NC.tools 的型式表走，兩邊才不會各有一份、加了刀具只改到一邊。
+  const TOOL_TYPES = (() => {
+    const info = NC.tools && NC.tools.TYPE_INFO;
+    if (!info) return [['endmill', '平刀（端銑刀）'], ['unknown', '未定義']];
+    return Object.keys(info).map((k) => [k, info[k].ui || info[k].name]);
+  })();
   const TOOL_TYPE_LABEL = Object.fromEntries(TOOL_TYPES);
+  /** 型式 → 一句話說明（下拉選單的 tooltip） */
+  const TOOL_TYPE_DESC = (() => {
+    const info = NC.tools && NC.tools.TYPE_INFO;
+    const out = {};
+    if (info) for (const k of Object.keys(info)) out[k] = info[k].desc || '';
+    return out;
+  })();
+  /** 型式 → 直徑以外還要現場補的欄位（cornerRad 角R／neckDia 頸徑） */
+  function extraFieldsOf(type) {
+    const info = NC.tools && NC.tools.TYPE_INFO && NC.tools.TYPE_INFO[type];
+    return (info && Array.isArray(info.extra)) ? info.extra : [];
+  }
   const SEVERITIES = ['error', 'warning', 'needsInput', 'info'];
   const SEVERITY_LABEL = { error: '錯誤', warning: '警告', needsInput: '需輸入', info: '資訊' };
   const SOURCE_LABEL = { comment: '註解', motion: '動作', default: '預設', user: '手填' };
@@ -390,12 +404,14 @@
     return cells.some((c) => c.indexOf('請填_') === 0 || c === '程式註解' || c === '推測型式' || c === '用到的D號');
   }
 
-  const CSV_USER_FIELDS = ['type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch'];
+  const CSV_USER_FIELDS = ['type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch', 'cornerRad', 'neckDia'];
   const CSV_FIELD_LABEL = {
     type: '型式', diameter: '直徑', angle: '角度', fluteLen: '刃長', stickout: '伸出長', pitch: '牙距',
+    cornerRad: '角R', neckDia: '頸徑',
   };
   /** 這幾個「請填_」欄位只能填數字，填了別的東西會被整格丟掉（要講出來，不能默默吞掉）。 */
-  const CSV_NUMERIC_COLUMNS = ['請填_直徑mm', '請填_刀尖或倒角角度', '請填_刃長mm', '請填_伸出長mm'];
+  const CSV_NUMERIC_COLUMNS = ['請填_直徑mm', '請填_刀尖或倒角角度', '請填_刃長mm', '請填_伸出長mm',
+    '請填_角R半徑mm', '請填_頸徑mm'];
 
   /**
    * 匯入值的合理範圍。CSV 是拿給現場用 Excel 填的，`-`、`0`、`-5` 這種手誤一定會發生；
@@ -746,9 +762,11 @@
       const typeSel = select(TOOL_TYPES, tool.type || 'unknown', (v) => {
         setToolField(table, tool.t, 'type', v, state.dMap);
         replaceTag(tags.type, 'user');
+        typeSel.title = TOOL_TYPE_DESC[v] || '';
+        renderExtra(v);
         refreshBanner();
         commit();
-      }, { dataset: { field: 'type' } });
+      }, { dataset: { field: 'type' }, title: TOOL_TYPE_DESC[tool.type || 'unknown'] || '' });
 
       const diaInput = numberInput(tool.diameter, (n) => {
         if (n == null || n <= 0) { diaInput.value = String(tool.diameter == null ? '' : tool.diameter); return; }
@@ -773,6 +791,29 @@
         replaceTag(tags.fluteLen, 'user');
         commit();
       }, { attrs: { min: '0', step: '0.5' }, title: '刃長 mm', placeholder: '未填', dataset: { field: 'fluteLen' } });
+
+      // 角R／頸徑：只有需要的型式才給欄位（圓鼻刀、外R成型刀、T型刀、鳩尾槽刀、糖球形銑刀、
+      // 中心鑽、魚眼孔鑽）。換型式時就地重畫，不用整張表重繪。
+      const extraCell = h('td', { class: 'nc-td-extra' });
+      function renderExtra(type) {
+        clear(extraCell);
+        const fields = extraFieldsOf(type);
+        if (!fields.length) { extraCell.appendChild(h('span', { class: 'nc-muted' }, '—')); return; }
+        for (const f of fields) {
+          const tagSp = h('span', { class: 'nc-tag-holder', dataset: { field: f } }, sourceTag(tool.source && tool.source[f]));
+          const input = numberInput(tool[f], (n) => {
+            setToolField(table, tool.t, f, n, state.dMap);
+            replaceTag(tagSp, 'user');
+            commit();
+          }, {
+            attrs: { min: '0', step: '0.1' }, placeholder: '未填', dataset: { field: f },
+            title: f === 'cornerRad' ? '角R／成型半徑 mm' : '頸徑（刀桿或導柱直徑）mm',
+          });
+          extraCell.appendChild(h('div', { class: 'nc-extra-line', dataset: { field: f } },
+            h('span', { class: 'nc-extra-name' }, CSV_FIELD_LABEL[f]), input, tagSp));
+        }
+      }
+      renderExtra(tool.type || 'unknown');
 
       const dList = state.dMap[tool.t] || [];
       const dCell = h('td', { class: 'nc-td-d' });
@@ -815,6 +856,7 @@
         h('td', null, diaInput, tagHolder('diameter')),
         h('td', null, angInput, tagHolder('angle')),
         h('td', null, fluteInput, tagHolder('fluteLen')),
+        extraCell,
         dCell);
     }
 
@@ -836,7 +878,7 @@
         return;
       }
       const thead = h('thead', null, h('tr', null,
-        ['T', '註解', '型式', '直徑 mm', '角度°', '刃長', 'D 補正（半徑）'].map((s) => h('th', null, s))));
+        ['T', '註解', '型式', '直徑 mm', '角度°', '刃長', '角R／頸徑', 'D 補正（半徑）'].map((s) => h('th', null, s))));
       const tbody = h('tbody', null, table.tools.map(renderRow));
       root.appendChild(h('div', { class: 'nc-scroll' }, h('table', { class: 'nc-table nc-tools' }, thead, tbody)));
       refreshBanner();

@@ -69,6 +69,58 @@ const lin = (a, b, feed = 100) => ({ kind: 'linear', from: a, to: b, feed });
 const hole = (x, y, z, cycle, extra) => Object.assign({ kind: 'hole', x, y, z, r: 2, initialZ: 10, cycle, retract: 'G98' }, extra || {});
 
 // ---------------------------------------------------------------------------
+// 型式表
+// ---------------------------------------------------------------------------
+const ALL_TYPES = ['endmill', 'ballmill', 'bullnose', 'facemill', 'radiusmill', 'chamfer', 'slotmill', 'tapermill',
+  'dovetail', 'lollipop', 'engrave', 'drill', 'reamer', 'boring', 'centerdrill', 'spot', 'countersink',
+  'counterbore', 'wooddrill', 'tap', 'taplh', 'unknown'];
+
+test('型式表：22 種刀具型式，每一種都有中文名、分類、足跡形狀與說明', () => {
+  assert.deepEqual(T.TOOL_TYPES, ALL_TYPES);
+  for (const k of ALL_TYPES) {
+    const info = T.TYPE_INFO[k];
+    assert.equal(T.TYPE_NAMES[k], info.name, k);
+    assert.ok(['mill', 'hole', 'thread', 'other'].includes(info.group), k);
+    assert.ok(['flat', 'cone', 'sphere', 'none'].includes(info.profile), k);
+    assert.ok(Array.isArray(info.extra), k);
+    assert.ok(info.desc && info.desc.length > 0, k);
+  }
+  // 底切刀在高度圖模擬裡只能用最大直徑近似，旗標要標得出來
+  assert.deepEqual(ALL_TYPES.filter((k) => T.TYPE_INFO[k].undercut), ['slotmill', 'dovetail', 'lollipop']);
+  // 不移除材料的只有攻牙那兩把
+  assert.deepEqual(ALL_TYPES.filter((k) => T.TYPE_INFO[k].profile === 'none'), ['tap', 'taplh']);
+  // 要現場補尺寸的刀
+  assert.deepEqual(ALL_TYPES.filter((k) => T.TYPE_INFO[k].extra.includes('cornerRad')), ['bullnose', 'radiusmill']);
+  assert.deepEqual(ALL_TYPES.filter((k) => T.TYPE_INFO[k].extra.includes('neckDia')),
+    ['slotmill', 'dovetail', 'lollipop', 'centerdrill', 'counterbore']);
+});
+test('型式表：型式 id、CSV 中文名、UI 名稱都能被 CSV 認回同一種', () => {
+  for (const k of T.TOOL_TYPES) {
+    const info = T.TYPE_INFO[k];
+    for (const name of [k, info.name, info.ui].filter(Boolean)) {
+      const csv = T.CSV_HEADER.join(',') + '\n' + ['P1', 'T1', '', '?', '', '', '', name].join(',');
+      assert.equal(T.fromCSV(csv, 'P1').tools[0].type, k, `${k} ← ${name}`);
+    }
+  }
+});
+test('型式表：常見別名也對得上', () => {
+  const csvType = (name) => {
+    const csv = T.CSV_HEADER.join(',') + '\n' + ['P1', 'T1', '', '?', '', '', '', name].join(',');
+    return T.fromCSV(csv, 'P1').tools[0].type;
+  };
+  assert.equal(csvType('平刀'), 'endmill');
+  assert.equal(csvType('牛鼻刀'), 'bullnose');
+  assert.equal(csvType('燕尾刀'), 'dovetail');
+  assert.equal(csvType('棒棒糖刀'), 'lollipop');
+  assert.equal(csvType('鏜刀'), 'boring');
+  assert.equal(csvType('右牙刀'), 'tap');
+  assert.equal(csvType('左旋絲攻'), 'taplh');
+  assert.equal(csvType('魚眼鑽'), 'counterbore');
+  assert.equal(csvType('埋頭孔鑽'), 'countersink');
+  assert.equal(csvType('Ball Mill'), 'ballmill', '英文大小寫都要認得');
+});
+
+// ---------------------------------------------------------------------------
 // parseComment
 // ---------------------------------------------------------------------------
 test('parseComment：契約驗收各型', () => {
@@ -91,6 +143,46 @@ test('parseComment：銑刀寫法與邊界', () => {
   assert.equal(T.parseComment('m4*p0.7').type, 'tap');
   assert.equal(T.parseComment('M8X1.25').pitch, 1.25);
   assert.equal(T.parseComment(' 12 mm ').diameter, 12);
+});
+test('parseComment：新增型式的註解關鍵字', () => {
+  const p = (str) => T.parseComment(str);
+  assert.equal(p('DOVETAIL 16MM').type, 'dovetail');
+  assert.equal(p('DOVETAIL 16MM').diameter, 16);
+  assert.equal(p('DOVETAIL 16MM').angle, 45, '沒寫角度就用型式的預設');
+  assert.equal(p('LOLLIPOP 8').type, 'lollipop');
+  assert.equal(p('T-SLOT 20MM').type, 'slotmill');
+  assert.equal(p('TAPER 6MM 3DEG').type, 'tapermill');
+  assert.equal(p('TAPER 6MM 3DEG').angle, 3, '註解寫了度數就用註解的');
+  assert.equal(p('ENGRAVE 30DEG').type, 'engrave');
+  assert.equal(p('ENGRAVE 30DEG').diameter, null, '30DEG 是角度，不能當成 Ø30');
+  assert.equal(p('CBORE 10').type, 'counterbore');
+  assert.equal(p('CSK 90DEG 12').type, 'countersink');
+  assert.equal(p('CSK 90DEG 12').diameter, 12);
+  assert.equal(p('CENTER DRILL 3').type, 'centerdrill');
+  assert.equal(p('CENTER DRILL 3').angle, 60);
+  assert.equal(p('SPOT 6').type, 'spot', '點鑽和中心鑽是兩種刀');
+  assert.equal(p('SPOT 6').angle, 90);
+  assert.equal(p('BORING 25.4').type, 'boring');
+  assert.equal(p('WOOD DRILL 8').type, 'wooddrill');
+  assert.equal(p('REAM 8').type, 'reamer');
+  assert.equal(p('DRILL 8').type, 'drill');
+  assert.equal(p('10MM BALL').type, 'ballmill', '原本就認得的球刀寫法不能壞掉');
+});
+test('parseComment：圓鼻刀與外R成型刀的角R', () => {
+  assert.deepEqual(T.parseComment('12R0.5'), { type: 'bullnose', diameter: 12, cornerRad: 0.5, source: 'comment' });
+  assert.equal(T.parseComment('10MM R1').type, 'bullnose');
+  assert.equal(T.parseComment('10MM R1').cornerRad, 1);
+  assert.equal(T.parseComment('BULLNOSE 12MM R2').cornerRad, 2);
+  assert.equal(T.parseComment('CORNER R 6').type, 'radiusmill');
+  assert.equal(T.parseComment('CORNER R 6').cornerRad, 6);
+  assert.equal(T.parseComment('CORNER R 6').diameter, null, 'R6 是成型半徑，不是直徑');
+});
+test('parseComment：左牙刀與右牙刀分得開', () => {
+  assert.equal(T.parseComment('M8*P1.25').type, 'tap');
+  assert.equal(T.parseComment('M8*P1.25LH').type, 'taplh');
+  assert.equal(T.parseComment('M8*P1.25LH').pitch, 1.25);
+  assert.equal(T.parseComment('LH TAP M6').type, 'taplh');
+  assert.equal(T.parseComment('左牙 M6*P1').type, 'taplh');
 });
 test('parseComment：空值與看不懂 → unknown', () => {
   for (const v of ['', null, undefined, 'ABC', '哈囉']) {
@@ -180,6 +272,26 @@ test('inferTools：只有 tok（無 run）也能走退路', goldenSkip, () => {
   assert.equal(by[3].type, 'chamfer');
   assert.equal(by[7].type, 'drill');
   assert.equal(by[1].type, 'endmill');
+});
+test('inferTools：新型式的預設角度跟著型式表走', () => {
+  const run = makeRun([
+    { tool: 1, comment: 'CENTER DRILL 3', blocks: [{ actions: [hole(0, 0, -3, 'G81')] }] },
+    { tool: 2, comment: 'ENGRAVE', dList: [2], gCodes: ['G41'], blocks: [{ actions: [lin(P(0, 0, -1), P(20, 0, -1))], comp: 'G41' }] },
+    { tool: 3, comment: 'DOVETAIL 16MM', dList: [3], gCodes: ['G41'], blocks: [{ actions: [lin(P(0, 0, -5), P(20, 0, -5))], comp: 'G41' }] },
+    { tool: 4, comment: '12R0.5', dList: [4], gCodes: ['G41'], blocks: [{ actions: [lin(P(0, 0, -5), P(20, 0, -5))], comp: 'G41' }] },
+    { tool: 5, comment: 'M8*P1.25LH', blocks: [{ actions: [hole(0, 0, -12, 'G74')] }] },
+  ]);
+  const by = Object.fromEntries(T.inferTools(null, run).map((t) => [t.t, t]));
+  assert.equal(by[1].type, 'centerdrill'); assert.equal(by[1].angle, 60);
+  assert.equal(by[2].type, 'engrave'); assert.equal(by[2].angle, 30);
+  assert.equal(by[3].type, 'dovetail'); assert.equal(by[3].angle, 45); assert.equal(by[3].diameter, 16);
+  assert.equal(by[4].type, 'bullnose'); assert.equal(by[4].cornerRad, 0.5); assert.equal(by[4].source.cornerRad, 'comment');
+  assert.equal(by[5].type, 'taplh'); assert.equal(by[5].pitch, 1.25);
+  // 註解與動作不算矛盾：中心鑽走 G81、鳩尾刀走輪廓、左牙刀走 G74
+  const conflicts = T.inferDetails(null, run).filter((d) => d.conflict).map((d) => d.t);
+  assert.deepEqual(conflicts, []);
+  assert.equal(T.defaultAngleOf('countersink'), 90);
+  assert.equal(T.defaultAngleOf('boring'), null, '搪孔刀沒有通用刀尖角');
 });
 test('inferTools：空輸入不會炸', () => {
   assert.deepEqual(T.inferTools(null, null), []);
@@ -436,9 +548,9 @@ test('toCSV：欄位與 CSV_HEADER 相同、含 BOM、CRLF', goldenSkip, () => {
   const t3 = rows.find((r) => r[1] === 'T3');
   assert.equal(t3[0], FIX_C); assert.equal(t3[2], '8V'); assert.equal(t3[3], 'V型倒角刀'); assert.equal(t3[4], '8');
   const t1 = rows.find((r) => r[1] === 'T1');
-  assert.equal(t1[5], 'G41'); assert.equal(t1[12], 'D1');
+  assert.equal(t1[5], 'G41'); assert.equal(t1[14], 'D1');
   const t15 = rows.find((r) => r[1] === 'T15');
-  assert.equal(t15[2], ''); assert.equal(t15[3], '?'); assert.ok(t15[14].includes('定位器'));
+  assert.equal(t15[2], ''); assert.equal(t15[3], '?'); assert.ok(t15[16].includes('定位器'));
   if (hasPipeline) { assert.equal(t1[6], '-10.0'); assert.equal(t3[6], '-2.1'); }
 });
 test('toCSV：使用者欄位與補正值會寫進「請填_」欄；含逗號的欄位會加引號', () => {
@@ -463,10 +575,10 @@ test('toCSV：使用者欄位與補正值會寫進「請填_」欄；含逗號�
 test('fromCSV：多程式的 CSV（BOM、引號、同 T 出現在不同程式、填不出數字的格子）', () => {
   const csv = '﻿' + [
     T.CSV_HEADER.join(','),
-    'O1001,T2,10MM,平銑刀,10,G41,-12.0,,8?,,,,D2,D2=4.9850/0,"備註,含逗號"',
-    'O1001,T3,10V,V型倒角刀,10,G41,-1.0,,,,,,D3,,',
-    'O1002,T2,10MM,平銑刀,10,G41,-7.5,,,,,,D2,D2=5.0/0,',
-    'O1002,T4,6MM,平銑刀,6,面銑/一般切削,-3.0,,,,,,,,',
+    'O1001,T2,10MM,平銑刀,10,G41,-12.0,,8?,,,,,,D2,D2=4.9850/0,"備註,含逗號"',
+    'O1001,T3,10V,V型倒角刀,10,G41,-1.0,,,,,,,,D3,,',
+    'O1002,T2,10MM,平銑刀,10,G41,-7.5,,,,,,,,D2,D2=5.0/0,',
+    'O1002,T4,6MM,平銑刀,6,面銑/一般切削,-3.0,,,,,,,,,,',
   ].join('\r\n');
 
   // 不指定程式：同一個 T 只留第一次出現的那一列
@@ -491,8 +603,8 @@ test('fromCSV：多程式的 CSV（BOM、引號、同 T 出現在不同程式、
 });
 test('fromCSV：使用者填的型式／直徑／角度／刃長／伸出長 → source=user；空字串 → 空表', () => {
   const csv = T.CSV_HEADER.join(',') + '\n' +
-    'P1,T5,4MM,平銑刀,4,G41,-35.1,鑽頭,4.2,120,15,40,D5,D5=2.1/0.05,\n' +
-    'P1,T6,,?, ,面銑/一般切削,,,,,,,,,';
+    'P1,T5,4MM,平銑刀,4,G41,-35.1,鑽頭,4.2,120,15,40,,,D5,D5=2.1/0.05,\n' +
+    'P1,T6,,?, ,面銑/一般切削,,,,,,,,,,,';
   const t = T.fromCSV(csv, 'P1');
   assert.equal(t.tools.length, 2);
   const t5 = t.tools[0];
@@ -506,6 +618,28 @@ test('fromCSV：使用者填的型式／直徑／角度／刃長／伸出長 →
   assert.deepEqual(T.fromCSV('﻿').tools, []);
 });
 
+
+test('CSV：角R與頸徑往返（圓鼻刀、T型刀現場要補的兩個尺寸）', () => {
+  const table = {
+    programKey: 'O2001',
+    tools: [
+      { t: 1, label: '12R1', type: 'bullnose', diameter: 12, angle: null, fluteLen: 36, stickout: null, pitch: null,
+        cornerRad: 1, neckDia: null, resident: false, probe: false,
+        source: { label: 'comment', type: 'comment', diameter: 'comment', cornerRad: 'user' } },
+      { t: 2, label: 'T-SLOT 20MM', type: 'slotmill', diameter: 20, angle: null, fluteLen: 6, stickout: null, pitch: null,
+        cornerRad: null, neckDia: 10, resident: false, probe: false,
+        source: { label: 'comment', type: 'comment', diameter: 'comment', neckDia: 'user' } },
+    ],
+    offsets: [],
+  };
+  const csv = T.toCSV(table);
+  const head = csv.replace(/^﻿/, '').split('\r\n')[0].split(',');
+  assert.ok(head.includes('請填_角R半徑mm'));
+  assert.ok(head.includes('請填_頸徑mm'));
+  const by = Object.fromEntries(T.fromCSV(csv, 'O2001').tools.map((t) => [t.t, t]));
+  assert.equal(by[1].type, 'bullnose'); assert.equal(by[1].cornerRad, 1); assert.equal(by[1].source.cornerRad, 'user');
+  assert.equal(by[2].type, 'slotmill'); assert.equal(by[2].neckDia, 10); assert.equal(by[2].source.neckDia, 'user');
+});
 
 test('estimateStock：固定循環的孔內上下移動不可以墊高素材頂面', () => {
   const NCg = NC;

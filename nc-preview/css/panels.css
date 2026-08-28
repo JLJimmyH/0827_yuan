@@ -112,6 +112,9 @@
 .nc-dline { display: flex; align-items: center; gap: 4px; padding: 1px 0; }
 .nc-dno { font-family: var(--nc-mono); font-weight: 600; min-width: 2.8em; }
 .nc-dfield { color: var(--nc-muted); }
+.nc-extra-line { display: flex; align-items: center; gap: 4px; padding: 1px 0; }
+.nc-extra-name { color: var(--nc-muted); min-width: 2.6em; }
+.nc-extra-line .nc-num { width: 4.5em; }
 .nc-tool.nc-probe td { background: #fffdf0; }
 
 /* 錯誤清單 */

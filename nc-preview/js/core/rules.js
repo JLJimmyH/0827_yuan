@@ -26,6 +26,10 @@
 
   const U = NC.util;
   const EPS = 1e-6;
+  /** 攻牙刀（右牙 + 左牙）：轉速本來就低、進給 = 螺距 × 轉速，切削速度與長徑比那兩條不適用 */
+  const TAP_TYPES = new Set(['tap', 'taplh']);
+  /** 公稱直徑與實際切削直徑無關的錐形刀：切多寬看下刀多深，拿 D 值去比對沒有意義 */
+  const CONIC_TYPES = new Set(['chamfer', 'spot', 'centerdrill', 'countersink', 'engrave', 'tapermill', 'dovetail']);
 
   // ===========================================================================
   // 共用小工具
@@ -482,8 +486,8 @@
       if (!op || op.tool == null || !op.dList || !op.dList.length) continue;
       const tool = findTool(ctx, op.tool);
       if (!tool) continue;
-      // 倒角刀／中心鑽例外：實際切削直徑由下刀深度決定，公稱直徑跟補正量本來就沒關係。
-      if (tool.type === 'chamfer' || tool.type === 'spot') continue;
+      // 倒角刀／點鑽／雕刻刀等錐形刀例外：實際切削直徑由下刀深度決定，公稱直徑跟補正量本來就沒關係。
+      if (CONIC_TYPES.has(tool.type)) continue;
       const nominal = (typeof tool.diameter === 'number' && tool.diameter > 0) ? tool.diameter / 2 : null;
       if (nominal == null) continue;
       for (const d of op.dList) {
@@ -1255,8 +1259,8 @@
       const rpm = goodRpms.length ? Math.max.apply(null, goodRpms) : null;
       const label = toolLabel(ctx, op.tool);
 
-      // 切削速度 Vc（絲攻不適用：攻牙轉速本來就低）
-      if (dia && rpm && tool.type !== 'tap') {
+      // 切削速度 Vc（絲攻／左牙刀不適用：攻牙轉速本來就低）
+      if (dia && rpm && !TAP_TYPES.has(tool.type)) {
         const vc = Math.PI * dia * rpm / 1000;
         if (vc > 400) {
           out.push(diag('R35', op.lineStart, 'info',
@@ -1351,7 +1355,7 @@
               }));
           }
         }
-        if (dia && depth != null && depth / dia > 6 && tool && tool.type !== 'tap') {
+        if (dia && depth != null && depth / dia > 6 && tool && !TAP_TYPES.has(tool.type)) {
           const k2 = `LD|${e.opIndex}`;
           if (!seen.has(k2)) {
             seen.add(k2);
@@ -1362,7 +1366,7 @@
               }));
           }
         }
-        if (tool && tool.type === 'tap' && (a.cycle === 'G84' || a.cycle === 'G74') && tool.pitch > 0) {
+        if (tool && TAP_TYPES.has(tool.type) && (a.cycle === 'G84' || a.cycle === 'G74') && tool.pitch > 0) {
           const rpmHere = e.after.spindle ? e.after.spindle.rpm : null;
           const feedHere = a.feed;
           if (rpmHere > 0 && feedHere > 0) {

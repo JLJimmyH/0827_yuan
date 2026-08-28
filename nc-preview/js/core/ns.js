@@ -187,20 +187,33 @@
   // ---------------------------------------------------------------------------
   // tools.js
   // ---------------------------------------------------------------------------
-  /** @typedef {'endmill'|'facemill'|'drill'|'chamfer'|'reamer'|'tap'|'spot'|'ballmill'|'unknown'} ToolType */
+  /**
+   * 刀具型式。分四群：銑削類、鑽孔類、攻牙類、其他。
+   * 銑削：endmill 平刀｜ballmill 球刀｜bullnose 圓鼻刀｜facemill 面銑刀｜radiusmill 外R成型刀｜
+   *       chamfer 倒角刀｜slotmill T型刀｜tapermill 錐度刀｜dovetail 鳩尾槽刀｜lollipop 糖球形銑刀｜engrave 雕刻刀
+   * 鑽孔：drill 鑽頭｜reamer 鉸刀｜boring 搪孔刀｜centerdrill 中心鑽｜spot 點鑽｜
+   *       countersink 沉頭孔鑽（錐孔）｜counterbore 魚眼孔鑽（平底沉孔）｜wooddrill 木工鑽頭
+   * 攻牙：tap 右牙刀（絲攻）｜taplh 左牙刀
+   * 其他：unknown 未定義
+   * @typedef {'endmill'|'ballmill'|'bullnose'|'facemill'|'radiusmill'|'chamfer'|'slotmill'|'tapermill'
+   *   |'dovetail'|'lollipop'|'engrave'|'drill'|'reamer'|'boring'|'centerdrill'|'spot'|'countersink'
+   *   |'counterbore'|'wooddrill'|'tap'|'taplh'|'unknown'} ToolType
+   */
   /**
    * @typedef {Object} Tool
    * @property {number} t
    * @property {string} label            顯示名稱（註解或 "T15"）
    * @property {ToolType} type
    * @property {number} diameter         mm；絲攻 = 公稱直徑
-   * @property {number|null} angle       鑽頭刀尖角／倒角刀夾角（度）
+   * @property {number|null} angle       鑽頭刀尖角／倒角刀夾角／錐度刀與鳩尾刀的錐角（度）
    * @property {number|null} fluteLen    刃長
    * @property {number|null} stickout    伸出長
    * @property {number|null} pitch       絲攻螺距
+   * @property {number|null} [cornerRad] 角 R 半徑（圓鼻刀的底部倒角、外R成型刀的成型半徑），mm
+   * @property {number|null} [neckDia]   頸徑／導引柱直徑（T型刀、鳩尾槽刀、糖球形銑刀的頸；沉頭與魚眼孔鑽的導柱），mm
    * @property {boolean} resident        常駐刀（跨程式共用，如 T20）
    * @property {boolean} probe           可能是定位器／測距用的空刀位（無註解且無切削）
-   * @property {Object<string,ValueSource>} source  每個欄位的值來源：{type,diameter,angle,fluteLen,stickout,pitch}
+   * @property {Object<string,ValueSource>} source  每個欄位的值來源：{type,diameter,angle,fluteLen,stickout,pitch,cornerRad,neckDia}
    */
   /**
    * @typedef {Object} OffsetEntry

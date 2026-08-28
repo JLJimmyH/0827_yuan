@@ -556,3 +556,31 @@ test('固定循環孔底的 P 停留要算進時間（G82/G89）', async () => {
   const res = await S.run(sim, scenario(segs, null, executed), TT, settings());
   assert.ok(res.time.total >= 1.5, 'P1500 = 1.5 秒要算進去，實得 ' + res.time.total);
 });
+
+// ---------------------------------------------------------------------------
+// 足跡剖面：型式 → 形狀（形狀表在 tools.js，這裡驗 simulation 有照著用）
+// ---------------------------------------------------------------------------
+test('profileFor：新增型式的足跡形狀與錐角', () => {
+  const FLAT = 0, CONE = 1, SPHERE = 2;
+  const prof = (type, extra) => S.profileFor(tool(1, type, 10, extra));
+  // 圓盤
+  for (const t of ['bullnose', 'radiusmill', 'slotmill', 'tapermill', 'dovetail', 'boring', 'counterbore', 'wooddrill']) {
+    assert.equal(prof(t).kind, FLAT, t);
+    assert.equal(prof(t).cuts, true, t);
+  }
+  // 球端
+  assert.equal(prof('lollipop').kind, SPHERE);
+  // 錐尖：沒填角度就用型式的預設
+  assert.equal(prof('centerdrill').kind, CONE);
+  assert.ok(Math.abs(prof('centerdrill').tanHalf - Math.tan(30 * Math.PI / 180)) < 1e-12, '中心鑽預設 60°');
+  assert.ok(Math.abs(prof('engrave').tanHalf - Math.tan(15 * Math.PI / 180)) < 1e-12, '雕刻刀預設 30°');
+  assert.ok(Math.abs(prof('countersink').tanHalf - Math.tan(45 * Math.PI / 180)) < 1e-12, '沉頭孔鑽預設 90°');
+  // 有填角度就用填的
+  assert.ok(Math.abs(prof('spot', { angle: 142 }).tanHalf - Math.tan(71 * Math.PI / 180)) < 1e-12);
+  // 左牙刀比照絲攻：不移除材料
+  assert.equal(prof('taplh').cuts, false);
+  assert.equal(prof('tap').cuts, false);
+  // 底切刀要標出來（高度圖做不出底切，只能用最大直徑近似）
+  assert.deepEqual(['slotmill', 'dovetail', 'lollipop'].map((t) => prof(t).undercut), [true, true, true]);
+  assert.equal(prof('endmill').undercut, false);
+});

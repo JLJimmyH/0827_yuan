@@ -83,15 +83,59 @@ interpreter 負責的診斷：R02、R03、R04、R08（error 部分）、R09、R1
 
 ## 4. `tools.js` — `NC.tools`
 
-- `parseComment(str) → {type, diameter, angle?, pitch?, source}`：`(\d+(\.\d+)?)\s*MM|M/M` → endmill（≥ 40 → facemill）；`SG-(\d+\.?\d*)` → drill；`(\d+)V` → chamfer；`M(\d+)\*P(\d+\.?\d*)` → tap（diameter = M 值、pitch）；`(\d+)\+(\d+\.\d+)` → reamer（相加）；其他 → unknown。
+### 4.1 刀具型式（`ToolType`）
+
+型式總表在 `NC.tools.TYPE_INFO`，22 種。每一項有 `name`（CSV 中文名，也是 `TYPE_NAMES` 的值）、
+`ui`（下拉選單顯示名，沒寫就用 `name`）、`group`、`profile`（模擬足跡形狀）、`angle`（預設刀尖角）、
+`extra`（直徑以外要現場補的欄位）、`undercut`、`desc`。要加刀具型式只改這張表，
+`TYPE_NAMES`／`TOOL_TYPES`／別名表／面板下拉選單／模擬足跡都跟著它走。
+
+| 群 | 型式 | 中文名 | 足跡 | 預設角度 | 要補的欄位 |
+| --- | --- | --- | --- | --- | --- |
+| 銑削 | `endmill` | 平銑刀（平刀） | 圓盤 | — | |
+| | `ballmill` | 球刀 | 球端 | — | |
+| | `bullnose` | 圓鼻刀 | 圓盤 | — | `cornerRad` |
+| | `facemill` | 面銑刀 | 圓盤 | — | |
+| | `radiusmill` | 外R成型刀 | 圓盤 | — | `cornerRad` |
+| | `chamfer` | V型倒角刀 | 錐尖 | 90° | |
+| | `slotmill` | T型刀 | 圓盤※ | — | `neckDia` |
+| | `tapermill` | 錐度刀 | 圓盤 | — | |
+| | `dovetail` | 鳩尾槽刀 | 圓盤※ | 45° | `neckDia` |
+| | `lollipop` | 糖球形銑刀 | 球端※ | — | `neckDia` |
+| | `engrave` | 雕刻刀 | 錐尖 | 30° | |
+| 鑽孔 | `drill` | 鑽頭 | 錐尖 | 118° | |
+| | `reamer` | 鉸刀 | 圓盤 | — | |
+| | `boring` | 搪孔刀 | 圓盤 | — | |
+| | `centerdrill` | 中心鑽 | 錐尖 | 60° | `neckDia` |
+| | `spot` | 點鑽 | 錐尖 | 90° | |
+| | `countersink` | 沉頭孔鑽（錐孔） | 錐尖 | 90° | |
+| | `counterbore` | 魚眼孔鑽（平底沉孔） | 圓盤 | — | `neckDia` |
+| | `wooddrill` | 木工鑽頭 | 圓盤 | — | |
+| 攻牙 | `tap` | 絲攻（右牙刀） | 不切削 | — | |
+| | `taplh` | 左牙刀 | 不切削 | — | |
+| 其他 | `unknown` | `?` | 圓盤 | — | |
+
+※ `undercut: true`。`simulation.js` 用的是高度圖，做不出底切，只能用最大直徑近似；
+`profileFor` 回傳的 `undercut` 旗標把這件事往外傳，不要當成模擬得準。
+`Tool` 多了兩個選填欄位：`cornerRad`（角R／成型半徑）與 `neckDia`（頸徑／導柱直徑），
+沒有通用預設值，一律留 `null` 等現場填。
+
+### 4.2 函式
+
+- `parseComment(str) → {type, diameter, angle?, pitch?, cornerRad?, source}`：`(\d+(\.\d+)?)\s*MM|M/M` → endmill（≥ 40 → facemill）；`SG-(\d+\.?\d*)` → drill；`(\d+)V` → chamfer；`M(\d+)\*P(\d+\.?\d*)` → tap（diameter = M 值、pitch；註解另外標了 `LH`／左牙 → taplh）；`(\d+)\+(\d+\.\d+)` → reamer（相加）；
+  再來是關鍵字表 `COMMENT_KEYWORDS`（`DOVETAIL`／`LOLLIPOP`／`T-SLOT`／`TAPER`／`ENGRAV`／`CBORE`／`CSK`／`CENTER DRILL`／`SPOT`／`BORING`／`WOOD`／`BULLNOSE`／`CORNER R`／`BALL`…）；
+  `(\d+)R(\d+\.?\d*)` → bullnose（直徑 + 角R）；其他 → unknown。
+  註解裡的 `45DEG`／`60°`／`90度` 當角度、`R0.5` 當角R，不會被誤讀成直徑。
 - `inferTools(tok, run) → Tool[]`：每個 M6 T（去重）；型式由註解 + 動作交叉驗證（只有 hole：G84→tap、G85→ream、其他→drill；有 G41→endmill/chamfer 依註解；facemill 由直徑≥40 或 zMin≥-0.1 且 X 行程很長）；矛盾 → 保留註解型式但 `source.type='comment'` 並由 rules R31 警告。預設：chamfer angle 90、drill angle 118、fluteLen = 3×diameter、stickout null、無註解且無切削動作 → `probe:true, type:'unknown', diameter:10, label:'T15'`；`source` 每欄標 `comment|motion|default`。`resident` 預設：T20 或 facemill → true。
 - `effectiveRadius(toolTable, t, d) → number|null`：offsets 有 n=d 且 (radGeom+radWear)≠0 → 用它；否則 tool.diameter/2；皆無 → null。
 - `defaultOffsets(tools, dList) → OffsetEntry[]`：每個用到的 D 號，radGeom = 對應刀直徑/2（source 'default'）。D 對應刀：用該 D 的作業的刀。
 - `estimateStock(runs, geometry, tools) → Stock`：以 feed/arc/drill 包絡 + 刀半徑外擴，Z max = max(0, 最高切削 Z)，Z min = 最深切削 Z - 5，取整到 1 mm；`source:'estimated'`。
 - `mergeUserTable(inferred, saved) → ToolTable`：saved 的 `source.user` 欄位覆蓋推測。
 - `save(key, table)` / `load(key)` / `exportJSON(table)` / `importJSON(str)`：localStorage 包 try/catch；key = programKey。
-- `toCSV(table)` / `fromCSV(str)`：欄位與專案根目錄 `刀具資料 CSV` 相容（程式,T,程式註解,推測型式,推測直徑mm,用途,最深Z,請填_型式確認,請填_直徑mm,請填_刀尖或倒角角度,請填_刃長mm,請填_伸出長mm,用到的D號,請填_各D補正值,備註）。
-- 驗收：`parseComment('SG-12.')` → drill 12；`'M4*P0.7'` → tap 4 pitch 0.7；`'6+0.014'` → reamer 6.014；`'10V'` → chamfer 10；`'100MM'` → facemill 100。inferTools 的把數（以 M6 去重）與「沒有註解也沒有切削動作 → `probe:true`」的判定，用 golden test 驗收，見 `test/tools.test.mjs`。
+- `toCSV(table)` / `fromCSV(str)`：欄位（程式,T,程式註解,推測型式,推測直徑mm,用途,最深Z,請填_型式確認,請填_直徑mm,請填_刀尖或倒角角度,請填_刃長mm,請填_伸出長mm,請填_角R半徑mm,請填_頸徑mm,用到的D號,請填_各D補正值,備註）。
+  角R／頸徑兩欄排在「請填_」那一段的最後：匯出一律帶表頭、`fromCSV` 也以欄名對應，所以插欄不影響舊檔案讀取。
+- 驗收：`parseComment('SG-12.')` → drill 12；`'M4*P0.7'` → tap 4 pitch 0.7；`'6+0.014'` → reamer 6.014；`'10V'` → chamfer 10；`'100MM'` → facemill 100；
+  `'12R0.5'` → bullnose 12 角R 0.5；`'CENTER DRILL 3'` → centerdrill 角度 60；`'M8*P1.25LH'` → taplh。inferTools 的把數（以 M6 去重）與「沒有註解也沒有切削動作 → `probe:true`」的判定，用 golden test 驗收，見 `test/tools.test.mjs`。
 
 ## 5. `simulation.js` — `NC.sim`
 

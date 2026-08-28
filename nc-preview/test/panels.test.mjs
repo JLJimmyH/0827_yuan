@@ -310,6 +310,34 @@ test('toolTable：直徑↔D 連動；手填 D 後解除；橫幅計數更新', 
   assert.equal(changes[changes.length - 1].tools.find((x) => x.t === 15).source.type, 'user');
 });
 
+test('toolTable：圓鼻刀／T型刀會多出角R、頸徑欄，平刀沒有', () => {
+  const c = container();
+  const changes = [];
+  P.toolTable(c, { table: sampleTable(), ops: sampleOps(), onChange: (t) => changes.push(t) });
+  const row11 = q(c, 'tr[data-t="11"]');
+  const sel = q(row11, 'select[data-field="type"]');
+  const extras = () => qa(row11, '.nc-td-extra .nc-extra-line').length;
+  // 22 種型式都要在選單裡
+  assert.equal(qa(sel, 'option').length, 22);
+  // 平刀：沒有要補的尺寸
+  assert.equal(extras(), 0);
+  // 圓鼻刀 → 角R 欄，填了就是手填
+  setValue(sel, 'bullnose');
+  assert.equal(extras(), 1);
+  const rad = q(row11, 'input[data-field="cornerRad"]');
+  setValue(rad, 0.8);
+  const t11 = changes[changes.length - 1].tools.find((x) => x.t === 11);
+  assert.equal(t11.cornerRad, 0.8);
+  assert.equal(t11.source.cornerRad, 'user');
+  // T型刀 → 換成頸徑欄
+  setValue(sel, 'slotmill');
+  assert.equal(qa(row11, 'input[data-field="cornerRad"]').length, 0);
+  assert.equal(qa(row11, 'input[data-field="neckDia"]').length, 1);
+  // 換回平刀 → 收起來
+  setValue(sel, 'endmill');
+  assert.equal(extras(), 0);
+});
+
 test('toolTable：沒有 ops 時退而用 offsets；全部手填則橫幅隱藏；空表', () => {
   const c = container();
   const t = sampleTable();
@@ -1150,7 +1178,7 @@ test('刀具表 CSV：toCSV → fromCSV → mergeCSVTable，手填值帶得回�
     if (i === 0 || r.indexOf(key + ',T2,') !== 0) return r;
     const c = r.split(',');
     c[8] = '8';                                   // 請填_直徑mm
-    c[13] = 'D2=3.9500/0';                        // 請填_各D補正值
+    c[15] = 'D2=3.9500/0';                        // 請填_各D補正值
     return c.join(',');
   }).join('\r\n');
   const imported = NC.tools.fromCSV(filled, key);

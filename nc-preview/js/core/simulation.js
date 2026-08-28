@@ -104,35 +104,58 @@
   // ---------------------------------------------------------------------------
   // 刀具足跡剖面
   // ---------------------------------------------------------------------------
+  /** tools.js 沒載入時的最小對照（正常情形一律以 NC.tools.TYPE_INFO 為準） */
+  const FALLBACK_SHAPE = {
+    drill: 'cone', spot: 'cone', chamfer: 'cone', centerdrill: 'cone', countersink: 'cone', engrave: 'cone',
+    ballmill: 'sphere', lollipop: 'sphere', tap: 'none', taplh: 'none',
+  };
+  function typeInfoOf(type) {
+    return (NC.tools && NC.tools.TYPE_INFO) ? NC.tools.TYPE_INFO[type] : null;
+  }
+  function shapeOf(type) {
+    const info = typeInfoOf(type);
+    if (info && info.profile) return info.profile;
+    return FALLBACK_SHAPE[type] || 'flat';
+  }
+  function defaultAngleOf(type) {
+    if (NC.tools && NC.tools.defaultAngleOf) {
+      const a = NC.tools.defaultAngleOf(type);
+      if (a > 0) return a;
+    }
+    return type === 'drill' ? 118 : 90;
+  }
+
   /**
-   * 由刀具資料算出足跡剖面。
+   * 由刀具資料算出足跡剖面。形狀來自 tools.js 的型式表：
+   * flat 圓盤（平刀、面銑刀、鉸刀、圓鼻刀……）／cone 錐尖（鑽頭、倒角刀、點鑽……）／
+   * sphere 球端（球刀、糖球形銑刀）／none 不移除材料（絲攻、左牙刀）。
+   * undercut=true 的刀（T型刀、鳩尾槽刀、糖球形銑刀）會切到上方蓋住的材料，
+   * 高度圖模擬做不出底切，只能用最大直徑的圓盤／球端近似 —— 旗標往外傳，讓 UI 有機會講清楚。
    * @param {Tool|null|undefined} tool
-   * @returns {{r:number, dia:number, kind:number, tanHalf:number, cuts:boolean, type:string, t:number|null}}
+   * @returns {{r:number, dia:number, kind:number, tanHalf:number, cuts:boolean, type:string, t:number|null, undercut:boolean}}
    */
   function profileFor(tool) {
     const type = tool && tool.type ? tool.type : 'unknown';
     const dia = (tool && tool.diameter > 0) ? tool.diameter : DEFAULT_DIAMETER;
+    const info = typeInfoOf(type);
     let kind = FLAT, tanHalf = 0, cuts = true;
-    switch (type) {
-      case 'drill':
-      case 'spot':
-      case 'chamfer': {
-        const def = type === 'drill' ? 118 : 90;
-        const ang = (tool && tool.angle > 0 && tool.angle < 180) ? tool.angle : def;
+    switch (shapeOf(type)) {
+      case 'cone': {
+        const ang = (tool && tool.angle > 0 && tool.angle < 180) ? tool.angle : defaultAngleOf(type);
         kind = CONE;
         tanHalf = Math.tan((ang / 2) * Math.PI / 180);
         break;
       }
-      case 'ballmill':
+      case 'sphere':
         kind = SPHERE;
         break;
-      case 'tap':
+      case 'none':
         cuts = false;
         break;
       default:
-        break; // endmill / facemill / reamer / unknown → 圓盤
+        break; // flat → 圓盤
     }
-    return { r: dia / 2, dia, kind, tanHalf, cuts, type, t: tool ? tool.t : null };
+    return { r: dia / 2, dia, kind, tanHalf, cuts, type, t: tool ? tool.t : null, undercut: !!(info && info.undercut) };
   }
 
   /** 刀底相對刀尖的高度 */

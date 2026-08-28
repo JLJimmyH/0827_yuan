@@ -13,30 +13,153 @@
   const DEFAULT_DIAMETER = 10;
   const STOCK_Z_MARGIN = 5;
 
-  /** 型式 ↔ CSV 中文名稱 */
-  const TYPE_NAMES = {
-    endmill: '平銑刀', facemill: '面銑刀', drill: '鑽頭', chamfer: 'V型倒角刀', reamer: '鉸刀',
-    tap: '絲攻', spot: '中心鑽', ballmill: '球刀', unknown: '?',
+  /**
+   * 刀具型式總表。每一項的欄位：
+   *   name     CSV「推測型式／請填_型式確認」欄用的中文名（= TYPE_NAMES 的值）
+   *   ui       刀具表下拉選單顯示的名稱；沒寫就用 name
+   *   group    分類：mill 銑削／hole 鑽孔／thread 攻牙／other 其他
+   *   profile  3D 模擬的足跡形狀：flat 圓盤／cone 錐尖／sphere 球端／none 不移除材料
+   *   angle    刀尖角或倒角夾角的預設值（度）；null = 沒有通用預設，要現場填
+   *   extra    直徑以外還要現場補的欄位：cornerRad 角R／neckDia 頸徑
+   *   undercut 會切到上方被蓋住的材料（底切）。simulation 用的是高度圖，表達不出底切，
+   *            只能用最大直徑的圓盤近似 —— 這件事要讓使用者知道，不能假裝有模擬到。
+   *   desc     一句話說明，UI 的 tooltip 用
+   */
+  const TYPE_INFO = {
+    // ---- 銑削類 ----
+    endmill: { name: '平銑刀', ui: '平刀（端銑刀）', group: 'mill', profile: 'flat', angle: null, extra: [],
+      desc: '底面平的立銑刀。粗銑、輪廓、挖槽最常用的一把。' },
+    ballmill: { name: '球刀', group: 'mill', profile: 'sphere', angle: null, extra: [],
+      desc: '刀尖是半球。曲面精修用；銑直壁時牆角會留下球半徑的 R。' },
+    bullnose: { name: '圓鼻刀', group: 'mill', profile: 'flat', angle: null, extra: ['cornerRad'],
+      desc: '平底、底邊帶 R 角（牛鼻刀）。比平刀耐用，硬料粗銑常用；角 R 要另外填。' },
+    facemill: { name: '面銑刀', group: 'mill', profile: 'flat', angle: null, extra: [],
+      desc: '大直徑刀盤，專銑大平面。註解直徑 ≥ 40 mm 會自動判成這一型。' },
+    radiusmill: { name: '外R成型刀', group: 'mill', profile: 'flat', angle: null, extra: ['cornerRad'],
+      desc: '刀刃是凹圓弧，把工件外角一次修成 R 角。成型半徑要另外填。' },
+    chamfer: { name: 'V型倒角刀', ui: '倒角刀', group: 'mill', profile: 'cone', angle: 90, extra: [],
+      desc: 'V 型刀尖，倒角、去毛邊、孔口倒角。實際切削直徑看下刀多深。' },
+    slotmill: { name: 'T型刀', group: 'mill', profile: 'flat', angle: null, extra: ['neckDia'], undercut: true,
+      desc: '刀盤比刀桿大，銑 T 型槽或側向凹槽。頸徑要另外填。' },
+    tapermill: { name: '錐度刀', group: 'mill', profile: 'flat', angle: null, extra: [],
+      desc: '刀身帶錐度，做拔模斜面。直徑填刀尖直徑、單邊錐角填「角度」欄。' },
+    dovetail: { name: '鳩尾槽刀', group: 'mill', profile: 'flat', angle: 45, extra: ['neckDia'], undercut: true,
+      desc: '倒錐的燕尾刀，銑鳩尾槽或倒扣定位面。錐角常見 45°／60°。' },
+    lollipop: { name: '糖球形銑刀', group: 'mill', profile: 'sphere', angle: null, extra: ['neckDia'], undercut: true,
+      desc: '球徑比刀頸大的棒棒糖刀，專做底切與背面去毛邊。' },
+    engrave: { name: '雕刻刀', group: 'mill', profile: 'cone', angle: 30, extra: [],
+      desc: '細尖錐形刀，刻字刻線用。尖角常見 15°／30°／60°。' },
+    // ---- 鑽孔類 ----
+    drill: { name: '鑽頭', group: 'hole', profile: 'cone', angle: 118, extra: [],
+      desc: '一般麻花鑽。刀尖角常見 118°（HSS）／135°（碳化鎢）。' },
+    reamer: { name: '鉸刀', group: 'hole', profile: 'flat', angle: null, extra: [],
+      desc: '把預鑽孔鉸到公差內。配 G85／G89，退刀也要進給、不能快退。' },
+    boring: { name: '搪孔刀', group: 'hole', profile: 'flat', angle: null, extra: [],
+      desc: '單刃可調徑，把孔搪到精確尺寸與真圓度。直徑填調好的實際孔徑。' },
+    centerdrill: { name: '中心鑽', group: 'hole', profile: 'cone', angle: 60, extra: ['neckDia'],
+      desc: 'DIN 333 複合鑽：前端小鑽 + 60° 錐面，車床頂針孔用。頸徑填前端小鑽直徑。' },
+    spot: { name: '點鑽', ui: '點鑽（NC 定位鑽）', group: 'hole', profile: 'cone', angle: 90, extra: [],
+      desc: '短、剛性好的定位鑽，先點窩讓後面的鑽頭不走位。角度常見 90°／120°／142°，要比後面那支鑽頭的尖角大。' },
+    countersink: { name: '沉頭孔鑽', ui: '沉頭孔鑽（錐孔）', group: 'hole', profile: 'cone', angle: 90, extra: [],
+      desc: '把孔口擴成錐形給平頭螺絲埋入。常見 82°／90°／100°。' },
+    counterbore: { name: '魚眼孔鑽', ui: '魚眼孔鑽（平底沉孔）', group: 'hole', profile: 'flat', angle: null, extra: ['neckDia'],
+      desc: '平底階梯孔，讓內六角螺絲頭沉下去。前端導柱直徑填頸徑欄。' },
+    wooddrill: { name: '木工鑽頭', group: 'hole', profile: 'flat', angle: null, extra: [],
+      desc: '中心尖加兩側切刀（brad point），孔底幾乎是平的，鑽木頭不走位。' },
+    // ---- 攻牙類 ----
+    tap: { name: '絲攻', ui: '右牙刀（絲攻）', group: 'thread', profile: 'none', angle: null, extra: [],
+      desc: '右旋螺紋，配 G84。模擬不移除材料，只檢查進給 = 螺距 × 轉速。' },
+    taplh: { name: '左牙刀', ui: '左牙刀（左旋絲攻）', group: 'thread', profile: 'none', angle: null, extra: [],
+      desc: '左旋螺紋，配 G74 反向攻牙。一樣要檢查進給 = 螺距 × 轉速。' },
+    // ---- 其他 ----
+    unknown: { name: '?', ui: '未定義', group: 'other', profile: 'flat', angle: null, extra: [],
+      desc: '看不出是哪一型。3D 模擬當成 Ø10 平刀處理，結果只能參考。' },
   };
-  /** CSV 型式名稱（含常見別名）→ ToolType */
+  const TOOL_TYPES = Object.keys(TYPE_INFO);
+  /** 型式 ↔ CSV 中文名稱（由 TYPE_INFO 導出，避免兩份名稱不同步） */
+  const TYPE_NAMES = {};
+  for (const k of TOOL_TYPES) TYPE_NAMES[k] = TYPE_INFO[k].name;
+
+  /** CSV 型式名稱（含常見別名）→ ToolType。key 一律小寫比對。 */
   const TYPE_ALIASES = {
-    '平銑刀': 'endmill', '銑刀': 'endmill', '立銑刀': 'endmill', '端銑刀': 'endmill', 'endmill': 'endmill', 'end mill': 'endmill',
-    '面銑刀': 'facemill', '面銑': 'facemill', 'facemill': 'facemill', 'face mill': 'facemill',
-    '鑽頭': 'drill', '鑽': 'drill', 'drill': 'drill',
-    'v型倒角刀': 'chamfer', '倒角刀': 'chamfer', '倒角': 'chamfer', 'chamfer': 'chamfer',
-    '鉸刀': 'reamer', 'reamer': 'reamer',
-    '絲攻': 'tap', '牙刀': 'tap', '螺絲攻': 'tap', 'tap': 'tap',
-    '中心鑽': 'spot', '定點鑽': 'spot', 'spot': 'spot',
-    '球刀': 'ballmill', '球銑刀': 'ballmill', 'ballmill': 'ballmill', 'ball mill': 'ballmill',
-    '?': 'unknown', '未知': 'unknown', 'unknown': 'unknown',
+    // 銑削
+    '銑刀': 'endmill', '立銑刀': 'endmill', '端銑刀': 'endmill', '平刀': 'endmill', '平底刀': 'endmill',
+    'end mill': 'endmill', 'flat end mill': 'endmill',
+    '球銑刀': 'ballmill', '球頭刀': 'ballmill', 'r刀': 'ballmill', 'ball mill': 'ballmill', 'ball end mill': 'ballmill',
+    '牛鼻刀': 'bullnose', '圓角刀': 'bullnose', '圓鼻銑刀': 'bullnose',
+    'bull nose': 'bullnose', 'bullnose end mill': 'bullnose', 'torus': 'bullnose', 'corner radius end mill': 'bullnose',
+    '面銑': 'facemill', '刀盤': 'facemill', 'face mill': 'facemill',
+    '外r刀': 'radiusmill', '外r成型': 'radiusmill', '成型刀': 'radiusmill', '圓角成型刀': 'radiusmill',
+    'radius mill': 'radiusmill', 'corner rounding end mill': 'radiusmill', 'corner rounder': 'radiusmill',
+    '倒角': 'chamfer', 'v刀': 'chamfer', 'v型刀': 'chamfer', 'chamfer mill': 'chamfer',
+    't槽刀': 'slotmill', 't型銑刀': 'slotmill', 't-slot': 'slotmill', 't slot cutter': 'slotmill', 'slot mill': 'slotmill',
+    '斜度刀': 'tapermill', '拔模刀': 'tapermill', '錐度銑刀': 'tapermill', 'taper mill': 'tapermill', 'tapered end mill': 'tapermill',
+    '燕尾刀': 'dovetail', '鳩尾刀': 'dovetail', 'dovetail mill': 'dovetail', 'dovetail cutter': 'dovetail',
+    '棒棒糖刀': 'lollipop', '糖球刀': 'lollipop', '球形底切刀': 'lollipop',
+    'lollipop mill': 'lollipop', 'lollipop cutter': 'lollipop', 'undercut mill': 'lollipop',
+    '雕刻': 'engrave', '刻字刀': 'engrave', 'engraving tool': 'engrave', 'engraver': 'engrave',
+    // 鑽孔
+    '鑽': 'drill', '麻花鑽': 'drill', 'twist drill': 'drill',
+    '搪刀': 'boring', '搪孔': 'boring', '鏜刀': 'boring', 'boring bar': 'boring', 'bore bar': 'boring',
+    '中心鑚': 'centerdrill', 'center drill': 'centerdrill', 'centre drill': 'centerdrill',
+    '定點鑽': 'spot', 'nc鑽': 'spot', 'nc點鑽': 'spot', 'spot drill': 'spot', 'spotting drill': 'spot',
+    '埋頭孔鑽': 'countersink', '埋頭鑽': 'countersink', '錐坑鑽': 'countersink',
+    'counter sink': 'countersink', 'csk': 'countersink',
+    '沉孔鑽': 'counterbore', '魚眼': 'counterbore', '魚眼鑽': 'counterbore',
+    'counter bore': 'counterbore', 'cbore': 'counterbore',
+    '木工鑽': 'wooddrill', 'wood drill': 'wooddrill', 'brad point drill': 'wooddrill',
+    // 攻牙
+    '牙刀': 'tap', '螺絲攻': 'tap', '右牙刀': 'tap', '右旋絲攻': 'tap', 'right hand tap': 'tap', 'rh tap': 'tap',
+    '左旋絲攻': 'taplh', '左牙': 'taplh', 'left hand tap': 'taplh', 'lh tap': 'taplh',
+    // 其他
+    '未知': 'unknown', 'undefined': 'unknown',
   };
-  const TOOL_TYPES = Object.keys(TYPE_NAMES);
+  // 型式 id、CSV 中文名、UI 名稱本身也算別名（手寫的優先，不覆蓋）
+  for (const k of TOOL_TYPES) {
+    for (const n of [k, TYPE_INFO[k].name, TYPE_INFO[k].ui]) {
+      if (!n) continue;
+      const key = String(n).toLowerCase();
+      if (!(key in TYPE_ALIASES)) TYPE_ALIASES[key] = k;
+    }
+  }
+  // 角R／頸徑排在「請填_」那一段的最後：CSV 是給現場填的，同一類欄位放一起才好填。
+  // 匯出一定帶表頭、fromCSV 也以欄名對應，所以插欄不會影響既有檔案的讀取。
   const CSV_HEADER = ['程式', 'T', '程式註解', '推測型式', '推測直徑mm', '用途', '最深Z',
     '請填_型式確認', '請填_直徑mm', '請填_刀尖或倒角角度', '請填_刃長mm', '請填_伸出長mm',
-    '用到的D號', '請填_各D補正值', '備註'];
-  const USER_FIELDS = ['label', 'type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch', 'resident', 'probe'];
+    '請填_角R半徑mm', '請填_頸徑mm', '用到的D號', '請填_各D補正值', '備註'];
+  const USER_FIELDS = ['label', 'type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch',
+    'cornerRad', 'neckDia', 'resident', 'probe'];
+  /** 每欄都要有 source 標記的數值欄位 */
+  const SOURCE_FIELDS = ['type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch', 'cornerRad', 'neckDia'];
   const HOLE_TAP = new Set(['G84', 'G74']);
   const HOLE_REAM = new Set(['G85', 'G89']);
+
+  /**
+   * 註解關鍵字 → 型式，由上往下比，先命中先用。順序有意義：
+   * TAPER 要排在 TAP 前面（TAPER 裡面就有 TAP）、CENTER DRILL 要排在 SPOT 前面、
+   * 左牙刀要排在絲攻前面（「左牙刀」裡面就有「牙刀」）。
+   */
+  const COMMENT_KEYWORDS = [
+    [/DOVETAIL|鳩尾|燕尾/, 'dovetail'],
+    [/LOLLIPOP|LOLLI|棒棒糖|糖球/, 'lollipop'],
+    [/T-?SLOT|T型刀|T槽/, 'slotmill'],
+    [/TAPER|錐度|拔模|斜度/, 'tapermill'],
+    [/ENGRAV|雕刻|刻字/, 'engrave'],
+    [/C-?BORE|COUNTER\s*-?BORE|魚眼|沉孔/, 'counterbore'],
+    [/CSK|C-?SINK|COUNTER\s*-?SINK|沉頭|埋頭/, 'countersink'],
+    [/CENTER\s*-?DRILL|CENTRE\s*-?DRILL|中心鑽|中心鑚/, 'centerdrill'],
+    [/SPOT|定點鑽|點鑽|NC\s*鑽/, 'spot'],
+    [/CENTER|CENTRE/, 'centerdrill'],
+    [/BORING|BORE\s*BAR|搪孔|搪刀|鏜/, 'boring'],
+    [/WOOD|木工/, 'wooddrill'],
+    [/BULL\s*-?NOSE|牛鼻|圓鼻/, 'bullnose'],
+    [/CORNER\s*R|外R|圓角成型/, 'radiusmill'],
+    [/BALL/, 'ballmill'],
+    [/LH\s*TAP|TAP\s*LH|左牙|左旋/, 'taplh'],
+    [/\bTAP\b|絲攻|牙刀/, 'tap'],
+    [/REAM|鉸刀/, 'reamer'],
+    [/\bDRILL\b|麻花鑽/, 'drill'],
+  ];
 
   const num = (v) => (typeof v === 'number' && Number.isFinite(v)) ? v : null;
   const round4 = (v) => Math.round(v * 10000) / 10000;
@@ -47,16 +170,37 @@
   /**
    * 解析 M6 行註解，推測刀具型式與直徑。
    * @param {string|null|undefined} str
-   * @returns {{type:string, diameter:number|null, angle?:number, pitch?:number, source:'comment'|'default'}}
+   * @returns {{type:string, diameter:number|null, angle?:number, pitch?:number, cornerRad?:number, source:'comment'|'default'}}
    */
+  /** 註解裡的直徑：先找寫了 MM／M/M 的，沒有就取第一個數字 */
+  function commentDiameter(up) {
+    let m = /(\d+(?:\.\d+)?)\s*(?:MM|M\/M)/.exec(up);
+    if (m) return parseFloat(m[1]);
+    // 角度（30DEG）和角R（R2）都不是直徑，先拿掉再找，免得把 'ENGRAVE 30DEG' 讀成 Ø30
+    const rest = up.replace(/(\d+(?:\.\d+)?)\s*(?:DEG|°|度)/g, ' ').replace(/R\s*=?\s*\d+(?:\.\d+)?/g, ' ');
+    m = /(?:^|[^\d.])(\d+(?:\.\d+)?)/.exec(rest);
+    return m ? parseFloat(m[1]) : null;
+  }
+  /** 註解裡明寫的角度：45DEG / 60° / 90度 */
+  function commentAngle(up) {
+    const m = /(\d+(?:\.\d+)?)\s*(?:DEG|°|度)/.exec(up);
+    return m ? parseFloat(m[1]) : null;
+  }
+  /** 註解裡明寫的角R／成型半徑：R0.5 / R=2 */
+  function commentRadius(up) {
+    const m = /R\s*=?\s*(\d+(?:\.\d+)?)/.exec(up);
+    return m ? parseFloat(m[1]) : null;
+  }
+
   function parseComment(str) {
     const s = String(str == null ? '' : str).trim();
     const up = s.toUpperCase();
     let m;
     if (!s) return { type: 'unknown', diameter: null, source: 'default' };
-    // 絲攻：M4*P0.7（也容許 M4X0.7 / M4*0.7）
+    // 絲攻：M4*P0.7（也容許 M4X0.7 / M4*0.7）；註解另外標了 LH／左牙 → 左牙刀
     if ((m = /M(\d+(?:\.\d+)?)\s*[*X×]\s*P?(\d+\.?\d*)/.exec(up))) {
-      return { type: 'tap', diameter: parseFloat(m[1]), pitch: parseFloat(m[2]), source: 'comment' };
+      const lh = /(?:^|[^A-Z])LH(?:[^A-Z]|$)|左牙|左旋/.test(up);
+      return { type: lh ? 'taplh' : 'tap', diameter: parseFloat(m[1]), pitch: parseFloat(m[2]), source: 'comment' };
     }
     // 鉸刀：6+0.014（相加）
     if ((m = /(\d+(?:\.\d+)?)\s*\+\s*(\d+\.\d+)/.exec(up))) {
@@ -66,12 +210,23 @@
     if ((m = /SG-?\s*(\d+\.?\d*)/.exec(up))) {
       return { type: 'drill', diameter: parseFloat(m[1]), angle: 118, source: 'comment' };
     }
-    // 球刀 / 中心鑽（額外容錯，不在契約範例內）
-    if ((m = /(\d+(?:\.\d+)?)\s*(?:MM|M\/M)?\s*BALL/.exec(up)) || (/BALL/.test(up) && (m = /(\d+(?:\.\d+)?)/.exec(up)))) {
-      return { type: 'ballmill', diameter: parseFloat(m[1]), source: 'comment' };
+    // 關鍵字型式：球刀、點鑽、鳩尾槽刀……（額外容錯，不在契約範例內）
+    for (const [re, type] of COMMENT_KEYWORDS) {
+      if (!re.test(up)) continue;
+      const info = TYPE_INFO[type];
+      const out = { type, diameter: commentDiameter(up), source: 'comment' };
+      const ang = commentAngle(up);
+      if (ang != null) out.angle = ang;
+      else if (num(info.angle) != null) out.angle = info.angle;
+      if (info.extra.includes('cornerRad')) {
+        const r = commentRadius(up);
+        if (r != null) out.cornerRad = r;
+      }
+      return out;
     }
-    if (/SPOT|CENTER|CENTRE/.test(up) && (m = /(\d+(?:\.\d+)?)/.exec(up))) {
-      return { type: 'spot', diameter: parseFloat(m[1]), angle: 90, source: 'comment' };
+    // 圓鼻刀：12R0.5 / 10MM R1（直徑 + 角R）
+    if ((m = /(\d+(?:\.\d+)?)\s*(?:MM|M\/M)?\s*R\s*=?\s*(\d+(?:\.\d+)?)/.exec(up))) {
+      return { type: 'bullnose', diameter: parseFloat(m[1]), cornerRad: parseFloat(m[2]), source: 'comment' };
     }
     // 倒角刀：10V
     if ((m = /(\d+(?:\.\d+)?)\s*V\b/.exec(up)) || (m = /(\d+(?:\.\d+)?)\s*V(?![A-Z])/.exec(up))) {
@@ -176,15 +331,29 @@
   /** 註解型式與動作型式是否相容 */
   function compatible(commentType, motionType) {
     if (!motionType || commentType === 'unknown') return true;
+    const MILL = ['endmill', 'facemill', 'drill'];         // 銑刀可鑽孔（G81 銑孔底）
     const ok = {
-      endmill: ['endmill', 'facemill', 'drill'],           // 銑刀可鑽孔（G81 銑孔底）
+      endmill: MILL,
       facemill: ['facemill', 'endmill'],
+      ballmill: MILL,
+      bullnose: MILL,
+      radiusmill: MILL,
+      chamfer: MILL,                                        // 倒角刀常用 G81 倒孔口，`75-3(316)` T3 就是
+      slotmill: ['endmill', 'facemill'],                    // 側向進刀，不會拿來鑽孔
+      tapermill: MILL,
+      dovetail: ['endmill', 'facemill'],
+      lollipop: ['endmill', 'facemill'],
+      engrave: MILL,
       drill: ['drill'],
-      chamfer: ['endmill', 'facemill', 'drill'],            // 倒角刀常用 G81 倒孔口
       reamer: ['reamer', 'drill'],
-      tap: ['tap'],
+      boring: ['reamer', 'drill', 'endmill'],               // G85／G86 搪孔，也有人用螺旋銑
+      centerdrill: ['drill'],
       spot: ['drill'],
-      ballmill: ['endmill', 'facemill', 'drill'],
+      countersink: ['drill', 'endmill'],                    // 錐孔多半 G81／G82，也可能用銑的
+      counterbore: ['drill', 'endmill'],
+      wooddrill: ['drill'],
+      tap: ['tap'],
+      taplh: ['tap'],
     };
     return (ok[commentType] || []).includes(motionType);
   }
@@ -275,13 +444,18 @@
     return out;
   }
 
-  /** 依型式與直徑補預設值（角度、刃長） */
+  /** 型式的預設刀尖角／倒角夾角；沒有通用值就回 null（要現場填） */
+  function defaultAngleOf(type) {
+    const info = TYPE_INFO[type];
+    return (info && num(info.angle) != null) ? info.angle : null;
+  }
+
+  /** 依型式與直徑補預設值（角度、刃長）；角R／頸徑沒有通用預設，一律留 null 讓現場填 */
   function applyDefaults(tool) {
     tool.source = tool.source || {};
     if (num(tool.angle) == null) {
-      if (tool.type === 'chamfer' || tool.type === 'spot') { tool.angle = 90; tool.source.angle = 'default'; }
-      else if (tool.type === 'drill') { tool.angle = 118; tool.source.angle = 'default'; }
-      else { tool.angle = null; tool.source.angle = 'default'; }
+      tool.angle = defaultAngleOf(tool.type);
+      tool.source.angle = 'default';
     }
     if (num(tool.fluteLen) == null) {
       tool.fluteLen = (num(tool.diameter) != null) ? round4(tool.diameter * 3) : null;
@@ -289,7 +463,9 @@
     }
     if (tool.stickout === undefined) tool.stickout = null;
     if (tool.pitch === undefined) tool.pitch = null;
-    for (const f of ['type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch']) if (!tool.source[f]) tool.source[f] = 'default';
+    if (tool.cornerRad === undefined) tool.cornerRad = null;
+    if (tool.neckDia === undefined) tool.neckDia = null;
+    for (const f of SOURCE_FIELDS) if (!tool.source[f]) tool.source[f] = 'default';
     return tool;
   }
 
@@ -304,7 +480,8 @@
       const parsed = d.parsed;
       const tool = {
         t: d.t, label: d.label, type: 'unknown', diameter: DEFAULT_DIAMETER, angle: null,
-        fluteLen: null, stickout: null, pitch: null, resident: false, probe: false,
+        fluteLen: null, stickout: null, pitch: null, cornerRad: null, neckDia: null,
+        resident: false, probe: false,
         source: { type: 'default', diameter: 'default' },
       };
       if (parsed.type !== 'unknown') {
@@ -315,6 +492,7 @@
       if (num(parsed.diameter) != null) { tool.diameter = parsed.diameter; tool.source.diameter = 'comment'; }
       if (num(parsed.angle) != null) { tool.angle = parsed.angle; tool.source.angle = 'default'; }
       if (num(parsed.pitch) != null) { tool.pitch = parsed.pitch; tool.source.pitch = 'comment'; }
+      if (num(parsed.cornerRad) != null) { tool.cornerRad = parsed.cornerRad; tool.source.cornerRad = 'comment'; }
       if (!d.comment && !d.hasCut) {
         tool.probe = true; tool.type = 'unknown'; tool.diameter = DEFAULT_DIAMETER; tool.label = `T${d.t}`;
         tool.source.type = 'default'; tool.source.diameter = 'default';
@@ -554,9 +732,10 @@
       type: normalizeType(raw.type),
       diameter: toNum(raw.diameter) != null ? toNum(raw.diameter) : DEFAULT_DIAMETER,
       angle: toNum(raw.angle), fluteLen: toNum(raw.fluteLen), stickout: toNum(raw.stickout), pitch: toNum(raw.pitch),
+      cornerRad: toNum(raw.cornerRad), neckDia: toNum(raw.neckDia),
       resident: !!raw.resident, probe: !!raw.probe, source: src,
     };
-    for (const f of ['type', 'diameter', 'angle', 'fluteLen', 'stickout', 'pitch']) if (!src[f]) src[f] = 'default';
+    for (const f of SOURCE_FIELDS) if (!src[f]) src[f] = 'default';
     return tool;
   }
   function normalizeOffset(raw) {
@@ -731,6 +910,7 @@
       lines.push([
         table.programKey || '', `T${tool.t}`, comment, guessType, guessDia, usage, fmtZ(d ? d.zMin : null),
         userType, fmtNum(userVal('diameter')), fmtNum(userVal('angle')), fmtNum(userVal('fluteLen')), fmtNum(userVal('stickout')),
+        fmtNum(userVal('cornerRad')), fmtNum(userVal('neckDia')),
         dList.map((n) => `D${n}`).join(','), compVals, note,
       ].map(csvEscape).join(','));
     }
@@ -763,7 +943,8 @@
       const parsed = parseComment(comment);
       const tool = {
         t, label: comment || `T${t}`, type: 'unknown', diameter: DEFAULT_DIAMETER,
-        angle: null, fluteLen: null, stickout: null, pitch: null, resident: false, probe: false,
+        angle: null, fluteLen: null, stickout: null, pitch: null, cornerRad: null, neckDia: null,
+        resident: false, probe: false,
         source: { label: comment ? 'comment' : 'default', type: 'default', diameter: 'default' },
       };
       const guessType = normalizeType(get(r, '推測型式'));
@@ -773,9 +954,11 @@
       if (num(parsed.diameter) != null) { tool.diameter = parsed.diameter; tool.source.diameter = 'comment'; }
       else if (guessDia != null) { tool.diameter = guessDia; tool.source.diameter = 'comment'; }
       if (num(parsed.pitch) != null) { tool.pitch = parsed.pitch; tool.source.pitch = 'comment'; }
+      if (num(parsed.cornerRad) != null) { tool.cornerRad = parsed.cornerRad; tool.source.cornerRad = 'comment'; }
       const uType = get(r, '請填_型式確認');
       if (uType && normalizeType(uType) !== 'unknown') { tool.type = normalizeType(uType); tool.source.type = 'user'; }
-      const uFields = [['請填_直徑mm', 'diameter'], ['請填_刀尖或倒角角度', 'angle'], ['請填_刃長mm', 'fluteLen'], ['請填_伸出長mm', 'stickout']];
+      const uFields = [['請填_直徑mm', 'diameter'], ['請填_刀尖或倒角角度', 'angle'], ['請填_刃長mm', 'fluteLen'],
+        ['請填_伸出長mm', 'stickout'], ['請填_角R半徑mm', 'cornerRad'], ['請填_頸徑mm', 'neckDia']];
       for (const [name, f] of uFields) {
         const v = toNum(get(r, name));
         if (v != null) { tool[f] = v; tool.source[f] = 'user'; }
@@ -786,7 +969,7 @@
       applyDefaults(tool);
       if (tool.source.type === 'user' && tool.source.angle !== 'user') {
         // 型式由使用者改過 → 角度預設重算
-        tool.angle = tool.type === 'chamfer' || tool.type === 'spot' ? 90 : (tool.type === 'drill' ? 118 : null);
+        tool.angle = defaultAngleOf(tool.type);
       }
       tools.push(tool);
       // 補正值：D2=5.0000（只有形狀）／D3=4.985/0.01（形狀/摩耗）
@@ -812,7 +995,7 @@
   }
 
   NC.tools = {
-    STORAGE_PREFIX, TYPE_NAMES, TYPE_ALIASES, CSV_HEADER,
+    STORAGE_PREFIX, TYPE_INFO, TYPE_NAMES, TYPE_ALIASES, TOOL_TYPES, CSV_HEADER, defaultAngleOf,
     parseComment, inferTools, inferDetails, effectiveRadius, defaultOffsets, mergeOffsets,
     estimateStock, mergeUserTable, buildTable, normalizeTable,
     save, load, remove, listSaved, setStorage, exportJSON, importJSON, toCSV, fromCSV,
