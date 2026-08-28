@@ -81,6 +81,14 @@
   }
   const AXES = ['X', 'Y', 'Z'];
   const AXIS_KEY = { X: 'x', Y: 'y', Z: 'z' };
+  /**
+   * 第四軸（旋轉軸）。本版只做 CONTRACT §13 的「層次一」：
+   * 讀進角度、標在每個動作上、供 rules 檢查，但**不做工件旋轉的座標轉換**——
+   * 路徑一律照程式的 XYZ 畫。轉換要等「分度視圖」（層次二）。
+   * 位址固定 A（照現場的臥式分度頭，繞 X 軸）；B／C 出現時只警告不模擬。
+   */
+  const ROT_AXIS = 'A';
+  const OTHER_ROT = ['B', 'C'];
 
   /** G 字組 value → 正規化名稱：0 → 'G0'、5.1 → 'G05.1' */
   function gName(v) {
@@ -100,6 +108,7 @@
       coolant: s.coolant, toolInSpindle: s.toolInSpindle, toolStaged: s.toolStaged,
       aicc: s.aicc, rigidTap: s.rigidTap, rigidTapS: s.rigidTapS,
       pos: { x: s.pos.x, y: s.pos.y, z: s.pos.z },
+      a: s.a,
       lengthCompActive: s.lengthCompActive,
     };
   }
@@ -111,7 +120,7 @@
       comp: 'G40', d: 0, lengthComp: 'G49', h: 0, cycle: null, retractMode: 'G98', feed: null,
       spindle: { dir: 'M5', rpm: null }, coolant: false, toolInSpindle: null, toolStaged: null,
       aicc: false, rigidTap: false, rigidTapS: null,
-      pos: { x: ref.x, y: ref.y, z: ref.z }, lengthCompActive: false,
+      pos: { x: ref.x, y: ref.y, z: ref.z }, a: 0, lengthCompActive: false,
     };
   }
 
@@ -175,6 +184,8 @@
       opClosed: false,        // 已遇到 M30/M02，之後的節不再算進最後一個作業
       midSlashLines: new Set(),
       polar: false,
+      otherRotReported: false, // B／C 軸「本版不支援」整支只報一次
+      sawRotWord: false,       // 程式裡真的出現過 A 字組（動作一律帶 a=0，不能拿它判斷）
     };
 
     const executed = new Array(blocks.length);
@@ -233,6 +244,42 @@
       ops,
       diagnostics: ctx.diags,
       finalState: cloneState(ctx.state),
+      rotary: summarizeRotary(executed, ctx.sawRotWord),
+    };
+  }
+
+  /**
+   * 第四軸摘要。UI 與 rules（R37）都靠它判斷這支程式該怎麼看待。
+   * mode：
+   *   'none'          沒有用到 A
+   *   'index'         只有分度——轉到角度停住再切。這種可以逐面看，資訊仍然有用。
+   *   'simultaneous'  有「A 與 XYZ 同時進給」的節，是真正的四軸插補（螺旋槽、凸輪）。
+   *                   這種本工具連路徑都畫不出來，一定要講清楚。
+   */
+  function summarizeRotary(executed, used) {
+    const angles = [];
+    const rotateLines = [];  // 第四軸有轉動的行
+    const simLines = [];     // A 與 XYZ 同時進給（真四軸）的行
+    if (!used) return { used: false, axis: ROT_AXIS, mode: 'none', angles: [], rotateLines: [], simLines: [] };
+    for (const eb of executed) {
+      if (!eb || !eb.actions || !eb.actions.length) continue;
+      for (const act of eb.actions) {
+        if (act.a === undefined) continue;
+        pushUnique(angles, act.a);
+        if (act.aFrom === undefined) continue;
+        pushUnique(rotateLines, eb.line);
+        // 只有「XYZ 和 A 真的同時進給」才算四軸插補（螺旋槽、凸輪）。
+        // G1 模態下單獨轉 A（G1A90.F500.）是旋轉進給，路徑上仍然是分度；
+        // 危不危險由「轉動時刀尖在什麼高度」那條規則判，不必把整支標成畫不出來。
+        // 固定循環的「轉到位再鑽」更是分度，不算。
+        if (act.kind === 'linear' || act.kind === 'arc') pushUnique(simLines, eb.line);
+      }
+    }
+    angles.sort((p, q) => p - q);
+    return {
+      used: true, axis: ROT_AXIS,
+      mode: simLines.length ? 'simultaneous' : 'index',
+      angles, rotateLines, simLines,
     };
   }
 
@@ -342,6 +389,15 @@
           const what = a === 'C' ? '倒角' : '圓角';
           diags.push(U.diag('R04', line, 'warning', `${w.raw} 沒有小數點，機台會讀成 ${U.fmt(w.value / 1000, 3)} mm 的${what}（等於沒有${what}）`,
             { detail: '設定 3401#0 DPI=0（最小輸入單位）時，沒有小數點的數值以 0.001 為單位。請寫成 ,' + a + U.fmt(w.value) + '. 。' }));
+          continue;
+        }
+        if (a === ROT_AXIS) {
+          // 旋轉軸的最小輸入單位一樣吃 3401#0：DPI=0 時 A90 讀成 0.09 度，
+          // 工件等於完全沒轉，四個分度面會全部鑽在同一個位置。
+          diags.push(U.diag('R04', line, 'warning', `${w.raw} 沒有小數點，機台會讀成 ${U.fmt(w.value / 1000, 3)} 度（第四軸幾乎等於沒轉）`,
+            { detail: '設定 3401#0 DPI=0（最小輸入單位）時，沒有小數點的數值以 0.001 為單位——旋轉軸也一樣。'
+              + `A${U.fmt(w.value)} 會被讀成 ${U.fmt(w.value / 1000, 3)} 度，分度等於沒做，所有角度的加工會疊在同一面上。`
+              + `請寫成 A${U.fmt(w.value)}. 。預演仍以 ${U.fmt(w.value, 3)} 度計算。` }));
           continue;
         }
         let hit = false;
@@ -562,7 +618,22 @@
 
     // ---- 移動 ----
     const hasCoord = has('X') || has('Y') || has('Z');
+    const hasRot = has(ROT_AXIS);
+    // G65／G66 的 A 是巨集引數 #1，不是第四軸——blocksMotion 的節不算
+    if (hasRot && !blocksMotion) ctx.sawRotWord = true;
     let motionAction = null;
+
+    // B／C 軸：本版只支援 A，但不能靜靜吃掉（整支程式只報一次）
+    if (!blocksMotion && !ctx.otherRotReported) {
+      const other = OTHER_ROT.filter((r) => has(r));
+      if (other.length) {
+        ctx.otherRotReported = true;
+        diags.push(U.diag('R02', line, 'warning', `本工具只認得第四軸 A，這一節的 ${other.join('、')} 軸不會被讀取`,
+          { detail: '這一節在實機上是合法的，機台不會警報；只是預演不知道 ' + other.join('、') + ' 轉到哪裡，'
+            + '這一段之後的路徑、素材與碰撞結果都可能和實機不同。\n'
+            + '若現場真的用到第五軸，請告知，本工具再擴充。' }));
+      }
+    }
 
     if (isG04) {
       // G4 暫停：P 毫秒或 X 秒（X 在此不是座標）
@@ -608,13 +679,21 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
           { detail: '預演不套用 G92 位移；若程式依賴 G92，路徑顯示會偏移。' }));
       }
     } else if (st.cycle) {
-      if (hasCoord || has('R')) {
+      // 固定循環中「只寫一個 A90.」也要鑽一個孔——這是四軸分度鑽孔的標準寫法：
+      //   G81 X10. Y0. Z-5. R2. F100.
+      //   A90.   ← 轉 90 度後在同一個 XY 再鑽一個
+      // 不把 hasRot 算進來的話，這種節會整行消失，孔數與時間全部少報。
+      if (hasCoord || has('R') || hasRot) {
         const holes = doHole(b, ctx, last, has, val);
         for (const h of holes) actions.push(h);
         motionAction = holes.length ? holes[holes.length - 1] : null;
       }
     } else if (hasCoord) {
       motionAction = doMotion(b, ctx, last, has, val, forcedMotion);
+      if (motionAction) actions.push(motionAction);
+    } else if (hasRot) {
+      // 只有第四軸在動的節（XYZ 都沒寫）：分度轉動
+      motionAction = doRotate(b, ctx, has, val);
       if (motionAction) actions.push(motionAction);
     }
 
@@ -674,6 +753,15 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
     return to;
   }
 
+  /**
+   * 第四軸 A 的目標角度（度）。沒有 A 字時維持目前角度。
+   * G90／G91 對旋轉軸一樣適用：G91 A90. 是「再轉 90 度」。
+   */
+  function targetA(st, has, val) {
+    if (!has(ROT_AXIS)) return st.a;
+    return st.distance === 'G90' ? val(ROT_AXIS) : st.a + val(ROT_AXIS);
+  }
+
   function checkR16(ctx, line, from, toZ) {
     const st = ctx.state;
     const op = ctx.op;
@@ -691,6 +779,8 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
     const line = b.line;
     const from = { x: st.pos.x, y: st.pos.y, z: st.pos.z };
     const to = targetOf(st, has, val);
+    const aFrom = st.a;
+    const aTo = targetA(st, has, val);
     let motion = st.motion;
     if (forcedMotion) motion = forcedMotion;
     if (motion === null) {
@@ -708,6 +798,7 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
       if (!U.eq(from.x, to.x)) n++;
       if (!U.eq(from.y, to.y)) n++;
       if (!U.eq(from.z, to.z)) n++;
+      if (!U.eq(aFrom, aTo)) n++;      // 第四軸同動一樣是各軸獨立速率、路徑非直線
       action = { kind: 'rapid', from, to, feed: null, nonLinear: n > 1 };
     } else if (motion === 'G1') {
       if (st.feed == null && !ctx.r08Reported) {
@@ -722,7 +813,31 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
       noteCut(ctx, to.z, true);
     }
     st.pos = { x: to.x, y: to.y, z: to.z };
+    st.a = aTo;
+    // 每個動作都標「做這一段時第四軸在幾度」，rules 與畫面才知道這段屬於哪一個分度面
+    action.a = aTo;
+    if (!U.eq(aFrom, aTo)) action.aFrom = aFrom;
     return action;
+  }
+
+  /**
+   * 只有第四軸在動的節（XYZ 都沒寫）：分度轉動。
+   * XYZ 不變，所以 geometry 不會產生線段，但動作要留著——
+   * 「轉動時刀具在哪個高度」是四軸最會撞機的地方，rules 靠這個動作檢查。
+   */
+  function doRotate(b, ctx, has, val) {
+    const st = ctx.state;
+    const aFrom = st.a;
+    const aTo = targetA(st, has, val);
+    st.a = aTo;
+    if (U.eq(aFrom, aTo)) return null;   // 重複寫同一個角度，實機也不會動
+    const pos = { x: st.pos.x, y: st.pos.y, z: st.pos.z };
+    return {
+      kind: 'rotate', axis: ROT_AXIS,
+      from: pos, to: { x: pos.x, y: pos.y, z: pos.z },
+      aFrom, a: aTo,
+      feed: st.motion === 'G1' ? st.feed : null,
+    };
   }
 
   function noteCut(ctx, z, linear) {
@@ -810,7 +925,10 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
         { detail: '補正中回原點，中間點會被補正偏移、且可能發 PS0041 警報。請先 G40。', fanucAlarm: 'PS0041' }));
     }
     const axes = AXES.filter((a) => has(a));
-    if (axes.length === 0) {
+    const rotHere = has(ROT_AXIS);
+    // 訊息與多軸判定用「含第四軸」的清單；座標運算只用 XYZ（A 不在 pos 裡）
+    const allAxes = rotHere ? axes.concat([ROT_AXIS]) : axes;
+    if (allAxes.length === 0) {
       diags.push(U.diag('R17', line, 'warning', `${code} 沒有指定任何軸，不會有軸回歸`,
         { detail: 'Fanuc 的 G28 只回歸有寫出來的軸（如 G28 Z0.）。請確認是否漏寫軸字。' }));
       return null;
@@ -821,16 +939,21 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
       diags.push(U.diag('R17', line, 'error', `${code} 在 G90 絕對模式下，中間點（${fmtVec(via)}）不是目前位置，回歸前會先移到中間點`,
         { detail: 'G90 G28 Z0. 會先快速移到工件座標 Z0 再回原點，極可能撞到工件。慣例寫法是 G91 G28 Z0.。', pos: via }));
     }
-    if (axes.length >= 2) {
+    if (allAxes.length >= 2) {
       // pos = 執行這一節之前的位置；analyze 會用它與素材頂面比對，Z 已經拉高就降成 info（整合決議 17）。
-      diags.push(U.diag('R17', line, 'warning', `${code} 同時回歸 ${axes.join('、')} 軸，各軸同時動作路徑不是直線`,
+      diags.push(U.diag('R17', line, 'warning', `${code} 同時回歸 ${allAxes.join('、')} 軸，各軸同時動作路徑不是直線`,
         { detail: '多軸同時回歸時 Z 若還在低處，XY 先動可能撞夾具。建議先 G28 Z0. 再回 XY。', pos: { x: from.x, y: from.y, z: from.z }, multiAxis: true }));
     }
     const ref = settings.refPosition || { x: 0, y: 0, z: 150 };
     const to = { x: via.x, y: via.y, z: via.z };
     for (const a of axes) to[AXIS_KEY[a]] = ref[AXIS_KEY[a]];
     st.pos = { x: to.x, y: to.y, z: to.z };
-    return { kind: 'refReturn', from, via, to, axes };
+    // 第四軸的參考點一律視為 A0（分度頭的原點）
+    const aFrom = st.a;
+    if (rotHere) st.a = 0;
+    const act = { kind: 'refReturn', from, via, to, axes: allAxes, a: st.a };
+    if (!U.eq(aFrom, st.a)) act.aFrom = aFrom;
+    return act;
   }
 
   /** 固定循環的一節（可能不只一個孔：K／L 是重複次數） @returns {Action[]} */
@@ -841,6 +964,8 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
     const line = b.line;
     const abs = st.distance === 'G90';
     const from = { x: st.pos.x, y: st.pos.y, z: st.pos.z };
+    const aFrom = st.a;
+    const aTo = targetA(st, has, val);
     let x = st.pos.x, y = st.pos.y;
     if (has('X')) x = abs ? val('X') : st.pos.x + val('X');
     if (has('Y')) y = abs ? val('Y') : st.pos.y + val('Y');
@@ -908,13 +1033,18 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
       const hx = x + dx * i, hy = y + dy * i;
       const hFrom = i === 0 ? from : { x: st.pos.x, y: st.pos.y, z: st.pos.z };
       const to = { x: hx, y: hy, z: c.retract === 'G98' ? c.initialZ : r };
-      out.push({
+      const h = {
         kind: 'hole', from: hFrom, to, x: hx, y: hy, z, r,
         initialZ: c.initialZ, q: c.q == null ? undefined : c.q, p: c.p == null ? undefined : c.p,
         cycle: c.code, retract: c.retract, rigid, feed: st.feed,
-      });
+        a: aTo,
+      };
+      // 轉動只發生在這一節的第一個孔（K/L 重複的後續孔角度已經到位）
+      if (i === 0 && !U.eq(aFrom, aTo)) h.aFrom = aFrom;
+      out.push(h);
       st.pos = { x: to.x, y: to.y, z: to.z };
     }
+    st.a = aTo;
     noteCut(ctx, z, false);
     return out;
   }

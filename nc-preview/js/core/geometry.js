@@ -228,6 +228,18 @@
     return Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y) > EPS;
   }
 
+  /**
+   * 把動作的第四軸角度標到段上。
+   * 注意：這裡**不做**工件旋轉的座標轉換——段的 XYZ 一律是程式座標。
+   * `a` 只是「畫這一段時 A 轉到幾度」，供畫面分面顯示與 R37 檢查用（CONTRACT §13）。
+   */
+  function tagRot(seg, act) {
+    if (!seg || !act || act.a === undefined) return seg;
+    seg.a = act.a;
+    if (act.aFrom !== undefined) seg.aFrom = act.aFrom;
+    return seg;
+  }
+
   function makeItem(blk, seg, act, extra) {
     return Object.assign({ blk, seg, act, plane: isPlaneMove(seg), marker: false, flush: false, idx: -1 }, extra || {});
   }
@@ -261,6 +273,7 @@
                 seg.kind = 'feed'; // 圓心不明 → 退化直線
               }
             }
+            tagRot(seg, act);
             items.push(makeItem(blk, seg, act, { corner: act.corner || null, compStart: !!act.compStart, compEnd: !!act.compEnd }));
             cur = c3(to);
             n++;
@@ -272,8 +285,8 @@
             const to = act.to ? c3(act.to) : c3(via);
             const s1 = Object.assign({}, base, { kind: 'rapid', from, to: via, feed: null, path: 'programmed', refReturn: true });
             const s2 = Object.assign({}, base, { kind: 'rapid', from: c3(via), to, feed: null, path: 'programmed', refReturn: true });
-            items.push(makeItem(blk, s1, act, { flush: true }));
-            items.push(makeItem(blk, s2, act, { flush: true }));
+            items.push(makeItem(blk, tagRot(s1, act), act, { flush: true }));
+            items.push(makeItem(blk, tagRot(s2, act), act, { flush: true }));
             cur = c3(to);
             n += 2;
             break;
@@ -283,6 +296,7 @@
             const segs = expandHole(act, { pos: cur, feed: st.feed });
             for (const s of segs) {
               Object.assign(s, base);
+              tagRot(s, act);
               items.push(makeItem(blk, s, act, { flush: true }));
               n++;
             }

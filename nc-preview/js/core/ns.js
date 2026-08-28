@@ -87,14 +87,18 @@
    * @property {boolean} rigidTap            M29 生效中
    * @property {number|null} rigidTapS       M29 時的 S
    * @property {Vec3} pos                    執行後位置（工件座標；刀尖 = 程式 Z，忽略 H 值）
+   * @property {number} a                    第四軸 A 的角度（度）；沒有第四軸的程式恆為 0
    * @property {boolean} lengthCompActive    G43 已在此刀生效
    */
   /**
    * 動作。interpreter 產生；geometry 轉成 Segment。
    * @typedef {Object} Action
-   * @property {'rapid'|'linear'|'arc'|'hole'|'dwell'|'toolchange'|'refReturn'|'stop'|'aicc'|'spindle'|'coolant'} kind
+   * @property {'rapid'|'linear'|'arc'|'hole'|'dwell'|'toolchange'|'refReturn'|'stop'|'aicc'|'spindle'|'coolant'|'rotate'|'subCall'} kind
    * @property {Vec3} [from]
    * @property {Vec3} [to]
+   * @property {number} [a]                第四軸角度（度）：做這個動作時 A 在幾度。移動類動作一律有
+   * @property {number} [aFrom]            這個動作**期間**第四軸有轉動時的起始角度；沒轉就沒有這個欄位
+   * @property {string} [axis]             rotate：轉的是哪一個位址（本版固定 'A'）
    * @property {number|null} [feed]        linear/arc：mm/min
    * @property {boolean} [nonLinear]       rapid：多軸同動（各軸獨立速率、非直線）
    * @property {Vec2} [center]             arc：圓心（G17 平面 XY）
@@ -155,6 +159,20 @@
    * @property {Operation[]} ops
    * @property {Diagnostic[]} diagnostics   interpreter 負責的規則（見 CONTRACT）
    * @property {ModalState} finalState
+   * @property {RotarySummary} rotary       第四軸摘要
+   */
+  /**
+   * 第四軸摘要（CONTRACT §13）。
+   * 注意：本版**不做**工件旋轉的座標轉換——Segment 的 XYZ 一律是程式座標，
+   * `a` 只是「畫這一段時 A 在幾度」的標記。
+   * @typedef {Object} RotarySummary
+   * @property {boolean} used            程式裡出現過 A 字組
+   * @property {string} axis             位址（本版固定 'A'）
+   * @property {'none'|'index'|'simultaneous'} mode
+   *   none = 沒用到；index = 分度（轉到角度停住再切）；simultaneous = A 與 XYZ 同時進給的四軸插補
+   * @property {number[]} angles         用到的角度（由小到大）
+   * @property {number[]} rotateLines    第四軸真的有轉動的行號；長度 0 = 全程沒轉，等同三軸程式
+   * @property {number[]} simLines       A 與 XYZ 同時進給的行號
    */
 
   // ---------------------------------------------------------------------------
@@ -176,6 +194,8 @@
    * @property {boolean} [refReturn]     G28 的移動（視為在空中）
    * @property {boolean} [inserted]      由 ,C/,R 或補正轉角插入、非程式原有
    * @property {'peck'|'retract'|'plunge'|'tapUp'} [sub]  drill 細節
+   * @property {number} [a]              畫這一段時第四軸在幾度（**未**套用旋轉轉換，見 RotarySummary）
+   * @property {number} [aFrom]          這一段期間第四軸有轉動時的起始角度
    */
   /**
    * @typedef {Object} GeometryResult

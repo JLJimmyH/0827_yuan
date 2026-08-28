@@ -14,7 +14,7 @@ const SAMPLE_DIR = path.join(ROOT, 'samples');
 const OUT = path.join(ROOT, 'js', 'ui', 'samples.js');
 
 // 選單顯示順序：先簡單的、再有陷阱的
-const ORDER = ['demo-drill.nc', 'demo-tap.nc', 'demo-plate.nc', 'demo-pocket.nc'];
+const ORDER = ['demo-drill.nc', 'demo-tap.nc', 'demo-plate.nc', 'demo-pocket.nc', 'demo-4axis.nc'];
 const found = fs.readdirSync(SAMPLE_DIR).filter((f) => f.endsWith('.nc'));
 const NAMES = ORDER.filter((n) => found.includes(n)).concat(found.filter((n) => !ORDER.includes(n)).sort());
 

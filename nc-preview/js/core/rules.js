@@ -537,6 +537,9 @@
     if (!off) return [];
     const out = [];
     const r18Lines = new Set((off.diagnostics || []).filter((d) => d && d.ruleId === 'R18').map((d) => d.line));
+    // 第四軸真的有轉過時，孔位要連角度一起看：同一個 XY 在不同角度是圓周上不同的孔
+    const rotUsed = !!(off.rotary && off.rotary.used && off.rotary.rotateLines.length);
+    const holeAngle = (h) => (rotUsed && h.a.a !== undefined) ? ` ${off.rotary.axis}${f(h.a.a)}` : '';
 
     for (const g of collectCycleGroups(ctx, off)) {
       const zs = [], rs = [], feeds = [];
@@ -546,7 +549,7 @@
         if (rp != null && rs.indexOf(rp) < 0) rs.push(rp);
         if (h.a.feed != null && feeds.indexOf(h.a.feed) < 0) feeds.push(h.a.feed);
       }
-      const posList = g.holes.map((h) => p2(h.a.x, h.a.y));
+      const posList = g.holes.map((h) => p2(h.a.x, h.a.y) + holeAngle(h));
       out.push(diag('R19', g.startLine, 'info',
         `${g.code} 固定循環從第 ${g.startLine} 行到第 ${g.endLine} 行，一共鑽 ${g.holes.length} 個孔`, {
           detail: `孔位：${posList.slice(0, 10).join('、')}${posList.length > 10 ? `…（共 ${posList.length} 個）` : ''}\n`
@@ -557,10 +560,10 @@
       // 同一組裡孔位重複 → 同一個孔會鑽兩次
       const seenXY = new Map();
       for (const h of g.holes) {
-        const key = `${U.round(h.a.x, 3)},${U.round(h.a.y, 3)}`;
+        const key = `${U.round(h.a.x, 3)},${U.round(h.a.y, 3)}${holeAngle(h)}`;
         if (seenXY.has(key)) {
           out.push(diag('R19', h.line, 'warning',
-            `這個孔位 ${p2(h.a.x, h.a.y)} 和第 ${seenXY.get(key)} 行重複，同一個孔會被鑽兩次`, {
+            `這個孔位 ${p2(h.a.x, h.a.y)}${holeAngle(h)} 和第 ${seenXY.get(key)} 行重複，同一個孔會被鑽兩次`, {
               detail: '固定循環在同一個 XY 再下一次，等於對同一個孔再鑽一次。深度一樣的話只是多花時間；深度不一樣則後面那次會決定最後的孔深。\n'
                 + '建議：確認是不是漏改座標，或本來就是想分兩次鑽（先淺後深）。',
             }));
@@ -1476,6 +1479,133 @@
   }
 
   // ===========================================================================
+  // R37：第四軸（A）
+  //
+  // 本工具**不做**工件旋轉的座標轉換：路徑、素材模型、碰撞檢查全部照「工件不轉」畫。
+  // 所以這條規則的第一要務是講清楚「畫面上看到的不是實際加工的樣子」——
+  // 靜靜地把 A 吃掉、畫出一張漂亮但錯誤的圖，比什麼都不做還危險。
+  // 其餘子檢查是不依賴旋轉轉換也能確定的事（轉動時的刀具高度、補正、收尾角度）。
+  // ===========================================================================
+  /** 一節裡第四軸轉動時，刀尖可能到過的最低 Z */
+  function rotLowZ(act) {
+    const zs = [];
+    if (act.from && typeof act.from.z === 'number') zs.push(act.from.z);
+    // hole 的 to.z 是鑽完退刀後的高度，不是轉動當下的高度，不能拿來判
+    if (act.kind !== 'hole' && act.to && typeof act.to.z === 'number') zs.push(act.to.z);
+    return zs.length ? Math.min.apply(null, zs) : null;
+  }
+
+  function checkR37(ctx) {
+    const off = runOf(ctx, 'off');
+    const rot = off && off.rotary;
+    if (!off || !rot || !rot.used) return [];
+    // A 從頭到尾沒有轉過（三軸程式寫了 A0.）→ 路徑完全正確，不需要任何提醒
+    if (!rot.rotateLines.length) return [];
+
+    const out = [];
+    const A = rot.axis;
+    const top = topZ(ctx);
+    const deg = (v) => `${A}${f(v)}`;
+    const first = rot.rotateLines[0];
+
+    // ---- (a) 總體標示：畫面上的路徑不是實際加工的樣子 ----
+    if (rot.mode === 'simultaneous') {
+      const shown = rot.simLines.slice(0, 6).join('、');
+      out.push(diag('R37', first, 'warning',
+        `這支程式有 ${A} 軸和 XYZ 同時進給的節（第 ${shown}${rot.simLines.length > 6 ? ' 等' : ''} 行），是真正的四軸插補，本工具畫不出來`, {
+          detail: `${A} 軸一邊轉、刀具一邊切（螺旋槽、凸輪、葉片這類），實際刀路是繞著旋轉中心展開的曲面，`
+            + '本預演台的路徑是平面的，這一段等於完全沒有預演。\n'
+            + '這些行的素材模型、碰撞檢查與時間估算都不可信。要確認這一段，請用機台的圖形檢查或實際試切。',
+        }));
+    } else {
+      out.push(diag('R37', first, 'warning',
+        `這支程式用 ${A} 軸分度（共 ${rot.angles.length} 個角度：${rot.angles.map(deg).join('、')}），但畫面上的路徑是照「工件不轉」畫的`, {
+          detail: `本工具只讀 ${A} 的角度值，沒有把工件轉過去。所以：\n`
+            + '・不同角度的加工會全部疊在同一個面上顯示，看起來像是在一個平面上加工。\n'
+            + '・素材模型（高度圖）與碰撞檢查是 2.5D 的，工件一轉就對不上，這支程式的模擬結果不可信。\n'
+            + '・路徑的 XYZ 值本身是對的（和程式一致），孔位、深度、進給這些逐行檢查照樣有效。\n'
+            + '可以放心看的：G 碼語法、模態、刀長／刀徑補正、固定循環參數、進給與轉速、換刀順序。\n'
+            + '不能看的：3D 立體圖、素材殘料、碰撞結果、加工時間。',
+        }));
+    }
+
+    // ---- (b) 轉動時刀尖還在低處（四軸最常見的撞機原因）----
+    // ---- (d) 刀徑補正生效中轉動 ----
+    for (const eb of off.executed) {
+      if (!eb || eb.skipped || eb.ignored || !eb.actions || !eb.actions.length) continue;
+      for (const act of eb.actions) {
+        if (act.aFrom === undefined) continue;
+        const z = rotLowZ(act);
+        if (z != null && z <= top + EPS) {
+          // Z 已經在工件零點以下＝幾乎確定還埋在料裡；零點到素材頂面之間則是「很可能」
+          const sev = z < -EPS ? 'error' : 'warning';
+          out.push(diag('R37', eb.line, sev,
+            `第四軸從 ${deg(act.aFrom)} 轉到 ${deg(act.a)} 的時候，刀尖只在 Z${f(z)}`, {
+              detail: '工件在轉，刀具卻還沒退到安全高度——這是四軸加工最常見的撞機原因。\n'
+                + `這裡的門檻是素材頂面 Z${f(top)}${ctx && ctx.stock && ctx.stock.source === 'estimated' ? '（推估素材）' : ''}；`
+                + '圓柱料夾在分度頭上時，工件的最高點會隨角度改變，實際危險範圍比這個門檻更大。\n'
+                + `${act.kind === 'hole' ? '這是固定循環裡的分度：G99 只退到 R 點，工件就帶著刀轉過去了。分度前建議改用 G98（退到初始面），或在轉動前另外寫一節把 Z 拉高。\n' : ''}`
+                + `建議：把 ${A} 的轉動獨立成一節，並在它前面先把 Z 退到工件的迴轉包絡之外。`,
+              pos: act.from ? { x: act.from.x, y: act.from.y, z } : undefined,
+            }));
+        }
+        if (eb.before && eb.before.comp && eb.before.comp !== 'G40') {
+          out.push(diag('R37', eb.line, 'error',
+            `刀徑補正（${eb.before.comp}）生效中轉動第四軸（${deg(act.aFrom)} → ${deg(act.a)}）`, {
+              detail: '補正是在 XY 平面上算的，工件轉過去之後補正方向就跟著錯了，機台也可能發 PS0041。\n'
+                + '建議：轉動前先 G40 取消補正，轉到位之後再重新啟動。',
+              fanucAlarm: 'PS0041',
+            }));
+        }
+      }
+    }
+
+    // ---- (c) 程式結束時第四軸沒有回到 0 ----
+    const finalA = off.finalState ? off.finalState.a : null;
+    if (typeof finalA === 'number' && Math.abs(finalA) > EPS) {
+      let endLine = 0;
+      for (let i = off.executed.length - 1; i >= 0; i--) {
+        const eb = off.executed[i];
+        if (eb && (eb.actions || []).some((a) => a.kind === 'stop')) { endLine = eb.line; break; }
+      }
+      out.push(diag('R37', endLine, 'warning',
+        `程式結束時第四軸停在 ${deg(finalA)}，沒有轉回 ${A}0`, {
+          detail: `${A} 是模態的，M30 不會讓它自己歸零。下一支程式如果沒有在開頭指定 ${A}，`
+            + `就會從 ${deg(finalA)} 這個角度開始加工，整批工件的分度全部偏掉。\n`
+            + `而且卸料時工件是斜的，對刀與量測也容易出錯。\n`
+            + `建議：在 M30 前加一節 G91 G28 ${A}0.（或 G90 G0 ${A}0.）。`,
+        }));
+    }
+
+    // ---- (h) 分度分段：哪幾行在哪個角度 ----
+    const spans = [];
+    for (const eb of off.executed) {
+      if (!eb || eb.skipped || eb.ignored || !eb.actions || !eb.actions.length) continue;
+      for (const act of eb.actions) {
+        if (act.a === undefined) continue;
+        const prev = spans[spans.length - 1];
+        if (prev && Math.abs(prev.a - act.a) < EPS) prev.end = eb.line;
+        else spans.push({ a: act.a, start: eb.line, end: eb.line });
+        break;
+      }
+    }
+    if (spans.length >= 2) {
+      const MAX = 12;
+      const shown = spans.slice(0, MAX)
+        .map((s) => `${deg(s.a)}（第 ${s.start === s.end ? s.start : s.start + '–' + s.end} 行）`)
+        .join(' → ');
+      out.push(diag('R37', first, 'info',
+        `第四軸分度順序：${shown}${spans.length > MAX ? ` → …共 ${spans.length} 段` : ''}`, {
+          detail: '每一段都是一個獨立的加工面。逐行檢查（孔位、深度、進給）在每一段裡都是有效的，'
+            + '只是不同段之間不能用同一張立體圖或素材模型去看。\n'
+            + '確認重點：每一段之間有沒有先把 Z 退到安全高度、分度角度是不是照圖面的等分。',
+        }));
+    }
+
+    return out;
+  }
+
+  // ===========================================================================
   // registry / run
   // ===========================================================================
   /** @type {Array<{id:string,title:string,severity:string,phase:string,check:Function}>} */
@@ -1497,6 +1627,7 @@
     { id: 'R34', title: '重複層偏離', severity: 'info', phase: 'run', check: checkR34 },
     { id: 'R35', title: '切削參數合理性', severity: 'warning', phase: 'run', check: checkR35 },
     { id: 'R36', title: '同一特徵出現多個底面深度', severity: 'warning', phase: 'sim', check: checkR36 },
+    { id: 'R37', title: '第四軸（A）', severity: 'error', phase: 'run', check: checkR37 },
   ];
 
   const PHASES = ['run', 'geometry', 'sim', 'cross'];

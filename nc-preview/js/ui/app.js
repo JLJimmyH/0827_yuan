@@ -239,7 +239,7 @@
       modalHost: $('modalHost'), modalLineLabel: $('modalLineLabel'),
       viewCanvas: $('viewCanvas'),
       viewHost: $('viewHost'), view3dHost: $('view3dHost'), viewCanvas3d: $('viewCanvas3d'),
-      btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'),
+      btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'), rotaryBanner: $('rotaryBanner'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
       rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'),
       chkRapid: $('chkRapid'), chkFeed: $('chkFeed'), chkStock: $('chkStock'),
@@ -611,6 +611,7 @@
       renderCounts(res.diagnostics, !hasSim);
       renderDefaultBanner(res.toolTable, run.ops);
       renderStockBanner(res.stock, res.diagnostics);
+      renderRotaryBanner(run);
       showModalFor(state.selectedLine || editor.getCursorLine());
 
       // 換了 O 號 → 刀具表換了一份，得用新的表重算一次（畫面上的結果現在還是舊表算的）
@@ -771,6 +772,29 @@
       el.stockBanner.textContent = `素材為程式推估（${dx}×${dy}×${dz} mm）${n > 0 ? `，${n} 筆判定依此` : ''}`;
       el.stockBanner.title = '推估素材是「用切削範圍往外擴一個刀半徑」猜出來的，不是真的毛胚。'
         + '點一下到「素材與設定」填入真實尺寸，這些判定會重算。';
+    }
+
+    /**
+     * 第四軸橫幅。這條是三條橫幅裡最不能省的一條：
+     * 本工具不套用工件旋轉，四軸程式的畫面會把不同角度的加工全部疊在同一面上，
+     * 看起來完全正常。錯誤清單裡雖然有 R37，但現場多半是先看圖才看清單——
+     * 圖旁邊沒有這句話，等於默認那張圖可以信。
+     */
+    function renderRotaryBanner(run) {
+      const rot = run && run.rotary;
+      const on = !!(rot && rot.used && rot.rotateLines.length);
+      show(el.rotaryBanner, on);
+      if (!on) return;
+      const sim = rot.mode === 'simultaneous';
+      el.rotaryBanner.textContent = sim
+        ? `第四軸 ${rot.axis} 與 XYZ 同動，這幾段沒有預演`
+        : `第四軸 ${rot.axis} 分度 ${rot.angles.length} 個角度，立體圖與素材不可信`;
+      el.rotaryBanner.title = (sim
+        ? `第 ${rot.simLines.slice(0, 8).join('、')} 行是 ${rot.axis} 軸與 XYZ 同時進給的四軸插補，實際刀路是繞著旋轉中心展開的，本工具畫不出來。\n`
+        : `這支程式把工件轉到 ${rot.angles.map((v) => rot.axis + fmt(v)).join('、')} 這幾個角度加工，但預演是照「工件不轉」畫的，各角度的加工會疊在同一面上。\n`)
+        + '仍然有效：G 碼語法、模態、刀長／刀徑補正、固定循環參數、進給轉速、換刀順序、逐行的孔位與深度。\n'
+        + '不要採信：3D 立體圖、素材殘料、碰撞結果、加工時間。\n'
+        + '點一下看錯誤清單裡的 R37。';
     }
 
     // -------------------------------------------------------------------------
@@ -1115,6 +1139,7 @@
     });
     el.btnFit.addEventListener('click', () => { if (viewMode === '3d' && view3d) view3d.fit(); else view.fit(); });
     el.stockBanner.addEventListener('click', () => selectTab('stock'));
+    el.rotaryBanner.addEventListener('click', () => selectTab('diag'));
     el.rngSnapshot.addEventListener('input', () => {
       const v = Number(el.rngSnapshot.value);
       const sim = currentScenario() && currentScenario().sim;

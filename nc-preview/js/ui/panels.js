@@ -1132,7 +1132,11 @@
       if (x.ignored) extraRows.push(['狀態', '多斜線節，永遠忽略', 'nc-warn']);
       for (const k of Object.keys(x)) if (!['line', 'text', 'comment', 'opIndex', 'skipped', 'ignored'].includes(k) && x[k] != null && typeof x[k] !== 'object') extraRows.push([k, String(x[k])]);
       if (extraRows.length) root.appendChild(section('節', extraRows));
-      root.appendChild(section('位置（執行後，工件座標）', [['位置', fmtPos(st.pos), 'nc-pos']]));
+      root.appendChild(section('位置（執行後，工件座標）', [
+        ['位置', fmtPos(st.pos), 'nc-pos'],
+        // 第四軸只在真的轉離 0 之後才列——三軸程式（A 恆為 0）多一列反而是雜訊
+        (typeof st.a === 'number' && Math.abs(st.a) > 1e-9) ? ['第四軸', `A${fmt(st.a)}°`, 'nc-active'] : null,
+      ]));
       root.appendChild(section('G 群組', [
         ['移動', st.motion || '—'], ['距離', st.distance], ['平面', st.plane], ['單位', st.units], ['進給模式', st.feedMode], ['座標系', st.wcs],
         ['刀徑補正', st.comp + (st.d ? ` D${st.d}` : ''), st.comp !== 'G40' ? 'nc-active' : ''],

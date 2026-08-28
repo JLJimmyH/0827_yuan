@@ -62,7 +62,9 @@ G 碼群組（同節同群組兩個以上 → R03 warning，後者有效）：01
 
 Operation 切分：每個 M6 開始一個新 Operation（index 遞增）；M6 之前的節 `opIndex=-1`。`ops[i]` 統計：`tool`、`toolComment`（M6 節註解）、`h`、`dList`、`lineStart/lineEnd`、`zMin`（linear/arc 的 to.z 與 hole 的 z 最小）、`feeds`、`rpms`、`gCodes`、`kindGuess`：只有 hole 且 G84 → tap；G85 → ream；只有 hole → drill；有 G41/G42 → contour；toolComment 含 `V` 且 linear → chamfer；無 G41 但有 linear 且 zMin<0 → pocket；zMin >= -0.1 且 linear → face；其他 unknown。
 
-interpreter 負責的診斷：R02、R03、R04、R08（error 部分）、R09、R13（G41/G42 模態下 M6/G28/M30/換平面 → error）、R16、R17、R18、R21（M29 與 G84 之間有軸移動或 S → error PS0203；G84 無 F → error）、R23、R32（無 O 號 warning；無 M30/M02 error；`/M30` warning；`%` 缺 info）。其他規則由 rules.js 做。
+第四軸（A）的讀取、`rotate` 動作、固定循環中的分度、`Run.rotary` 摘要見 §13.3。
+
+interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本）、R08（error 部分）、R09、R13（G41/G42 模態下 M6/G28/M30/換平面 → error）、R16、R17、R18、R21（M29 與 G84 之間有軸移動或 S → error PS0203；G84 無 F → error）、R23、R32（無 O 號 warning；無 M30/M02 error；`/M30` warning；`%` 缺 info）。其他規則由 rules.js 做。
 
 驗收（scenario off）：Operation 切分與 T 序列、各 op 的 zMin、剛性攻牙的 `rigid=true`、G91 區段累積後回 G90 的絕對座標、block skip 情境下的 `skipped` 標記、固定循環展開的孔數、R02 error = 0（G05.1 要認得），全部用 golden test 驗收，見 `test/interpreter.test.mjs`。
 
@@ -149,7 +151,7 @@ interpreter 負責的診斷：R02、R03、R04、R08（error 部分）、R09、R1
 ## 6. `rules.js` — `NC.rules`
 
 - `registry: Rule[]`，`Rule = {id, title, severity, phase:'run'|'geometry'|'sim'|'cross', check(ctx) → Diagnostic[]}`；`run(ctx) → Diagnostic[]`，`ctx = {tok, scenarios:{off:ScenarioResult,on?:..., multiIgnored?:...}, toolTable, stock, settings}`；`settings.disabledRules` 過濾。
-- rules.js 負責：R05（多斜線）、R06（情境差異：比較 off/on 每個 skipped 節後續第一個動作的 kind/Z/位置；跳過後在切深 G1/G0 且該處有材料（若有 sim 用 height）→ error，否則 warning；並比較最終 heightmap 差異格數 → info）、R07（被跳過節含模態字）、R10–R12 的補充（geometry 已出者不重複）、R14（D≠T、H≠T info；D0/H0 warning）、R15（|有效半徑 − 直徑/2| > dToleranceMm → warning；chamfer 例外）、R19（循環中每個 XY 節都鑽：列出 hole 數 info；G80 後又 G8x 無 R/Z → error）、R20（R 點 < 0 且該處未開孔（sim 有時查 height）→ warning／needsInput）、R24（G91 區段內有 `/` 節 → warning；M0/M6/M30 前仍 G91 → info）、R25（切削時 spindle M5 或 rpm null → error；M6/M0 前無 M5 依設定 → warning/info）、R26（G05.1 成對、Q1 中 M6/G28 未先 Q0 → warning、Q1 中循環 → info、G05.1 節含其他字 → error）、R29（預選 T ≠ 下一 M6 T → warning；M6 T = 主軸刀 → info；程式末預選 → info）、R30（刀庫：暫時只在 settings.magazine 存在時檢查，否則略過）、R31（同 T 號跨程式註解不一致需多程式 → 本版只做「註解型式 vs 動作型式矛盾」warning；`probe` 刀 info「無註解且無切削，可能是定位器刀位」）、R33（softLimits 有時檢查）、R34（重複層：找連續 N 節（N≥5）除 Z 值外完全相同的區塊群組，比對各群組差異 → info）、R35（Vc、mm/rev、啄鑽次數 > 40 → info；L/D > 6 → warning 需刃長）、R36（sim 有時：相鄰區域最終高度差 < 0.5 且 > 0.02 → warning）。
+- rules.js 負責：R05（多斜線）、R06（情境差異：比較 off/on 每個 skipped 節後續第一個動作的 kind/Z/位置；跳過後在切深 G1/G0 且該處有材料（若有 sim 用 height）→ error，否則 warning；並比較最終 heightmap 差異格數 → info）、R07（被跳過節含模態字）、R10–R12 的補充（geometry 已出者不重複）、R14（D≠T、H≠T info；D0/H0 warning）、R15（|有效半徑 − 直徑/2| > dToleranceMm → warning；chamfer 例外）、R19（循環中每個 XY 節都鑽：列出 hole 數 info；G80 後又 G8x 無 R/Z → error）、R20（R 點 < 0 且該處未開孔（sim 有時查 height）→ warning／needsInput）、R24（G91 區段內有 `/` 節 → warning；M0/M6/M30 前仍 G91 → info）、R25（切削時 spindle M5 或 rpm null → error；M6/M0 前無 M5 依設定 → warning/info）、R26（G05.1 成對、Q1 中 M6/G28 未先 Q0 → warning、Q1 中循環 → info、G05.1 節含其他字 → error）、R29（預選 T ≠ 下一 M6 T → warning；M6 T = 主軸刀 → info；程式末預選 → info）、R30（刀庫：暫時只在 settings.magazine 存在時檢查，否則略過）、R31（同 T 號跨程式註解不一致需多程式 → 本版只做「註解型式 vs 動作型式矛盾」warning；`probe` 刀 info「無註解且無切削，可能是定位器刀位」）、R33（softLimits 有時檢查）、R34（重複層：找連續 N 節（N≥5）除 Z 值外完全相同的區塊群組，比對各群組差異 → info）、R35（Vc、mm/rev、啄鑽次數 > 40 → info；L/D > 6 → warning 需刃長）、R36（sim 有時：相鄰區域最終高度差 < 0.5 且 > 0.02 → warning）、R37（第四軸 A，見 §13.4）。
 - 每條規則的 message 白話、detail 說明後果與建議、fanucAlarm 若有。
 - 驗收：各規則的命中位置與嚴重度用 golden test 驗收，見 `test/rules.test.mjs`。那支測試另外釘住兩件事：實際程式跑出來的每一筆 `error` 都要說得出為什麼（逐筆列在測試裡），以及沒有素材模擬資料時，任何需要知道「當下材料長什麼樣」的判斷都不准升到 error。
 
@@ -241,3 +243,82 @@ interpreter 負責的診斷：R02、R03、R04、R08（error 部分）、R09、R1
 33. **刀具表加 CSV 匯入／匯出**：匯出補 UTF-8 BOM（Excel 才不會亂碼），匯入只吃 `source==='user'` 的欄位，
     並擋掉不合理的值（直徑／刃長／伸出長 >0 且 ≤1000、角度 0–180、半徑形狀不可為負），
     被擋或無法解析的格子要點名告知，不可以顯示「匯入成功」了事。CSV 可直接拖進刀具表面板。
+
+## 13. 第四軸（A）
+
+### 13.1 現場配置（2026-08-28 由現場照片與 Yuan 確認）
+
+立式加工中心的工作台上放一台**臥式旋轉分度頭**，三爪夾頭面朝 -X、中心線水平且平行 X 軸。
+所以 **A 軸繞 X 軸旋轉**（標準定義），工件是夾在夾頭上的圓柱／棒料，刀具從 +Z 垂直下來切側面。
+現場的用法是「三軸程式 A 就是 0，四軸程式就是 XYZA」——也就是**分度**（轉到角度停住再切），
+不是 A 與 XYZ 同動的連續四軸。工作台上另一個平放的夾頭不會轉，不是第五軸。
+
+### 13.2 為什麼分三個層次
+
+| | 做到什麼 | 成本 |
+|---|---|---|
+| 層次一 **認得 A、不騙人**（本版） | 讀進角度、標在每個動作與段上、A 軸專屬檢查、畫面明講「工件旋轉未套用」 | 小 |
+| 層次二 分度視圖 | 每個 A 角度當成一個獨立的面，各自 2.5D 顯示與各自一張 heightmap | 中 |
+| 層次三 真四軸 | A 與 XYZ 同動插補、圓柱素材、體素模擬 | 很大 |
+
+分水嶺在 `simulation.js`：素材模型是 **heightmap（XY 格子存一個 Z）**，是 2.5D 的。
+工件一轉，同一個 XY 格子就對應到工件的不同部位，這個模型從根本上表達不了四軸。
+但**分度**還有救——每個 A 角度各開一張 heightmap，等於把四軸拆成 N 次獨立的三軸加工（層次二）。
+真正做不到的只有「A 一邊轉一邊切」，那種只能誠實標示不模擬，同 G68／G16 的處理方式。
+
+### 13.3 本版（層次一）的規則
+
+**不做任何工件旋轉的座標轉換。** Segment 的 XYZ 一律是程式座標，`a` 只是「畫這一段時 A 在幾度」的標記。
+這一點必須在畫面上講清楚（見 13.5），因為靜靜地把 A 吃掉、畫出一張漂亮但錯誤的圖，比什麼都不做更危險。
+
+- 位址固定 `A`。`B`／`C` 出現時發一次 R02 warning「本工具只認得第四軸 A」，不模擬。
+  `G65`／`G66` 這種 `blocksMotion` 的節裡 `A` 是巨集引數 #1，不算第四軸。
+- `ModalState.a`（度）；G90 絕對、G91 增量都適用；`G28 A0.` 視為回到 A0。
+- 移動類動作**一律**帶 `a`（該動作結束時的角度）；動作**期間**有轉動時另外帶 `aFrom`。
+  三軸程式的 `a` 恆為 0，所以 `rotary.used` 一定要用「有沒有出現過 A 字組」判斷，不能拿 `act.a !== undefined` 判。
+- **只有 A 在動的節**（XYZ 都沒寫）→ `kind:'rotate'` 動作，`from === to`。
+  geometry 不產生線段（跟 dwell 一樣落到 marker），但動作要留著——R37 靠它檢查轉動時的刀尖高度。
+- **固定循環中只寫一個 `A90.` 也要鑽一個孔**。這是四軸分度鑽孔的標準寫法
+  （`G81 X10.Y0.Z-5.R2.F100.` 之後接 `A90.` `A180.`）。不把 `hasRot` 算進循環的觸發條件，
+  這種節會整行消失，孔數、素材與時間全部少報。
+- `R04`（無小數點）也查 `A`，但單位是**度**不是 mm：DPI=0 時 `A90` 讀成 0.09 度，分度等於沒做，
+  所有角度的加工會疊在同一面上。訊息要講「度」。
+- `Run.rotary`（`RotarySummary`）：`used` / `axis` / `mode` / `angles` / `rotateLines` / `simLines`。
+  `mode` 的判定：**只有 `linear`／`arc` 動作帶 `aFrom`**（XYZ 與 A 真的同時進給）才算 `simultaneous`。
+  `G1` 模態下單獨轉 A（`G1A90.F500.`）是旋轉進給，路徑上仍然是分度，危不危險交給 R37 的刀尖高度那條判；
+  固定循環的「轉到位再鑽」更是分度。判太寬的話整支程式會被標成「畫不出來」，把真正的分度資訊蓋掉。
+- `rotateLines` 長度 0（寫了 `A0.` 但從頭到尾沒轉）→ **路徑完全正確，一則提醒都不准出**。
+  現場的三軸程式就是這樣寫的。
+
+### 13.4 R37「第四軸（A）」
+
+`phase: 'run'`。`rotary.used` 且 `rotateLines` 非空才動作。
+
+| 子檢查 | 嚴重度 | 說明 |
+|---|---|---|
+| 總體標示 | warning | 分度：「路徑是照工件不轉畫的」；連續四軸：「本工具畫不出來」。`detail` 要分別列出「仍然有效」與「不要採信」的項目 |
+| 轉動時刀尖太低 | error / warning | 門檻是素材頂面；刀尖 Z < 0 → error，0 ≤ Z ≤ 頂面 → warning。`hole` 只看 `from.z`（`to.z` 是退刀後高度，不是轉動當下的高度）。G99 分度（只退到 R 點就轉）要在 `detail` 裡點名 |
+| 補正中轉 A | error | G41/G42 生效中轉動，補正方向會跟著錯（PS0041） |
+| 結束沒回 A0 | warning | A 是模態的，M30 不會歸零，下一支程式整批分度偏掉 |
+| 分度順序 | info | 「A0（第 3 行）→ A90（第 4 行）→ …」，每一段是一個獨立加工面 |
+
+**R19 的連鎖修正**：孔位重複的比對 key 要含角度（`rotary.used && rotateLines` 非空時）。
+同一個 XY 在不同角度是圓周上不同的孔，不是重複——不修的話一支正常的四軸分度程式會冒出一整排假 warning。
+
+### 13.5 UI
+
+- 頂列第三條橫幅 `rotaryBanner`（`nc-banner-warn`，點一下跳到錯誤清單）。
+  這條最不能省：現場多半是先看圖才看清單，圖旁邊沒有這句話等於默認那張圖可以信。
+- `panels.modal` 在 A ≠ 0 時多列一行「第四軸 A__°」。恆為 0 的三軸程式不列，免得變成雜訊。
+
+### 13.6 本版沒做、下一版再看
+
+1. **層次二（分度視圖）**：需要 `settings.rotary.center`（迴轉中心在工件座標的 Y/Z）。
+   照這台的裝夾慣例，預設值是 Y0/Z0 對到夾頭中心線、X0 在工件端面，做成設定項讓現場修正。
+   還缺一支**現場真的跑過的四軸程式**當 golden 驗收基準——`private/T.NC` 是隨手寫的測試檔
+   （`O0000`、程式名 `(T)`、`Z-1..` 兩個小數點，而且 XY 與 A 同時變化，對照實際裝夾說不通），
+   它只能驗「A 有沒有被讀進來」，驗不了座標轉換。
+2. **分度前的夾緊／鬆開**（M10/M11 或 M50/M51，依機台廠而異）：要做成 `settings.rotary.clampM`，
+   沒設定就不檢查。硬轉會過載，是真實風險，但 M 碼不確定就檢查一定誤報。
+3. **A 軸行程限制**：`settings.rotary.limits`。無限旋轉的分度盤不需要，有限行程的搖籃才要。
+4. **`G07.1` 圓筒插補**：目前在 `UNSUPPORTED_G` 裡標 warning 不模擬，維持。
