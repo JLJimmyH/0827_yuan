@@ -376,7 +376,6 @@
       snapshotIndex: null,
       mode: 'top',
       section: 0,
-      sectionAxis: null,        // 最近用過的剖面模式（俯視時畫指示線）
       hlLine: null,
       hlTool: null,
       // rotary = 工件轉動時刀的相對軌跡。預設關（見 view3d 的同名開關）。
@@ -770,17 +769,6 @@
       ctx.beginPath(); ctx.arc(ox, oy, 3, 0, TAU); ctx.stroke();
     }
 
-    function drawSectionIndicator() {
-      if (!S.sectionAxis) return;
-      const [px, py, pw, ph] = plotRect();
-      ctx.strokeStyle = C.section; ctx.lineWidth = 1; ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      if (S.sectionAxis === 'sectionX') { const [sx] = toScreen(S.section, 0); ctx.moveTo(sx, py); ctx.lineTo(sx, py + ph); }
-      else { const [, sy] = toScreen(0, S.section); ctx.moveTo(px, sy); ctx.lineTo(px + pw, sy); }
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
     function drawHoleMarker(seg, ax, ay, drawn) {
       const key = `${seg.line}:${Math.round(seg.from.x * 1000)},${Math.round(seg.from.y * 1000)}`;
       if (drawn.has(key)) return;
@@ -900,7 +888,6 @@
       if (S.visible.stock) { if (rot) drawStockTopRotary(); else drawStockTop(); }
       drawGrid();
       drawOriginTop();
-      drawSectionIndicator();
       if (rot) { drawSegmentsTopRotary(); drawHighlightTopRotary(); }
       else { drawSegmentsTop(); drawHighlightTop(); }
     }
@@ -1650,16 +1637,12 @@
       setMode(m) {
         if (!MODES.includes(m)) throw new Error(`未知的視圖模式：${m}`);
         S.mode = m;
-        // 只有剖面模式才記成「最近用過的剖面」（俯視的剖面指示線靠它）；展開圖不是剖面
-        if (m === 'sectionX' || m === 'sectionY') S.sectionAxis = m;
         const V = curView();
         if (!V || V.empty) S.needFit = true;
         requestRender();
         return api;
       },
       getMode() { return S.mode; },
-      /** 剖面用的軸 'x'|'y'（俯視時是「最近用過的那一個」，還沒用過 → null） */
-      getSectionAxis() { return S.sectionAxis === 'sectionX' ? 'x' : S.sectionAxis === 'sectionY' ? 'y' : null; },
       setSection(v) { S.section = Number(v) || 0; requestRender(); return api; },
       getSection() { return S.section; },
       /** 顯示第 i 個 snapshot 的高度（null → 最終高度） */

@@ -162,7 +162,7 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 ## 8. UI（`js/ui/*.js`）
 
 - `editor.js` — `NC.ui.createEditor(container) → Editor`：textarea + 左側 gutter（行號、錯誤標記）+ 右側行旁資訊欄（每行執行後 `G0/G1 · G90/91 · G41 D · F · Z`，由 app 提供 `lineInfo(line) → string`）；`setText(text)`, `getText()`, `onChange(cb)`（300 ms debounce）, `setDiagnostics(diags)`, `setLineInfo(fn)`, `highlightLine(n)`, `scrollToLine(n)`, `onCursorLine(cb)`, `getSelectionLines() → [a,b]`, `replaceLines(a,b,text)`。捲動同步：gutter/info 欄用同一個 scrollTop。折疊功能本版不做。
-- `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY'|'unroll')`, `setSection(v)`, `getSectionAxis() → 'x'|'y'|null`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。第四軸的三張圖（俯視／剖面 X／剖面 Y）改畫在工件座標上，見 §13.7。
+- `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY'|'unroll')`, `setSection(v)`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。第四軸的三張圖（俯視／剖面 X／剖面 Y）改畫在工件座標上，見 §13.7。
 - `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, onChange})`、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
 - `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）與設定；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌四支程式文字，由整合者用腳本產生）。
 - `index.html` — 版面：頂列工具列；左 45% 編輯器（上）+ 模態面板（下）；右 55% 視圖（上，含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選）+ 分頁面板（刀具表 / 錯誤清單 / 作業摘要 / 素材與設定）。視圖區本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
@@ -187,12 +187,21 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 - 版面全部在 CSS：`.app-view-split.is-split` 才會出現分隔線，左半邊寬度是 `--view-split`。
   兩塊的 `width:100%` 由 flex-basis 蓋掉（列方向的 flex 容器裡 flex-basis 勝過 width）。
 - **模式 `3d` 不並排**（左邊沒有東西好放），**`unroll` 不剖切**（展開圖不是剖面）。
-- 3D 的剖面由 `view3d.setSection({axis, value, clip})` 控制，位置就是剖面滑桿的值；
-  俯視模式也會標平面（跟著 2D 那條剖面指示線），但**不剖開**——左邊畫的是俯視、
-  右邊卻切一半的話，兩張圖對不起來。
-- **切掉的永遠是相機那一側**（`clipPlaneFor` 依 `eyePos()` 決定法線方向），所以不管把工件
-  轉到哪個角度，斷面一定朝著人。剖切時關掉背面剔除，背面在著色器裡翻過來、混上 `uCut`
+- **剖面只屬於 `sectionX` / `sectionY`**（`app.sectionMode()`）。俯視就是從上往下看整塊成品、
+  展開圖是攤平的表面，兩者都沒有「切在哪一刀」這回事——剖面滑桿停用、2D 不畫指示線、
+  3D 不畫平面、「3D 剖切」勾選框也收起來。早期版本在俯視上留了一條剖面指示線，
+  現場回報那條線只會讓人以為俯視也在切東西（「他也不需要剖面 X 軸，畢竟他就只是要上往下看」）。
+- 3D 的剖面由 `view3d.setSection({axis, value, clip})` 控制，位置就是剖面滑桿的值。
+- **切掉的原則上是相機那一側**（`clipPlaneFor` 依 `eyePos()` 決定法線），所以不管把工件
+  轉到哪個角度，斷面都朝著人。剖切時關掉背面剔除，背面在著色器裡翻過來、混上 `uCut`
   當斷面色——不這樣做會看到一層被光打反的空殼。
+  **但剖面拉到端面附近時「相機那一側」可能就是整個工件**，照切下去畫面會整個空掉
+  （現場回報「轉到一定角度他就消失」）。所以留下來的厚度不到 `CLIP_KEEP_MIN`（工件在該軸
+  跨距的 20%）時改切另一邊：斷面背對相機，但工件還在，轉一下就看得到。
+- 平面大小與上面那個 20% 都用 **`solidBounds()`（工件包絡）**，不是 `sceneBounds()`——
+  後者含刀具路徑（換刀點在 Z150），平面會被撐成一大片、看起來像切歪了。
+- **相機仰角開到 ±89°**（`EL_MIN`/`EL_MAX`）。四軸的工件是躺著的圓棒、孔分佈在整個圓周，
+  舊的 −5° 下限會讓下半圈永遠是死角。留最後 1° 是因為 up 向量 (0,0,1) 在 ±90° 會退化。
 - 並排／剖切／左右比例存在 `SETTINGS_KEY` 的 `view` 欄（機台層級的版面偏好，
   不是 `Settings`，不進 core）。網址參數 `split=0`、`clip=0` 可以關掉，方便截圖。
 - WebGL 開不起來時 `ensureView3D()` 回 null，並排開關自動取消勾選並停用，2D 照常。

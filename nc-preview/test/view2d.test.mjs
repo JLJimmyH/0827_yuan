@@ -408,9 +408,9 @@ test('sectionY 模式：投影落在剖面帶內的段並可點選', () => {
   c.fire('mousedown', { clientX: sx, clientY: sy, button: 0 });
   c.fire('mouseup', { clientX: sx, clientY: sy, button: 0 });
   assert.deepEqual(calls, [20]);
-  // 回俯視會畫剖面指示線（橘色虛線）
+  // 俯視就是從上往下看整塊成品，不該再畫剖面指示線（現場：「他也不需要剖面 X 軸」）
   view.setMode('top'); c.ctx.ops.length = 0; view.render();
-  assert.ok(strokes(c).some((o) => o.stroke === '#ff9500' && o.dash.length === 2));
+  assert.ok(!strokes(c).some((o) => o.stroke === '#ff9500'), '俯視不畫剖面指示線');
   assert.throws(() => view.setMode('side'), /未知的視圖模式/);
 });
 
@@ -612,13 +612,3 @@ test('四軸剖面 Y：畫成沿軸向的縱剖面，HUD 標明是縱剖面', ()
   assert.ok(c.ctx.ops.some((o) => o.op === 'fill' && o.fill === 'rgba(70,120,210,0.28)'), '材料要填色');
 });
 
-test('剖面軸：俯視時回報最近用過的那一軸，沒用過是 null', () => {
-  const { view } = makeView(makeData());
-  assert.equal(view.getSectionAxis(), null);
-  view.setMode('sectionY');
-  assert.equal(view.getSectionAxis(), 'y');
-  view.setMode('top');
-  assert.equal(view.getSectionAxis(), 'y', '俯視沿用最近的剖面軸（剖面指示線就畫在那裡）');
-  view.setMode('sectionX');
-  assert.equal(view.getSectionAxis(), 'x');
-});

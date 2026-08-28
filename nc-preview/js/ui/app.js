@@ -938,8 +938,20 @@
     let snapshotTouched = false;
     let snapshotAfterOp = null;   // 使用者選的「第幾把刀之後」（afterOpIndex），null = 最終
     let snapshotOpCount = 0;   // 這一輪模擬總共有幾個作業（快照可能比它少，見 applySnapshot）
+    /**
+     * 剖面滑桿只有在剖面模式才有意義。俯視就是從上往下看整塊成品，
+     * 沒有「切在哪一刀」這回事；展開圖與 3D 同理。
+     */
+    function sectionMode() { return viewMode === 'sectionX' || viewMode === 'sectionY'; }
+
     function syncSectionRange(stock) {
-      const mode = view.getMode();
+      if (!sectionMode()) {
+        el.rngSection.disabled = true;
+        el.secVal.textContent = '—';
+        syncSection3D();
+        return;
+      }
+      const mode = viewMode;
       const axis = mode === 'sectionY' ? 'y' : 'x';
       const lo = Math.floor(stock.min[axis]);
       const hi = Math.ceil(stock.max[axis]);
@@ -1232,7 +1244,7 @@
       }
       if (!hit) return false;
       viewMode = mode;
-      el.rngSection.disabled = mode === '3d' || mode === 'unroll' || !state.result;
+      el.rngSection.disabled = !sectionMode() || !state.result;
       if (mode !== '3d') {
         view.setMode(mode);
         if (state.result) syncSectionRange(state.result.stock);
@@ -1268,7 +1280,7 @@
         el.chkSplit.disabled = true;
         el.lblSplit.title = '這個瀏覽器／裝置開不了 WebGL，沒有 3D 可以並排';
       }
-      show(el.lblClip, split);
+      show(el.lblClip, split && sectionMode());
       if (show3d && v3) {
         // 只有剛建好的才補餵資料——setData 會整組重建網格，每按一次模式鈕就重建太貴了
         // （平常的資料更新走 refresh() 的 eachView）
@@ -1279,18 +1291,13 @@
       syncSection3D();
     }
 
-    /** 把左邊那張剖面的位置轉成 3D 的剖面平面；不是剖面模式就關掉 */
+    /** 把左邊那張剖面的位置轉成 3D 的剖面平面；不是剖面模式就整組關掉 */
     function syncSection3D() {
       if (!view3d) return;
-      const m = view.getMode();
-      const isSection = m === 'sectionX' || m === 'sectionY';
-      // 俯視也有一條剖面指示線（最近用過的那一軸），3D 跟著標同一個位置，但不剖開——
-      // 左邊畫的是俯視，右邊卻切一半，兩張圖會對不起來。
-      const axis = isSection ? (m === 'sectionX' ? 'x' : 'y')
-        : (m === 'top' ? view.getSectionAxis() : null);
-      const on = axis && viewMode !== '3d' && viewMode !== 'unroll' && el.view3dHost && !el.view3dHost.classList.contains('nc-hidden');
+      const shown = el.view3dHost && !el.view3dHost.classList.contains('nc-hidden');
+      const on = sectionMode() && shown;
       view3d.setSection(on
-        ? { axis, value: Number(el.rngSection.value), clip: isSection && state.viewPref.clip }
+        ? { axis: viewMode === 'sectionX' ? 'x' : 'y', value: Number(el.rngSection.value), clip: state.viewPref.clip }
         : { axis: null });
     }
 
@@ -1489,12 +1496,12 @@
       }
       if (p.mode) setViewMode(p.mode); else applyViewLayout({ fit3d: true });
       if (p.tab) selectTab(p.tab);
-      if (p.section !== undefined && p.section !== '' && Number.isFinite(Number(p.section))) {
+      if (p.section !== undefined && p.section !== '' && Number.isFinite(Number(p.section)) && sectionMode()) {
         sectionTouched = true;
         const v = Number(p.section);
         el.rngSection.value = String(v);
         view.setSection(v);
-        el.secVal.textContent = (view.getMode() === 'sectionY' ? 'Y' : 'X') + fmt(v, 2);
+        el.secVal.textContent = (viewMode === 'sectionY' ? 'Y' : 'X') + fmt(v, 2);
         syncSection3D();
       }
       return loaded;

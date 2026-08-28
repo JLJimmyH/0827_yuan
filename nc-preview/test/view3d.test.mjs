@@ -772,3 +772,30 @@ test('clipPlaneFor：切掉的永遠是相機那一側，斷面才看得到', ()
   assert.deepEqual(V.clipPlaneFor('y', -2, [0, 50, 0]), [0, 1, 0, -2]);
   assert.equal(V.clipPlaneFor('z', 0, [0, 0, 1]), null);
 });
+
+test('clipPlaneFor：剖面拉到端面時不把工件切光（現場的「轉到一定角度就消失」）', () => {
+  const range = [-28, 28];   // 工件在 X 上的範圍
+  // 剖面就在最左端、相機在 +X：照相機規則會丟掉 x > -28 = 整根工件 → 要翻過來
+  const a = V.clipPlaneFor('x', -28, [100, 0, 0], range);
+  assert.deepEqual(a, [-1, 0, 0, 28], '改切左邊那一小片，工件留著');
+  assert.ok(!(0 * a[0] > a[3]), '工件中段留著（沒有被切光）');
+  // 剖面在中間：留下來夠多，維持「切掉相機那一側」
+  const b = V.clipPlaneFor('x', 0, [100, 0, 0], range);
+  assert.deepEqual(b, [1, 0, 0, 0]);
+  assert.deepEqual(V.clipPlaneFor('x', 0, [-100, 0, 0], range), [-1, 0, 0, -0]);
+  // 沒給 range 就維持純相機規則（舊行為）
+  assert.deepEqual(V.clipPlaneFor('x', -28, [100, 0, 0]), [1, 0, 0, -28]);
+});
+
+test('solidBounds：只看工件，不把換刀點那種高處的路徑算進去', () => {
+  const sim = flatSim(11, 11, 1);
+  const stock = { min: { x: -0.5, y: -0.5, z: -10 }, max: { x: 10.5, y: 10.5, z: 0 }, fixtures: [] };
+  const segs = [{ id: 1, line: 1, tool: 1, kind: 'rapid', from: { x: 0, y: 0, z: 150 }, to: { x: 5, y: 5, z: 150 } }];
+  const b = V.solidBounds({ sim, stock, segments: segs });
+  assert.equal(b.max.z, 0, 'Z150 的換刀點不算');
+  assert.equal(b.min.x, -0.5);
+  assert.equal(b.max.x, 10.5);
+  // 沒有 sim 也沒有素材時退回場景包絡（總比沒有好）
+  const b2 = V.solidBounds({ sim: null, stock: null, segments: segs });
+  assert.ok(b2 == null || Number.isFinite(b2.max.z));
+});

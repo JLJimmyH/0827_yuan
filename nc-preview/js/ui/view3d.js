@@ -51,7 +51,13 @@
   const ARC_TOL = 0.05;   // 圓弧細分弦差 mm（與 geometry.sampleSegment 預設一致）
   const DEFAULT_MAX_VERTICES = 4000000;
   const MAX_TOP_SLOPE = 0.6;   // 頂面法線梯度上限（避免階梯處法線爆掉）
-  const EL_MIN = -5 * DEG, EL_MAX = 89 * DEG;
+  // 仰角上下限。四軸的工件是一根躺著的圓棒，孔分佈在整個圓周上——把仰角卡在 −5° 會讓
+  // 下半圈永遠是死角（現場回報「有 A 軸的物件看了會有死角」）。放到 ±89°：正上方與正下方
+  // 都看得到，只留最後 1° 不給，因為 up 向量（0,0,1）在正負 90° 剛好退化、lookAt 會算不出來。
+  const EL_MIN = -89 * DEG, EL_MAX = 89 * DEG;
+  // 剖切至少要留下工件的多少比例。剖面拉到端面附近時，「相機那一側」可能就是整根工件，
+  // 照切下去畫面會整個空掉（現場回報「轉到一定角度他就消失」）——這時候改切另一邊。
+  const CLIP_KEEP_MIN = 0.2;
 
   function hexRgb(hex) {
     const s = String(hex).replace('#', '');
@@ -940,16 +946,67 @@
   }
 
   /**
+   * 實體（成品網格／素材）的包絡。剖面平面的大小與剖切的「留多少」都要用它，
+   * **不能用 `sceneBounds`**——那裡面含刀具路徑（換刀點在 Z150），平面會被撐成一大片、
+   * 看起來像切歪了，剖切要留多少也會算錯。
+   */
+  function solidBounds(data) {
+    const sim = data && data.sim;
+    const st = data && data.stock;
+    let b = null;
+    const ext = (x0, y0, z0, x1, y1, z1) => {
+      if (!b) b = { min: { x: x0, y: y0, z: z0 }, max: { x: x1, y: y1, z: z1 } };
+      else {
+        b.min.x = Math.min(b.min.x, x0); b.min.y = Math.min(b.min.y, y0); b.min.z = Math.min(b.min.z, z0);
+        b.max.x = Math.max(b.max.x, x1); b.max.y = Math.max(b.max.y, y1); b.max.z = Math.max(b.max.z, z1);
+      }
+    };
+    if (sim && sim.cylinder && sim.radius > 0) {
+      const c = sim.cellX || sim.cell;
+      const cy = (sim.center && sim.center.y) || 0, cz = (sim.center && sim.center.z) || 0;
+      ext(sim.origin.x - c / 2, cy - sim.radius, cz - sim.radius,
+        sim.origin.x + (sim.nx - 0.5) * c, cy + sim.radius, cz + sim.radius);
+    } else {
+      if (sim && sim.nx > 0) {
+        const h = sim.cell / 2;
+        ext(sim.origin.x - h, sim.origin.y - h, sim.floorZ,
+          sim.origin.x + (sim.nx - 0.5) * sim.cell, sim.origin.y + (sim.ny - 0.5) * sim.cell, sim.floorZ);
+      }
+      // 三軸的高度圖只給得出 floorZ，頂面要靠素材
+      if (st) ext(st.min.x, st.min.y, st.min.z, st.max.x, st.max.y, st.max.z);
+    }
+    if (!b) return sceneBounds(data);
+    if (!(b.max.z - b.min.z > 1e-6)) {
+      const sb = sceneBounds(data);
+      if (sb) { b.min.z = sb.min.z; b.max.z = sb.max.z; }
+    }
+    return b;
+  }
+
+  /**
    * 剖切平面 [nx, ny, nz, d]：著色器丟掉 `dot(pos, n) > d` 的片段。
-   * 法線朝**相機那一側**——不管把工件轉到哪個角度，被切掉的永遠是擋住斷面的那半邊，
+   *
+   * 法線原則上朝**相機那一側**——不管把工件轉到哪個角度，被切掉的都是擋住斷面的那半邊，
    * 所以拖剖面滑桿的時候一定看得到剛切出來的那個面。
+   *
+   * 但剖面拉到工件端面附近時，「相機那一側」可能就是整根工件，照切下去畫面會整個空掉。
+   * 所以給了 `range`（工件在這一軸的範圍）時會檢查留下來的厚度：不到 `CLIP_KEEP_MIN`
+   * 就改切另一邊——斷面雖然背對相機，至少工件還在，轉一下就看得到。
+   *
    * @param {'x'|'y'} axis
    * @param {number[]} eye 相機位置
+   * @param {number[]} [range] 工件在這一軸的 [min, max]
    */
-  function clipPlaneFor(axis, value, eye) {
+  function clipPlaneFor(axis, value, eye, range) {
     if ((axis !== 'x' && axis !== 'y') || !Number.isFinite(value)) return null;
     const k = axis === 'x' ? 0 : 1;
-    const sign = (eye && eye[k] < value) ? -1 : 1;
+    let sign = (eye && eye[k] < value) ? -1 : 1;
+    if (range && Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0]) {
+      const span = range[1] - range[0];
+      // sign > 0 → 丟掉 p > value，留下 range[0]…value；sign < 0 → 留下 value…range[1]
+      const keep = sign > 0 ? (value - range[0]) : (range[1] - value);
+      if (keep < span * CLIP_KEEP_MIN) sign = -sign;
+    }
     return axis === 'x' ? [sign, 0, 0, sign * value] : [0, sign, 0, sign * value];
   }
 
@@ -959,7 +1016,7 @@
     toolColor, hexRgb, mat4, mat4Mul, mat4Perspective, mat4LookAt, projectPoint, distPointSeg2D,
     resolveDownsample, downsampleHeights, buildMesh, buildMeshAsync, planChunks,
     updateHeights, canUpdateHeights, arcSteps, arcPoints, buildPathLines, buildStockLines, buildAxesLines, sceneBounds,
-    buildCylinderLines, cylinderOf, rotarySampler, buildCylinderMesh,
+    buildCylinderLines, cylinderOf, rotarySampler, buildCylinderMesh, solidBounds,
   };
   NC.ui.view3d = Object.assign(NC.ui.view3d || {}, view3dUtil);
 
@@ -1176,6 +1233,7 @@
       // 剖面：axis 為 null 時整組不畫。clip = 把靠相機那半邊切掉，直接看斷面。
       section: { axis: null, value: 0, clip: false },
       sectionFillBuf: null, sectionEdgeBuf: null,
+      sectionRange: null,   // 工件在剖面軸上的範圍（剖切要靠它判斷會不會把工件切光）
       zRange: [0, -10],
       building: false, buildToken: 0, buildProgress: 1,
       pickCb: null, progressCb: null,
@@ -1374,10 +1432,14 @@
     function rebuildSection() {
       freeLineBuf(S.sectionFillBuf); freeLineBuf(S.sectionEdgeBuf);
       S.sectionFillBuf = S.sectionEdgeBuf = null;
+      S.sectionRange = null;
       const sec = S.section;
       if (!sec.axis) return;
-      const plane = buildSectionPlane(sceneBounds(S.data), sec.axis, sec.value);
+      // 用工件的包絡、不是整個場景：含刀具路徑的話平面會被撐成一大片，看起來像切歪了
+      const b = solidBounds(S.data);
+      const plane = buildSectionPlane(b, sec.axis, sec.value);
       if (!plane) return;
+      S.sectionRange = sec.axis === 'x' ? [b.min.x, b.max.x] : [b.min.y, b.max.y];
       S.sectionFillBuf = makeLineBuf(plane.fill);
       S.sectionEdgeBuf = makeLineBuf(plane.edge);
     }
@@ -1470,7 +1532,7 @@
       gl.uniform3f(ML.uDeep, DEEP_RGB[0] / 255, DEEP_RGB[1] / 255, DEEP_RGB[2] / 255);
       gl.uniform3f(ML.uFixture, FIXTURE_RGB[0] / 255, FIXTURE_RGB[1] / 255, FIXTURE_RGB[2] / 255);
       gl.uniform2f(ML.uZRange, S.zRange[0], S.zRange[1]);
-      const clip = S.section.clip ? clipPlaneFor(S.section.axis, S.section.value, eyePos()) : null;
+      const clip = S.section.clip ? clipPlaneFor(S.section.axis, S.section.value, eyePos(), S.sectionRange) : null;
       gl.uniform1f(ML.uClipOn, clip ? 1 : 0);
       gl.uniform4f(ML.uClip, clip ? clip[0] : 0, clip ? clip[1] : 0, clip ? clip[2] : 0, clip ? clip[3] : 1e9);
       gl.uniform3f(ML.uCut, CUT_RGB[0] / 255, CUT_RGB[1] / 255, CUT_RGB[2] / 255);
