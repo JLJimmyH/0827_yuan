@@ -602,6 +602,118 @@
   }
 
   /**
+   * 圓柱高度圖 → 三角網格（純函式，不碰 WebGL）。
+   *
+   * 素材是 (X, 弧長) → 半徑 的格網（simulation.createCylinder）。每個格點放到 3D：
+   *   θ = 弧長 / 半徑 ;  x = 軸向 ;  y = cy + r·sinθ ;  z = cz + r·cosθ
+   * 周向是循環的，所以最後一圈接回第 0 圈（不重複頂點）。
+   * 法線用高度梯度算：徑向再減掉沿軸向與周向的斜率，孔壁的明暗才不會糊成一片。
+   *
+   * 兩端加封口（圓面），否則從側面看得進圓棒內部。
+   * @param {Object} sim  cylinder 模式的 SimResult 或 sim
+   * @param {{height?:Float32Array, downsample?:number}} [opts]
+   */
+  function buildCylinderMesh(sim, opts) {
+    opts = opts || {};
+    const H = opts.height || sim.height;
+    const k = Math.max(1, Math.floor(opts.downsample > 0 ? opts.downsample : 1));
+    const nx0 = sim.nx, ny0 = sim.ny;
+    const nx = Math.floor((nx0 - 1) / k) + 1;
+    const ny = Math.max(3, Math.floor(ny0 / k));
+    const cellX = sim.cellX * k;
+    const cellY = sim.circumference / ny;
+    const R = sim.radius;
+    const cy = (sim.center && sim.center.y) || 0;
+    const cz = (sim.center && sim.center.z) || 0;
+    const at = (ix, iy) => {
+      const sx = Math.min(nx0 - 1, ix * k);
+      const sy = ((Math.round(iy * ny0 / ny) % ny0) + ny0) % ny0;
+      return H[sy * nx0 + sx];
+    };
+    const nSide = nx * ny;
+    const nCap = ny + 1;                    // 每個端面：圓心 + 一圈
+    const nv = nSide + nCap * 2;
+    const positions = new Float32Array(nv * 3);
+    const normals = new Float32Array(nv * 3);
+    let rMin = Infinity, rMax = -Infinity;
+    const th = new Float64Array(ny), sn = new Float64Array(ny), cs = new Float64Array(ny);
+    for (let iy = 0; iy < ny; iy++) {
+      th[iy] = iy * cellY / R;
+      sn[iy] = Math.sin(th[iy]);
+      cs[iy] = Math.cos(th[iy]);
+    }
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const i = iy * nx + ix, o = i * 3;
+        const r = at(ix, iy);
+        if (r < rMin) rMin = r;
+        if (r > rMax) rMax = r;
+        positions[o] = sim.origin.x + ix * cellX;
+        positions[o + 1] = cy + r * sn[iy];
+        positions[o + 2] = cz + r * cs[iy];
+        // 梯度法線：軸向與周向的半徑斜率
+        const rx0 = at(Math.max(0, ix - 1), iy), rx1 = at(Math.min(nx - 1, ix + 1), iy);
+        const ry0 = at(ix, (iy - 1 + ny) % ny), ry1 = at(ix, (iy + 1) % ny);
+        const dr_dx = (rx1 - rx0) / (2 * cellX);
+        const dr_ds = (ry1 - ry0) / (2 * cellY);
+        // 徑向 − 軸向斜率 − 周向斜率（切向 = (0, cos, −sin)）
+        let nxv = -dr_dx;
+        let nyv = sn[iy] - dr_ds * cs[iy];
+        let nzv = cs[iy] + dr_ds * sn[iy];
+        const len = Math.hypot(nxv, nyv, nzv) || 1;
+        normals[o] = nxv / len; normals[o + 1] = nyv / len; normals[o + 2] = nzv / len;
+      }
+    }
+    // 端面（x = 兩端）：圓心 + 一圈，法線沿 ∓X
+    const capBase = [nSide, nSide + nCap];
+    for (let c = 0; c < 2; c++) {
+      const ix = c === 0 ? 0 : nx - 1;
+      const x = sim.origin.x + ix * cellX;
+      const nsign = c === 0 ? -1 : 1;
+      const b = capBase[c];
+      let o = b * 3;
+      positions[o] = x; positions[o + 1] = cy; positions[o + 2] = cz;
+      normals[o] = nsign; normals[o + 1] = 0; normals[o + 2] = 0;
+      for (let iy = 0; iy < ny; iy++) {
+        const r = at(ix, iy);
+        o = (b + 1 + iy) * 3;
+        positions[o] = x; positions[o + 1] = cy + r * sn[iy]; positions[o + 2] = cz + r * cs[iy];
+        normals[o] = nsign; normals[o + 1] = 0; normals[o + 2] = 0;
+      }
+    }
+    const quads = (nx - 1) * ny;
+    const triCount = quads * 2 + ny * 2;
+    const Idx = nv > 65535 ? Uint32Array : Uint16Array;
+    const indices = new Idx(triCount * 3);
+    let t = 0;
+    for (let iy = 0; iy < ny; iy++) {
+      const iy1 = (iy + 1) % ny;
+      for (let ix = 0; ix + 1 < nx; ix++) {
+        const a = iy * nx + ix, b = iy * nx + ix + 1;
+        const c = iy1 * nx + ix + 1, d = iy1 * nx + ix;
+        indices[t++] = a; indices[t++] = b; indices[t++] = c;
+        indices[t++] = a; indices[t++] = c; indices[t++] = d;
+      }
+    }
+    for (let c = 0; c < 2; c++) {
+      const b = capBase[c];
+      for (let iy = 0; iy < ny; iy++) {
+        const i0 = b + 1 + iy, i1 = b + 1 + ((iy + 1) % ny);
+        if (c === 0) { indices[t++] = b; indices[t++] = i1; indices[t++] = i0; }
+        else { indices[t++] = b; indices[t++] = i0; indices[t++] = i1; }
+      }
+    }
+    return {
+      positions, normals, indices,
+      counts: { vertices: nv, triangles: triCount, indices: indices.length },
+      cylinder: true, nx, ny, downsample: k,
+      zMin: Number.isFinite(rMin) ? cz - R : cz - R,
+      zMax: Number.isFinite(rMax) ? cz + R : cz + R,
+      rMin, rMax, radius: R,
+    };
+  }
+
+  /**
    * 第四軸取樣器：回傳 seg → 工件座標折線的函式；沒有第四軸就回 null。
    * 幾何在 geometry.rotary（core），這裡只是接線。
    */
@@ -730,7 +842,11 @@
     let rz0 = Infinity, rz1 = -Infinity;
     // 第四軸：路徑要換算到工件座標；方塊素材與高度圖在四軸下是錯的模型，不列入取景
     const rotFn = rotarySampler(data && data.rotary, ARC_TOL);
-    const stock = rotFn ? null : (data && data.stock), sim = rotFn ? null : (data && data.sim);
+    const simIn = data && data.sim;
+    // 圓柱素材本身就是工件座標，可以直接用；方塊素材在四軸下是錯的模型，跳過
+    const useCylSim = !!(simIn && simIn.cylinder);
+    const stock = (rotFn && !useCylSim) ? null : (data && data.stock);
+    const sim = (rotFn && !useCylSim) ? null : simIn;
     if (rotFn) {
       const cyl = cylinderOf(data);
       if (cyl.radius > 0) {
@@ -742,7 +858,12 @@
       ext(stock.min.x, stock.min.y, stock.min.z); ext(stock.max.x, stock.max.y, stock.max.z);
       for (const f of stock.fixtures || []) { ext(f.min.x, f.min.y, f.min.z); ext(f.max.x, f.max.y, f.max.z); }
     }
-    if (sim && sim.nx > 0) {
+    if (sim && sim.cylinder) {
+      const r = sim.radius, ccy = (sim.center && sim.center.y) || 0, ccz = (sim.center && sim.center.z) || 0;
+      const x1 = sim.origin.x + (sim.nx - 1) * (sim.cellX || sim.cell);
+      ext(sim.origin.x, ccy - r, ccz - r);
+      ext(x1, ccy + r, ccz + r);
+    } else if (sim && sim.nx > 0) {
       const h = sim.cell / 2;
       ext(sim.origin.x - h, sim.origin.y - h, sim.floorZ);
       ext(sim.origin.x + (sim.nx - 0.5) * sim.cell, sim.origin.y + (sim.ny - 0.5) * sim.cell, sim.floorZ);
@@ -779,7 +900,7 @@
     toolColor, hexRgb, mat4, mat4Mul, mat4Perspective, mat4LookAt, projectPoint, distPointSeg2D,
     resolveDownsample, downsampleHeights, buildMesh, buildMeshAsync, planChunks,
     updateHeights, canUpdateHeights, arcSteps, arcPoints, buildPathLines, buildStockLines, buildAxesLines, sceneBounds,
-    buildCylinderLines, cylinderOf, rotarySampler,
+    buildCylinderLines, cylinderOf, rotarySampler, buildCylinderMesh,
   };
   NC.ui.view3d = Object.assign(NC.ui.view3d || {}, view3dUtil);
 
@@ -1089,9 +1210,20 @@
       const sim = S.data.sim;
       const token = ++S.buildToken;
       freeMesh();
-      // 第四軸：高度圖是 2.5D 的，工件一轉就對不上——畫出來的實體是假的，寧可不畫
-      if (S.data.rotary) { S.building = false; reportProgress(1); requestRender(); return; }
       if (!sim || !S.heightArr) { S.building = false; reportProgress(1); requestRender(); return; }
+      // 圓柱素材（第四軸）：(X, 弧長) → 半徑 的高度圖，一次建完，不用分塊
+      if (sim.cylinder) {
+        S.building = false;
+        const mesh = buildCylinderMesh(sim, { height: S.heightArr, downsample: S.downsampleOpt > 1 ? S.downsampleOpt : 1 });
+        const c = uploadChunk(mesh);
+        if (c) S.meshChunks.push(c);
+        S.meshInfo = { vertices: mesh.counts.vertices, triangles: mesh.counts.triangles, downsample: mesh.downsample, chunks: S.meshChunks.length };
+        updateZRange(mesh.zMin, mesh.zMax);
+        reportProgress(1);
+        if (S.needFit) fit(false);
+        requestRender();
+        return;
+      }
       S.building = true;
       reportProgress(0);
       requestRender();
@@ -1151,9 +1283,12 @@
     }
     function rebuildStock() {
       freeLineBuf(S.stockBuf); S.stockBuf = null;
-      // 四軸的工件是夾在分度頭上的圓棒，用方塊線框畫會完全對不上
+      // 四軸的工件是夾在分度頭上的圓棒，用方塊線框畫會完全對不上。
+      // 已經有圓柱成品網格時線框就多餘了（成品本身就是那根圓棒），只在沒有成品時當佔位。
+      const hasCylMesh = !!(S.data.sim && S.data.sim.cylinder && S.heightArr);
       S.stockBuf = makeLineBuf(S.data.rotary
-        ? buildCylinderLines(cylinderOf(S.data))
+        ? (hasCylMesh ? { positions: new Float32Array(0), colors: new Float32Array(0), vertexCount: 0 }
+          : buildCylinderLines(cylinderOf(S.data)))
         : buildStockLines(S.data.stock));
     }
     function rebuildAxes() {

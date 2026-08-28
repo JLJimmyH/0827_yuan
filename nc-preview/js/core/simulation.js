@@ -60,6 +60,7 @@
    * @returns {Sim}
    */
   function create(stock, cell) {
+    if (stock && stock.kind === 'cylinder') return createCylinder(stock, cell);
     if (!stock || !stock.min || !stock.max) throw new Error('NC.sim.create：需要 stock.min / stock.max');
     cell = (cell > 0) ? cell : 0.5;
     const nx = Math.ceil((stock.max.x - stock.min.x) / cell - 1e-9) + 1;
@@ -88,11 +89,59 @@
       if (top > topZ) topZ = top;
     });
     return {
-      cell, nx, ny, origin, height,
+      cell, cellX: cell, cellY: cell, wrapY: false,
+      nx, ny, origin, height,
       initial: height.slice(),
       floorZ: stock.min.z,
       topZ,
       mask,
+      stock,
+      scenario: null,
+      snapshots: [],
+      events: [],
+      time: { perOp: [], total: 0, pre: 0 },
+    };
+  }
+
+  /**
+   * 圓柱素材（第四軸）。
+   *
+   * 平面加工用 (X, Y) → Z 的高度圖；圓棒加工用 **(X, 弧長) → 半徑**：
+   * 每一格記「工件表面在這裡離軸心多遠」，初始值就是圓棒半徑，刀切過去就把半徑挖低。
+   * 展開之後 (X, 弧長) 也是一個平面、半徑就是「高度」，**和平面高度圖完全同構**，
+   * 所以 cutLine／cutArc／checkRapid 一行都不用改，只多兩件事：
+   *   - 兩個方向的格距不同（周向格距 = 圓周 / 格數），所以有 cellX／cellY
+   *   - 周向是循環的（wrapY），索引要繞回來
+   *
+   * 限制與平面高度圖相同：表達不了側凹（橫向穿孔的內壁那種）。
+   * 對分度鑽孔與軸向銑槽是夠的。
+   *
+   * @param {{kind:'cylinder', radius:number, xMin:number, xMax:number, center?:{y:number,z:number}}} stock
+   */
+  function createCylinder(stock, cell) {
+    const radius = Number(stock.radius);
+    if (!(radius > 0)) throw new Error('NC.sim.create：圓柱素材需要 radius > 0');
+    const xMin = Number(stock.xMin), xMax = Number(stock.xMax);
+    if (!(xMax > xMin)) throw new Error('NC.sim.create：圓柱素材的 xMin/xMax 不合法');
+    cell = (cell > 0) ? cell : 0.5;
+    const center = { y: (stock.center && Number(stock.center.y)) || 0, z: (stock.center && Number(stock.center.z)) || 0 };
+    const nx = Math.ceil((xMax - xMin) / cell - 1e-9) + 1;
+    const circumference = 2 * Math.PI * radius;
+    // 周向格數取整，格距跟著微調成圓周的等分——這樣繞一圈剛好接回原點，不會有半格接縫
+    const ny = Math.max(16, Math.round(circumference / cell));
+    const cellY = circumference / ny;
+    const height = new Float32Array(nx * ny).fill(radius);
+    return {
+      cylinder: true,
+      cell, cellX: cell, cellY, wrapY: true,
+      nx, ny,
+      origin: { x: xMin, y: 0 },
+      height,
+      initial: height.slice(),
+      floorZ: 0,          // 軸心
+      topZ: radius,       // 圓棒表面
+      radius, center, circumference,
+      mask: new Uint8Array(nx * ny),
       stock,
       scenario: null,
       snapshots: [],
@@ -225,23 +274,38 @@
   // 切削：線段（膠囊）
   // 前提：za === zb，或足跡為平面（此時用精確膠囊公式），或呼叫端已把垂直段壓成 za === zb
   // ---------------------------------------------------------------------------
+  /**
+   * 周向（Y／弧長）方向的格索引範圍。
+   * 圓柱素材的 Y 是「繞一圈的弧長」，會循環——所以不夾在 [0, ny-1]，
+   * 讓索引超出去，由呼叫端取模繞回來。整圈以上就直接夾成一圈（再多也是重複蓋同一格）。
+   */
+  function yRange(sim, y0, y1) {
+    const { cellY, ny, origin, wrapY } = sim;
+    let i0 = Math.floor((y0 - origin.y) / cellY);
+    let i1 = Math.ceil((y1 - origin.y) / cellY);
+    if (!wrapY) return [Math.max(0, i0), Math.min(ny - 1, i1)];
+    if (i1 - i0 >= ny) { i0 = 0; i1 = ny - 1; }
+    return [i0, i1];
+  }
+
   function cutLine(sim, ax, ay, bx, by, za, zb, prof, acc) {
-    const { cell, nx, ny, origin, height, mask, floorZ } = sim;
+    const { cellX, cellY, nx, ny, origin, height, mask, floorZ, wrapY } = sim;
     const r = prof.r - XY_TOL, r2 = r * r;
     const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, L = Math.sqrt(L2);
     const constZ = (za === zb) || L < XY_TOL;
     const zLo = Math.min(za, zb);
-    const ix0 = Math.max(0, Math.floor((Math.min(ax, bx) - prof.r - origin.x) / cell));
-    const ix1 = Math.min(nx - 1, Math.ceil((Math.max(ax, bx) + prof.r - origin.x) / cell));
-    const iy0 = Math.max(0, Math.floor((Math.min(ay, by) - prof.r - origin.y) / cell));
-    const iy1 = Math.min(ny - 1, Math.ceil((Math.max(ay, by) + prof.r - origin.y) / cell));
+    const ix0 = Math.max(0, Math.floor((Math.min(ax, bx) - prof.r - origin.x) / cellX));
+    const ix1 = Math.min(nx - 1, Math.ceil((Math.max(ax, bx) + prof.r - origin.x) / cellX));
+    const yr = yRange(sim, Math.min(ay, by) - prof.r, Math.max(ay, by) + prof.r);
+    const iy0 = yr[0], iy1 = yr[1];
     if (ix0 > ix1 || iy0 > iy1) return;
     let removed = 0;
     for (let iy = iy0; iy <= iy1; iy++) {
-      const cy = origin.y + iy * cell;
+      const cy = origin.y + iy * cellY;
       const py = cy - ay;
+      const rowY = wrapY ? (((iy % ny) + ny) % ny) : iy;
       for (let ix = ix0; ix <= ix1; ix++) {
-        const cx = origin.x + ix * cell;
+        const cx = origin.x + ix * cellX;
         const px = cx - ax;
         let t = L2 > 0 ? (px * dx + py * dy) / L2 : 0;
         const tc = t < 0 ? 0 : (t > 1 ? 1 : t);
@@ -259,7 +323,7 @@
           h = za + (zb - za) * s;
         }
         if (h < floorZ) h = floorZ;
-        const idx = iy * nx + ix;
+        const idx = rowY * nx + ix;
         const old = height[idx];
         if (h < old - 1e-7) {
           if (mask[idx]) { acc.fixtureHit = mask[idx]; acc.fixturePos = { x: cx, y: cy, z: old }; continue; }
@@ -268,31 +332,32 @@
         }
       }
     }
-    acc.removed += removed * cell * cell;
+    acc.removed += removed * cellX * cellY;
   }
 
   // ---------------------------------------------------------------------------
   // 切削：圓弧（環帶，固定 Z）
   // ---------------------------------------------------------------------------
   function cutArc(sim, cx0, cy0, R, th0, sweep, cw, z, prof, acc) {
-    const { cell, nx, ny, origin, height, mask, floorZ } = sim;
+    const { cellX, cellY, nx, origin, height, mask, floorZ } = sim;
     const r = prof.r - XY_TOL;
     const dir = cw ? -1 : 1;
     const th1 = th0 + dir * sweep;
     const ax = cx0 + R * Math.cos(th0), ay = cy0 + R * Math.sin(th0);
     const bx = cx0 + R * Math.cos(th1), by = cy0 + R * Math.sin(th1);
     const bb = arcBounds(cx0, cy0, R, th0, sweep, cw);
-    const ix0 = Math.max(0, Math.floor((bb.xmin - prof.r - origin.x) / cell));
-    const ix1 = Math.min(nx - 1, Math.ceil((bb.xmax + prof.r - origin.x) / cell));
-    const iy0 = Math.max(0, Math.floor((bb.ymin - prof.r - origin.y) / cell));
-    const iy1 = Math.min(ny - 1, Math.ceil((bb.ymax + prof.r - origin.y) / cell));
+    const ix0 = Math.max(0, Math.floor((bb.xmin - prof.r - origin.x) / cellX));
+    const ix1 = Math.min(nx - 1, Math.ceil((bb.xmax + prof.r - origin.x) / cellX));
+    const yr = yRange(sim, bb.ymin - prof.r, bb.ymax + prof.r);
+    const iy0 = yr[0], iy1 = yr[1];
     if (ix0 > ix1 || iy0 > iy1) return;
     let removed = 0;
     for (let iy = iy0; iy <= iy1; iy++) {
-      const cy = origin.y + iy * cell;
+      const cy = origin.y + iy * cellY;
       const vy = cy - cy0;
+      const rowY = sim.wrapY ? (((iy % sim.ny) + sim.ny) % sim.ny) : iy;
       for (let ix = ix0; ix <= ix1; ix++) {
-        const cx = origin.x + ix * cell;
+        const cx = origin.x + ix * cellX;
         const vx = cx - cx0;
         const rho = Math.sqrt(vx * vx + vy * vy);
         // 先用環帶粗篩：離圓周太遠就不可能在足跡內
@@ -304,7 +369,7 @@
         if (d >= r) continue;
         let h = prof.kind === FLAT ? z : z + dzOf(prof, d);
         if (h < floorZ) h = floorZ;
-        const idx = iy * nx + ix;
+        const idx = rowY * nx + ix;
         const old = height[idx];
         if (h < old - 1e-7) {
           if (mask[idx]) { acc.fixtureHit = mask[idx]; acc.fixturePos = { x: cx, y: cy, z: old }; continue; }
@@ -313,11 +378,68 @@
         }
       }
     }
-    acc.removed += removed * cell * cell;
+    acc.removed += removed * cellX * cellY;
+  }
+
+  /**
+   * 圓柱模式：把一段（機台座標）映射成展開座標的折線 [{x, s, r}]。
+   *   機台 (x,y,z) + A 角度 → 繞軸心反轉 A → (x, θ, r) → (x, s = θ·R, r)
+   * A 在轉的段映射後是曲線，rotary.samples 已經依角度細分過。
+   */
+  function unrollPoints(sim, seg) {
+    const RG = NC.geometry && NC.geometry.rotary;
+    if (!RG || typeof RG.samples !== 'function') return [];
+    const pw = RG.samples(seg, { center: sim.center, tol: sim.cell / 2 });
+    const k = Math.PI / 180 * sim.radius;
+    const out = [];
+    let prev = null;
+    for (const q of pw) {
+      const u = RG.unrollPoint(q, sim.center);
+      let th = u.theta;
+      // 相鄰取樣點跨過 ±180 時要接起來，否則會在展開圖上憑空多一條橫越整圈的線
+      if (prev != null) {
+        while (th - prev > 180) th -= 360;
+        while (th - prev < -180) th += 360;
+      }
+      prev = th;
+      out.push({ x: u.x, s: th * k, r: u.r });
+    }
+    return out;
+  }
+
+  /** 圓柱模式的切削：映射之後就是一般的平面蓋章 */
+  function cutSegmentCyl(sim, seg, prof) {
+    const acc = { removed: 0, fixtureHit: 0, fixturePos: null };
+    const pts = unrollPoints(sim, seg);
+    const sub = sim.cell / 2;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const L = Math.hypot(b.x - a.x, b.s - a.s);
+      const dr = b.r - a.r;
+      if (L < XY_TOL) {
+        // 原地往中心扎（分度鑽孔）：對齊格點，孔心那格才會剛好等於孔底
+        const rr = Math.min(a.r, b.r);
+        const sx = sim.origin.x + Math.round((a.x - sim.origin.x) / sim.cellX) * sim.cellX;
+        const sy = sim.origin.y + Math.round((a.s - sim.origin.y) / sim.cellY) * sim.cellY;
+        cutLine(sim, sx, sy, sx, sy, rr, rr, prof, acc);
+      } else if (Math.abs(dr) < 1e-9 || prof.kind === FLAT) {
+        cutLine(sim, a.x, a.s, b.x, b.s, a.r, b.r, prof, acc);
+      } else {
+        const n = Math.max(1, Math.ceil(Math.abs(dr) / sub));
+        for (let j = 0; j < n; j++) {
+          const t0 = j / n, t1 = (j + 1) / n;
+          const rr = Math.min(a.r + dr * t0, a.r + dr * t1);
+          cutLine(sim, a.x + (b.x - a.x) * t0, a.s + (b.s - a.s) * t0,
+            a.x + (b.x - a.x) * t1, a.s + (b.s - a.s) * t1, rr, rr, prof, acc);
+        }
+      }
+    }
+    return acc;
   }
 
   /** 對一個切削段蓋章；回傳累積資訊 */
   function cutSegment(sim, seg, prof) {
+    if (sim.cylinder) return cutSegmentCyl(sim, seg, prof);
     const acc = { removed: 0, fixtureHit: 0, fixturePos: null };
     const a = seg.from, b = seg.to;
     const dz = b.z - a.z;
@@ -365,27 +487,33 @@
   // 快速移動碰撞檢查：整段用最低 Z（多軸 G0 各軸獨立速率，路徑不確定 → 保守）
   // ---------------------------------------------------------------------------
   function checkRapid(sim, seg, prof) {
+    if (sim.cylinder) return checkRapidCyl(sim, seg, prof);
+    return checkRapidPlanar(sim, seg, prof);
+  }
+
+  function checkRapidPlanar(sim, seg, prof) {
     const a = seg.from, b = seg.to;
     const minZ = Math.min(a.z, b.z);
     if (minZ + Z_TOL >= sim.topZ) return null; // 高於所有材料／治具，不可能撞
     const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy;
     if (L2 < XY_TOL * XY_TOL && b.z >= a.z) return null; // 純垂直上升：只會離開材料
-    const { cell, nx, ny, origin, height, mask } = sim;
+    const { cellX, cellY, nx, ny, origin, height, mask, wrapY } = sim;
     const r = prof.r - XY_TOL, r2 = r * r;
-    const ix0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - prof.r - origin.x) / cell));
-    const ix1 = Math.min(nx - 1, Math.ceil((Math.max(a.x, b.x) + prof.r - origin.x) / cell));
-    const iy0 = Math.max(0, Math.floor((Math.min(a.y, b.y) - prof.r - origin.y) / cell));
-    const iy1 = Math.min(ny - 1, Math.ceil((Math.max(a.y, b.y) + prof.r - origin.y) / cell));
+    const ix0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - prof.r - origin.x) / cellX));
+    const ix1 = Math.min(nx - 1, Math.ceil((Math.max(a.x, b.x) + prof.r - origin.x) / cellX));
+    const yr = yRange(sim, Math.min(a.y, b.y) - prof.r, Math.max(a.y, b.y) + prof.r);
+    const iy0 = yr[0], iy1 = yr[1];
     if (ix0 > ix1 || iy0 > iy1) return null;
     let worst = null;
     for (let iy = iy0; iy <= iy1; iy++) {
-      const cy = origin.y + iy * cell;
+      const cy = origin.y + iy * cellY;
       const py = cy - a.y;
+      const rowY = wrapY ? (((iy % ny) + ny) % ny) : iy;
       for (let ix = ix0; ix <= ix1; ix++) {
-        const idx = iy * nx + ix;
+        const idx = rowY * nx + ix;
         const hc = height[idx];
         if (hc <= minZ + Z_TOL) continue; // 這格材料比刀底低，連算距離都免了
-        const cx = origin.x + ix * cell;
+        const cx = origin.x + ix * cellX;
         const px = cx - a.x;
         let t = L2 > 0 ? (px * dx + py * dy) / L2 : 0;
         if (t < 0) t = 0; else if (t > 1) t = 1;
@@ -398,6 +526,23 @@
           worst = { x: cx, y: cy, z: hc, toolZ: h, tipZ: minZ, cone: prof.kind !== FLAT, excess, fixture: mask[idx] };
         }
       }
+    }
+    return worst;
+  }
+
+  /**
+   * 圓柱模式的快速移動碰撞檢查。
+   * 映射到展開座標之後，每個小段就是一般的平面問題；整段取最差的一個干涉點。
+   * 回傳的座標換回機台座標的 Z（= 半徑），現場看到的才是熟悉的數字。
+   */
+  function checkRapidCyl(sim, seg, prof) {
+    const pts = unrollPoints(sim, seg);
+    let worst = null;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const fake = { from: { x: a.x, y: a.s, z: a.r }, to: { x: b.x, y: b.s, z: b.r } };
+      const w = checkRapidPlanar(sim, fake, prof);
+      if (w && (!worst || w.excess > worst.excess)) worst = w;
     }
     return worst;
   }
@@ -631,7 +776,10 @@
     sim.removedVolume = removedVolume;
     return {
       scenario,
-      cell: sim.cell, nx: sim.nx, ny: sim.ny, origin: { x: sim.origin.x, y: sim.origin.y },
+      cell: sim.cell, cellX: sim.cellX, cellY: sim.cellY, wrapY: sim.wrapY,
+      nx: sim.nx, ny: sim.ny, origin: { x: sim.origin.x, y: sim.origin.y },
+      cylinder: !!sim.cylinder,
+      radius: sim.radius, center: sim.center, circumference: sim.circumference,
       height: height.slice(),
       floorZ: sim.floorZ,
       snapshots: snapshots.slice(),
@@ -648,7 +796,10 @@
   // ---------------------------------------------------------------------------
   /** 把工件座標換成格索引；超出範圍回 -1 */
   function cellIndex(s, x, y) {
-    const ix = Math.round((x - s.origin.x) / s.cell), iy = Math.round((y - s.origin.y) / s.cell);
+    // cellX/cellY 是圓柱素材才會不同的兩軸格距；舊呼叫端只給 cell，退回去用它
+    const ix = Math.round((x - s.origin.x) / (s.cellX || s.cell));
+    let iy = Math.round((y - s.origin.y) / (s.cellY || s.cell));
+    if (s.wrapY) iy = ((iy % s.ny) + s.ny) % s.ny;   // 圓柱周向是循環的
     if (ix < 0 || iy < 0 || ix >= s.nx || iy >= s.ny) return -1;
     return iy * s.nx + ix;
   }

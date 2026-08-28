@@ -957,7 +957,26 @@
       return out;
     }
 
-    /** 第四軸的剖面素材：圓棒的橫截面（一個圓），不是方塊 */
+    /** 圓柱高度圖在某個 X 位置的截面輪廓 → [{y, z}]（工件座標） */
+    function cylProfile(sim, heightArr, x) {
+      const ix = Math.round((x - sim.origin.x) / sim.cellX);
+      if (!(ix >= 0 && ix < sim.nx)) return null;
+      const cy = (sim.center && sim.center.y) || 0;
+      const cz = (sim.center && sim.center.z) || 0;
+      const out = [];
+      for (let iy = 0; iy < sim.ny; iy++) {
+        const rr = heightArr[iy * sim.nx + ix];
+        const th = iy * sim.cellY / sim.radius;
+        out.push({ y: cy + rr * Math.sin(th), z: cz + rr * Math.cos(th) });
+      }
+      return out;
+    }
+
+    /**
+     * 第四軸的剖面素材：圓棒的橫截面。
+     * 有模擬結果時畫「這個 X 位置實際被挖成什麼樣」（同三軸剖面用 sectionProfile 的做法），
+     * 沒有就退回一個完美圓當佔位。
+     */
     function drawStockSectionRotary() {
       const r = rotaryRadius();
       if (!(r > 0)) return;
@@ -965,9 +984,26 @@
       const V = curView();
       const [cx, cy] = toScreen(c.y || 0, c.z || 0);
       ctx.setLineDash([]);
-      ctx.beginPath(); ctx.arc(cx, cy, r * V.scale, 0, TAU);
-      ctx.fillStyle = C.stockFill; ctx.fill();
-      ctx.strokeStyle = C.stockLine; ctx.lineWidth = 1.5; ctx.stroke();
+      const sim = S.data.sim;
+      const prof = (sim && sim.cylinder && S.heightArr) ? cylProfile(sim, S.heightArr, S.section) : null;
+      if (prof) {
+        ctx.beginPath();
+        for (let i = 0; i < prof.length; i++) {
+          const [sx, sy] = toScreen(prof[i].y, prof[i].z);
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = C.stockFill; ctx.fill();
+        ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
+        // 原始外圓用虛線當參考，一眼看出切掉多少
+        ctx.beginPath(); ctx.arc(cx, cy, sim.radius * V.scale, 0, TAU);
+        ctx.strokeStyle = C.stockLine; ctx.lineWidth = 1; ctx.setLineDash([4, 4]); ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.beginPath(); ctx.arc(cx, cy, r * V.scale, 0, TAU);
+        ctx.fillStyle = C.stockFill; ctx.fill();
+        ctx.strokeStyle = C.stockLine; ctx.lineWidth = 1.5; ctx.stroke();
+      }
       // 迴轉中心的十字：分度加工的一切都繞著它
       ctx.strokeStyle = C.zero; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
       const t = Math.min(r * V.scale, 40) + 8;

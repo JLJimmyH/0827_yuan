@@ -154,7 +154,63 @@
     return { min: { x: -50, y: -50, z: -20 }, max: { x: 50, y: 50, z: 0 }, source: 'estimated', fixtures: [] };
   }
 
+  /**
+   * 第四軸的素材是**圓棒**，不是方塊。
+   * 用 (X, 弧長) → 半徑 的圓柱高度圖（見 simulation.createCylinder），
+   * 那是唯一能表達「圓棒側面被鑽了幾個孔」的 2.5D 模型。
+   * 半徑：使用者填過就用他的，否則推估（取切削段離軸心最遠的距離，落在表面附近）。
+   * 軸向範圍：切削段的 X 加餘量。
+   * @returns {Object|null} 圓柱 stock；不是四軸（或算不出半徑）回 null
+   */
+  function cylinderStock(req, scenarios, order) {
+    const off = scenarios.off;
+    const rot = off && off.run && off.run.rotary;
+    if (!rot || !rot.used || !rot.rotateLines.length) return null;
+    const RG = NC.geometry && NC.geometry.rotary;
+    if (!RG || typeof RG.estimateRadius !== 'function') return null;
+    const cfg = (req.settings && req.settings.rotary) || {};
+    const center = {
+      y: (cfg.center && Number(cfg.center.y)) || 0,
+      z: (cfg.center && Number(cfg.center.z)) || 0,
+    };
+    let radius = Number(cfg.radius) || 0;
+    let source = 'user';
+    if (!(radius > 0)) {
+      const segs = [];
+      for (const sc of order) {
+        const g = scenarios[sc] && scenarios[sc].geometry;
+        if (g && g.segments) segs.push.apply(segs, g.segments);
+      }
+      const est = RG.estimateRadius(segs, { center });
+      if (!est || !(est.radius > 0)) return null;
+      radius = est.radius;
+      source = 'estimated';
+    }
+    let x0 = Infinity, x1 = -Infinity;
+    for (const sc of order) {
+      const g = scenarios[sc] && scenarios[sc].geometry;
+      for (const seg of (g && g.segments) || []) {
+        if (!seg || seg.refReturn || seg.kind === 'rapid') continue;
+        x0 = Math.min(x0, seg.from.x, seg.to.x);
+        x1 = Math.max(x1, seg.from.x, seg.to.x);
+      }
+    }
+    if (!Number.isFinite(x0)) return null;
+    const pad = Math.max(5, (x1 - x0) * 0.15);
+    return {
+      kind: 'cylinder', radius, center,
+      xMin: x0 - pad, xMax: x1 + pad,
+      source,
+      // 讓依賴 min/max 的下游（bounds、素材面板、R20/R33…）仍然拿得到一個包絡盒
+      min: { x: x0 - pad, y: center.y - radius, z: center.z - radius },
+      max: { x: x1 + pad, y: center.y + radius, z: center.z + radius },
+      fixtures: [],
+    };
+  }
+
   function resolveStock(req, scenarios, order, toolTable) {
+    const cyl = cylinderStock(req, scenarios, order);
+    if (cyl) return cyl;
     if (req.stock && req.stock.min && req.stock.max) return normalizeStock(req.stock);
     if (!NC.tools || typeof NC.tools.estimateStock !== 'function') return fallbackStock();
     const runs = order.map((sc) => scenarios[sc] && scenarios[sc].run).filter(Boolean);

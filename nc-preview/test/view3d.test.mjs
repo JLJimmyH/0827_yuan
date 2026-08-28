@@ -647,3 +647,54 @@ test('真實資料 樣本 C：路徑線含補正段，programmed 會被淡化', 
   assert.equal(r.segRanges.length, REAL.segments.length);
   for (const rec of r.segRanges) assert.ok(rec.count >= 2 && rec.first + rec.count <= r.vertexCount);
 });
+
+// ---------------------------------------------------------------------------
+// 圓柱成品網格（第四軸）
+// ---------------------------------------------------------------------------
+function fakeCylSim(radius = 20, nx = 5, ny = 16) {
+  const circumference = 2 * Math.PI * radius;
+  return {
+    cylinder: true, nx, ny,
+    cellX: 1, cellY: circumference / ny, circumference,
+    origin: { x: 0, y: 0 },
+    radius, center: { y: 0, z: 0 },
+    height: new Float32Array(nx * ny).fill(radius),
+    floorZ: 0, topZ: radius,
+  };
+}
+
+test('buildCylinderMesh：頂點落在圓柱面上，周向接得起來', () => {
+  const V3 = NC.ui.view3d;
+  const sim = fakeCylSim(20, 5, 16);
+  const m = V3.buildCylinderMesh(sim);
+  assert.equal(m.cylinder, true);
+  // 側面 + 兩個端面（圓心 + 一圈）
+  assert.equal(m.counts.vertices, 5 * 16 + (16 + 1) * 2);
+  // 每個側面頂點離軸心都是 radius
+  for (let i = 0; i < 5 * 16; i++) {
+    const y = m.positions[i * 3 + 1], z = m.positions[i * 3 + 2];
+    assert.ok(Math.abs(Math.hypot(y, z) - 20) < 1e-4, `頂點 ${i} 不在圓柱面上`);
+  }
+  // 索引都在範圍內
+  for (let i = 0; i < m.indices.length; i++) assert.ok(m.indices[i] < m.counts.vertices);
+});
+
+test('buildCylinderMesh：挖過的格子半徑變小，法線跟著轉', () => {
+  const sim = fakeCylSim(20, 5, 16);
+  sim.height[3 * 5 + 2] = 12;   // 第 3 圈第 2 格挖到剩 12
+  const m = NC.ui.view3d.buildCylinderMesh(sim);
+  const i = 3 * 5 + 2;
+  const y = m.positions[i * 3 + 1], z = m.positions[i * 3 + 2];
+  assert.ok(Math.abs(Math.hypot(y, z) - 12) < 1e-4, '挖過的頂點應該離軸心 12');
+  // 法線是單位向量
+  const n = Math.hypot(m.normals[i * 3], m.normals[i * 3 + 1], m.normals[i * 3 + 2]);
+  assert.ok(Math.abs(n - 1) < 1e-5);
+});
+
+test('buildCylinderMesh：downsample 會減少頂點數', () => {
+  const sim = fakeCylSim(20, 9, 32);
+  const full = NC.ui.view3d.buildCylinderMesh(sim);
+  const half = NC.ui.view3d.buildCylinderMesh(sim, { downsample: 2 });
+  assert.ok(half.counts.vertices < full.counts.vertices);
+  assert.equal(half.downsample, 2);
+});

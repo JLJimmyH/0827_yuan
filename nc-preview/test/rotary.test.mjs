@@ -508,3 +508,87 @@ test('反推中心：三軸程式（沒有鑽孔）回 null', () => {
   const res = full('G0G90G54X0.Y0.Z5.\nG1X50.F200.');
   assert.equal(R.estimateCenter(res.scenarios.off.geometry.segments), null);
 });
+
+// ---------------------------------------------------------------------------
+// 圓柱素材：(X, 弧長) → 半徑 的高度圖
+//
+// 平面高度圖是 (X,Y)→Z；圓棒是 (X, 弧長)→半徑。展開之後兩者同構，
+// 所以 simulation 的切削邏輯完全重用，只多「兩軸格距不同」與「周向循環」兩件事。
+// ---------------------------------------------------------------------------
+const CYL_PROG = [
+  'M6T6(SG-8.5)',
+  'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+  'G98G81Z10.R25.F70M8',
+  'A90.',
+  'A180.',
+  'A270.',
+  'G80',
+  'M9',
+  'G91G28Z0.',
+].join('\n');
+
+function cylSim(cell = 0.5, radius = 20) {
+  return NC.sim.create({ kind: 'cylinder', radius, xMin: -5, xMax: 65, center: { y: 0, z: 0 } }, cell);
+}
+
+test('圓柱素材：格網是 X × 周向，周向格距是圓周的等分', () => {
+  const sim = cylSim(0.5, 20);
+  assert.equal(sim.cylinder, true);
+  assert.equal(sim.wrapY, true);
+  near(sim.circumference, 2 * Math.PI * 20, 1e-9);
+  // 周向格距 × 格數 = 圓周（繞一圈剛好接回原點，沒有半格接縫）
+  near(sim.cellY * sim.ny, sim.circumference, 1e-9);
+  assert.equal(sim.cellX, 0.5);
+  assert.equal(sim.floorZ, 0);      // 軸心
+  assert.equal(sim.topZ, 20);       // 表面
+  // 初始整根都是實心的
+  for (let i = 0; i < sim.height.length; i++) assert.equal(sim.height[i], 20);
+});
+
+test('圓柱素材：四個分度孔各自挖到正確深度，中間沒被誤挖', async () => {
+  const res = NC.analyzeSync({ text: `%\nO1\n${CYL_PROG}\nM30\n%` });
+  const sim = cylSim(0.5, 20);
+  const out = await NC.sim.run(sim, res.scenarios.off, res.toolTable, NC.util.defaultSettings(), {});
+  const k = Math.PI / 180 * 20;   // 角度 → 弧長
+  for (const a of [0, 90, 180, 270]) {
+    near(NC.sim.heightAt(out, 20, a * k), 10, 0.5, `A${a} 應該鑽到剩半徑 10`);
+  }
+  // 沒加工的角度維持原半徑
+  near(NC.sim.heightAt(out, 20, 45 * k), 20, 1e-6);
+  // 沒加工的軸向位置也是
+  near(NC.sim.heightAt(out, 0, 0), 20, 1e-6);
+  assert.ok(out.removedVolume > 0);
+});
+
+test('圓柱素材：周向循環——A0 與 A360 是同一格', () => {
+  const sim = cylSim(0.5, 20);
+  const k = Math.PI / 180 * 20;
+  assert.equal(NC.sim.cellIndex(sim, 20, 0), NC.sim.cellIndex(sim, 20, 360 * k));
+  assert.equal(NC.sim.cellIndex(sim, 20, -90 * k), NC.sim.cellIndex(sim, 20, 270 * k));
+});
+
+test('analyze：四軸程式自動改用圓柱素材，半徑推估', () => {
+  const res = NC.analyzeSync({ text: `%\nO1\n${CYL_PROG}\nM30\n%` });
+  assert.equal(res.stock.kind, 'cylinder');
+  assert.equal(res.stock.source, 'estimated');
+  near(res.stock.radius, 25, 1e-6);   // R 點在 Z25
+  // 包絡盒仍然給得出來（下游的 bounds／面板要用）
+  near(res.stock.min.z, -25, 1e-6);
+  near(res.stock.max.z, 25, 1e-6);
+});
+
+test('analyze：填了直徑就用填的，不再推估', () => {
+  const res = NC.analyzeSync({
+    text: `%\nO1\n${CYL_PROG}\nM30\n%`,
+    settings: Object.assign(NC.util.defaultSettings(), { rotary: { center: { y: 0, z: 0 }, radius: 20 } }),
+  });
+  assert.equal(res.stock.kind, 'cylinder');
+  assert.equal(res.stock.source, 'user');
+  near(res.stock.radius, 20, 1e-6);
+});
+
+test('analyze：三軸程式維持方塊素材', () => {
+  const res = NC.analyzeSync({ text: '%\nO1\nG0G90G54X0.Y0.Z5.\nG1Z-2.F100.\nX50.\nM30\n%' });
+  assert.notEqual(res.stock.kind, 'cylinder');
+  assert.ok(res.stock.min && res.stock.max);
+});

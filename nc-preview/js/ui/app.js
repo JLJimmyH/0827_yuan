@@ -821,12 +821,18 @@
       const n = est ? diags.filter((d) => d.estimatedStock).length : 0;
       show(el.stockBanner, est);
       if (!est) return;
-      const dx = fmt(stock.max.x - stock.min.x, 1);
-      const dy = fmt(stock.max.y - stock.min.y, 1);
-      const dz = fmt(stock.max.z - stock.min.z, 1);
-      el.stockBanner.textContent = `素材為程式推估（${dx}×${dy}×${dz} mm）${n > 0 ? `，${n} 筆判定依此` : ''}`;
-      el.stockBanner.title = '推估素材是「用切削範圍往外擴一個刀半徑」猜出來的，不是真的毛胚。'
-        + '點一下到「素材與設定」填入真實尺寸，這些判定會重算。';
+      let size;
+      if (stock.kind === 'cylinder') {
+        size = `Ø${fmt(stock.radius * 2, 1)} × 長 ${fmt(stock.xMax - stock.xMin, 1)}`;
+      } else {
+        size = `${fmt(stock.max.x - stock.min.x, 1)}×${fmt(stock.max.y - stock.min.y, 1)}×${fmt(stock.max.z - stock.min.z, 1)} mm`;
+      }
+      el.stockBanner.textContent = `素材為程式推估（${size}）${n > 0 ? `，${n} 筆判定依此` : ''}`;
+      el.stockBanner.title = stock.kind === 'cylinder'
+        ? '第四軸的圓棒素材：直徑是「取切削段離軸心最遠的距離」推估出來的，不是量出來的。\n'
+          + '點一下到「素材與設定」→ 第四軸，把實際直徑填進去，成品圖與切深就會準。'
+        : '推估素材是「用切削範圍往外擴一個刀半徑」猜出來的，不是真的毛胚。'
+          + '點一下到「素材與設定」填入真實尺寸，這些判定會重算。';
     }
 
     /**
