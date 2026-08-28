@@ -1037,6 +1037,23 @@
    */
   function estimateRotaryRadius(segments, opts) {
     const center = rotCenter(opts);
+    // 最可信的線索：**真正垂直鑽下去的孔**（XY 不動、Z 在變、而且刀對準軸心）。
+    // 它的起點就是 R 點，落在工件表面上方一點點，是很接近的上界。
+    //
+    // 不能拿「所有切削段離軸心最遠的距離」當推估——刀偏在側邊的那種段
+    // （T.NC 的 X0.Y-21.474 那兩刀），起點離軸心 √(25²+21.5²) ≈ 33，
+    // 但那是刀在旁邊的斜距，不是工件半徑。用它推估會把圓棒撐粗一大圈，
+    // 於是那兩刀變成「整支穿過側邊」，成品圖就開花了。
+    let radial = -Infinity;
+    for (const seg of segments || []) {
+      if (!seg || seg.refReturn || seg.kind !== 'drill') continue;
+      if (Math.abs(seg.to.x - seg.from.x) > EPS || Math.abs(seg.to.y - seg.from.y) > EPS) continue;
+      if (Math.abs(seg.from.y - center.y) > 0.01) continue;   // 刀沒對準軸心 → 不是徑向孔
+      const r = Math.abs(seg.from.z - center.z);
+      if (r > radial) radial = r;
+    }
+    if (radial > 0 && Number.isFinite(radial)) return { radius: radial, source: 'radial' };
+
     let cut = -Infinity, rap = -Infinity;
     for (const seg of segments || []) {
       if (seg.refReturn) continue;
@@ -1066,7 +1083,7 @@
    * @returns {{y:number, consistent:boolean, spread:number, minCutZ:number, holes:number}|null}
    */
   function estimateRotaryCenter(segments) {
-    const ys = [];
+    const list = [];   // 每個徑向下刀段：{line, y, x}
     let minCutZ = Infinity;
     for (const seg of segments || []) {
       if (!seg || seg.refReturn) continue;
@@ -1078,18 +1095,26 @@
       if (seg.kind !== 'drill') continue;
       if (Math.abs(seg.to.x - seg.from.x) > EPS || Math.abs(seg.to.y - seg.from.y) > EPS) continue;
       if (Math.abs(seg.to.z - seg.from.z) < EPS) continue;
-      ys.push(seg.from.y);
+      list.push({ line: seg.line, y: seg.from.y, x: seg.from.x, a: seg.a });
     }
-    if (!ys.length) return null;
-    ys.sort((a, b) => a - b);
+    if (!list.length) return null;
+    const ys = list.map((h) => h.y).sort((a, b) => a - b);
     const spread = ys[ys.length - 1] - ys[0];
     const mid = ys[Math.floor(ys.length / 2)];
+    // 偏離「多數孔所在的那條線」的孔——就是這幾行把刀偏到工件側邊了
+    const off = [];
+    for (const h of list) {
+      const d = h.y - mid;
+      if (Math.abs(d) > 0.01 && !off.some((o) => o.line === h.line)) off.push({ line: h.line, y: h.y, offset: d });
+    }
+    off.sort((a, b) => a.line - b.line);
     return {
       y: mid,
       consistent: spread <= 0.01,
       spread,
       minCutZ: Number.isFinite(minCutZ) ? minCutZ : 0,
-      holes: ys.length,
+      holes: list.length,
+      offLines: off,
     };
   }
 

@@ -1570,14 +1570,22 @@
       const cfg = (settingsOf(ctx).rotary && settingsOf(ctx).rotary.center) || { y: 0, z: 0 };
       const cy = Number(cfg.y) || 0, cz = Number(cfg.z) || 0;
       if (!est.consistent) {
-        out.push(diag('R37', first, 'warning',
-          `這 ${est.holes} 個分度孔不在同一條母線上（Y 座標差了 ${f(est.spread)} mm），不是垂直於工件表面的徑向孔`, {
-            detail: `${A} 軸繞 X 轉的時候，只有「Y 對準迴轉中心線」的那一條母線是垂直於工件表面的。\n`
-              + '這些孔的 Y 不一樣，代表刀是斜著切進圓周的——可能是：\n'
-              + '・工件裝夾的位置和程式假設的不同（對刀的 Y 沒對到中心線）\n'
-              + '・程式本來就是要斜孔／側面的槽（那這一則可以忽略）\n'
-              + '・程式的 XY 和 A 值各寫各的，湊不成一個分度加工\n'
-              + '展開圖上這種孔會畫成斜線而不是一個點，一看就知道。',
+        const bad = est.offLines || [];
+        const where = bad.length
+          ? `第 ${bad.slice(0, 6).map((o) => o.line).join('、')}${bad.length > 6 ? ' 等' : ''} 行`
+          : '有幾行';
+        const dist = bad.length ? f(Math.max.apply(null, bad.map((o) => Math.abs(o.offset)))) : f(est.spread);
+        out.push(diag('R37', bad.length ? bad[0].line : first, 'warning',
+          `${where}的刀偏在工件側邊 ${dist} mm，不是從正上方鑽下去`, {
+            detail: `${A} 軸繞 X 轉的時候，只有 **Y 對準迴轉中心** 的位置才是「垂直鑽進工件」。\n`
+              + `其他 ${est.holes - bad.length} 個孔都在 Y${f(est.y)}，只有這幾行不一樣：\n`
+              + bad.slice(0, 6).map((o) => `　第 ${o.line} 行：Y${f(o.y)}（偏了 ${f(o.offset)}）`).join('\n')
+              + '\n\n會發生什麼，看工件多粗：\n'
+              + '・工件夠粗 → 刀斜著削進圓周，削出一個弧形缺口，不是一個孔\n'
+              + '・工件不夠粗 → 刀整支在工件外面，等於在空氣中鑽，那個孔根本不存在\n'
+              + '（所以改一下「工件直徑」，孔的數量就會變——那不是模擬出錯，是這幾行本來就不對。）\n\n'
+              + '如果本來就是要斜孔或側面的槽，這一則可以忽略；\n'
+              + '要鑽徑向孔的話，四刀的 Y 都應該是 0，用 A 換角度、用 X 換軸向位置。',
           }));
       }
       if (est.minCutZ < cz - EPS) {

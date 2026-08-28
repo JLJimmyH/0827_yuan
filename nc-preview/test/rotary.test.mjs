@@ -466,7 +466,7 @@ test('反推中心：孔的 Y 不一致 → consistent = false，spread 是實�
   near(est.spread, 20);
 });
 
-test('R37：孔不在同一條母線上 → warning', () => {
+test('R37：刀偏到工件側邊的孔 → warning，並點名是哪幾行', () => {
   const res = full([
     'M6T1(SG-8.5)',
     'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
@@ -475,9 +475,11 @@ test('R37：孔不在同一條母線上 → warning', () => {
     'Y10.A180.',
     'G80',
   ].join('\n'));
-  const d = byRule(res.diagnostics, 'R37', 'warning').filter((x) => /同一條母線/.test(x.message));
+  const d = byRule(res.diagnostics, 'R37', 'warning').filter((x) => /偏在工件側邊/.test(x.message));
   assert.equal(d.length, 1);
-  assert.match(d[0].message, /20/);
+  assert.match(d[0].message, /第 6、7 行/);   // 兩個偏掉的孔（%/O 包裝後 +2 行）
+  assert.match(d[0].message, /10 mm/);
+  assert.match(d[0].detail, /空氣中鑽/);
 });
 
 test('R37：正常的分度孔不報「母線」那條', () => {
@@ -618,4 +620,27 @@ test('圓柱素材：沒鑽到軸心就不會動到對面', async () => {
   const k = Math.PI / 180 * 20;
   // CYL_PROG 只鑽到剩半徑 10（沒過軸心），四個孔彼此不該互相挖穿
   for (const a of [0, 90, 180, 270]) near(NC.sim.heightAt(out, 20, a * k), 10, 0.5);
+});
+
+test('estimateRadius：優先用真正垂直鑽的孔，不被偏在側邊的刀撐大', () => {
+  // 兩刀垂直鑽（Y0，R 點 Z25）＋ 兩刀偏在側邊 21.474（起點離軸心 √(25²+21.474²) ≈ 33）
+  const res = full([
+    'M6T1(SG-8.5)',
+    'G0G90G54X-21.474Y0.A0.G43H1Z50.M3S900',
+    'G98G81Z-1.R25.F70M8',
+    'X0.Y-21.474A90.',
+    'X21.474Y0.A180.',
+    'X0.Y21.474A270.',
+    'G80',
+  ].join('\n'));
+  const est = R.estimateRadius(res.scenarios.off.geometry.segments);
+  assert.equal(est.source, 'radial');
+  near(est.radius, 25, 1e-6, '應該用 Y0 那兩刀的 R 點，不是側邊刀的斜距 33');
+});
+
+test('estimateRadius：沒有垂直鑽的孔時退回原本的推估', () => {
+  const res = full('M6T1(6MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1000\nZ25.\nG1Z17.F200\nX60.F250\nG0A90.');
+  const est = R.estimateRadius(res.scenarios.off.geometry.segments);
+  assert.equal(est.source, 'cut');
+  assert.ok(est.radius > 0);
 });

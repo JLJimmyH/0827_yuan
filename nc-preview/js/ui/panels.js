@@ -1633,25 +1633,9 @@
     function render() {
       clear(root);
       const s = state.settings;
-      root.appendChild(h('div', { class: 'nc-sub-title' }, 'Block skip'));
-      root.appendChild(row('預演情境', select(Object.keys(SCENARIO_LABEL).map((k) => [k, SCENARIO_LABEL[k]]), state.scenario, (v) => { state.scenario = v; commit(); }, { dataset: { field: 'scenario' } })));
-      root.appendChild(row('多斜線 //', select(Object.keys(MULTISLASH_LABEL).map((k) => [k, MULTISLASH_LABEL[k]]), s.multiSlash, (v) => { s.multiSlash = v; commit(); }, { dataset: { field: 'multiSlash' } })));
-      const levels = h('input', {
-        type: 'text', class: 'nc-text nc-short', value: (s.skipLevelsOn || [1]).join(','), title: '開關開時視為開的等級，逗號分隔（如 1,2）', dataset: { field: 'skipLevelsOn' },
-      });
-      levels.addEventListener('change', () => {
-        const arr = uniqSorted(String(levels.value).split(/[,\s]+/).map((x) => parseInt(x, 10))).filter((n) => n >= 1 && n <= 9);
-        if (!arr.length) { levels.value = (s.skipLevelsOn || [1]).join(','); return; }
-        s.skipLevelsOn = arr; commit();
-      });
-      root.appendChild(row('開的等級', levels));
-      root.appendChild(h('div', { class: 'nc-sub-title' }, '機台'));
-      root.appendChild(row('換刀前需 M5', checkbox(s.requireM5BeforeM6, (on) => { s.requireM5BeforeM6 = on; commit(); }, '缺 M5 就 M6 → 警告')));
-      root.appendChild(row('小數點', checkbox(s.dpi, (on) => { s.dpi = on; commit(); }, '計算機式（無小數點 = mm）')));
-      root.appendChild(row('快速速率', num('rapidRate', { attrs: { step: '1000', min: '1' }, title: 'G0 速率，時間估算用' }), ' mm/min'));
-      root.appendChild(row('下刀進給上限', num('plungeFeedMax', { attrs: { step: '10', min: '1' }, title: 'G1 向下且在材料內超過此值 → 警告' }), ' mm/min'));
-      root.appendChild(row('先讀節數', num('lookahead', { attrs: { step: '1', min: '1' }, title: '刀徑補正先讀節數（參數 19625）' })));
       // 第四軸：只有程式真的轉過 A 才顯示——三軸程式看到這一區只會困惑。
+      // 放在最上面：四軸程式的一切（成品、切深、展開圖）都靠這幾個值，
+      // 藏在面板最底下的話現場會以為「素材設定都不能動」（真的發生過）。
       // 這幾個值決定「工件在哪裡轉」，展開圖與 3D 圓棒完全靠它們；填錯的話圖會歪掉，
       // 但改個數字就立刻重畫，現場可以用試的把對的值找出來（比問座標系術語快）。
       if (state.opts.rotaryUsed) {
@@ -1678,6 +1662,24 @@
         root.appendChild(h('div', { class: 'nc-muted' },
           '填錯不會怎樣，圖會立刻重畫。分度孔在展開圖上排成一直線、r 從表面往中心遞減，就是對了。'));
       }
+      root.appendChild(h('div', { class: 'nc-sub-title' }, 'Block skip'));
+      root.appendChild(row('預演情境', select(Object.keys(SCENARIO_LABEL).map((k) => [k, SCENARIO_LABEL[k]]), state.scenario, (v) => { state.scenario = v; commit(); }, { dataset: { field: 'scenario' } })));
+      root.appendChild(row('多斜線 //', select(Object.keys(MULTISLASH_LABEL).map((k) => [k, MULTISLASH_LABEL[k]]), s.multiSlash, (v) => { s.multiSlash = v; commit(); }, { dataset: { field: 'multiSlash' } })));
+      const levels = h('input', {
+        type: 'text', class: 'nc-text nc-short', value: (s.skipLevelsOn || [1]).join(','), title: '開關開時視為開的等級，逗號分隔（如 1,2）', dataset: { field: 'skipLevelsOn' },
+      });
+      levels.addEventListener('change', () => {
+        const arr = uniqSorted(String(levels.value).split(/[,\s]+/).map((x) => parseInt(x, 10))).filter((n) => n >= 1 && n <= 9);
+        if (!arr.length) { levels.value = (s.skipLevelsOn || [1]).join(','); return; }
+        s.skipLevelsOn = arr; commit();
+      });
+      root.appendChild(row('開的等級', levels));
+      root.appendChild(h('div', { class: 'nc-sub-title' }, '機台'));
+      root.appendChild(row('換刀前需 M5', checkbox(s.requireM5BeforeM6, (on) => { s.requireM5BeforeM6 = on; commit(); }, '缺 M5 就 M6 → 警告')));
+      root.appendChild(row('小數點', checkbox(s.dpi, (on) => { s.dpi = on; commit(); }, '計算機式（無小數點 = mm）')));
+      root.appendChild(row('快速速率', num('rapidRate', { attrs: { step: '1000', min: '1' }, title: 'G0 速率，時間估算用' }), ' mm/min'));
+      root.appendChild(row('下刀進給上限', num('plungeFeedMax', { attrs: { step: '10', min: '1' }, title: 'G1 向下且在材料內超過此值 → 警告' }), ' mm/min'));
+      root.appendChild(row('先讀節數', num('lookahead', { attrs: { step: '1', min: '1' }, title: '刀徑補正先讀節數（參數 19625）' })));
       root.appendChild(h('div', { class: 'nc-sub-title' }, '模擬'));
       const cellOpts = CELL_OPTIONS.includes(state.cell) ? CELL_OPTIONS : CELL_OPTIONS.concat([state.cell]).sort((a, b) => a - b);
       root.appendChild(row('格距', select(cellOpts.map((c) => [c, `${c} mm`]), state.cell, (v) => { state.cell = parseFloat(v); commit(); }, { dataset: { field: 'cell' } }), h('span', { class: 'nc-muted' }, ' 越小越準、越慢')));
