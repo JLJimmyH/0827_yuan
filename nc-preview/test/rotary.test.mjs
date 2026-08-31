@@ -642,6 +642,56 @@ test('圓柱素材：沒鑽到軸心就不會動到對面', async () => {
   for (const a of [0, 90, 180, 270]) near(NC.sim.heightAt(out, 20, a * k), 10, 0.5);
 });
 
+/** 某個 X 位置的橫截面：被切到的格 → {角度（弧度，相對正上方）, 半徑, 機台 Z, 機台 Y} */
+function crossSection(out, x) {
+  const ix = Math.round((x - out.origin.x) / out.cellX);
+  const cut = [];
+  for (let iy = 0; iy < out.ny; iy++) {
+    const r = out.height[iy * out.nx + ix];
+    if (r >= out.radius - 1e-6) continue;
+    let th = (out.origin.y + iy * out.cellY) / out.radius;
+    if (th > Math.PI) th -= 2 * Math.PI;
+    cut.push({ th, r, z: r * Math.cos(th), y: r * Math.sin(th) });
+  }
+  return cut.sort((a, b) => a.th - b.th);
+}
+
+test('圓柱素材：直上直下的刀切出平底，不是同心圓弧', async () => {
+  // 刀是平行機台 Z 的圓柱，不是從軸心射出去的楔子：
+  // 槽底應該是 Z14 那個**平面**，每一格的半徑要隨角度變大（14 / cos φ），不是整片等於 14。
+  const out = await runCyl([
+    'M6T1(10MM)',
+    'G0G90G54X10.Y0.A0.G43H1Z50.M3S1200',
+    'G1Z14.F100.',
+    'X40.F300.',
+    'G0Z50.',
+  ].join('\n'), 20);
+  const cut = crossSection(out, 25);
+  assert.ok(cut.length > 10, `槽的橫截面應該有一排格子，實際 ${cut.length}`);
+  for (const c of cut) near(c.z, 14, 1e-6, `φ${(c.th * 180 / Math.PI).toFixed(1)}° 的刀底 Z`);
+  // 兩側的半徑一定比正中間大（等半徑 = 舊的圓弧底）
+  const edge = cut[cut.length - 1];
+  assert.ok(edge.r > 14 + 0.05, `槽緣的半徑應該大於 14，實際 ${edge.r}`);
+  // 開口（原始表面那一圈）的寬度是刀徑的**弦長**，不是弧長；容差一格
+  const open = 2 * out.radius * Math.sin(cut[cut.length - 1].th);
+  assert.ok(Math.abs(open - 10) <= 2 * out.cellY, `開口寬度應該接近刀徑 10，實際 ${open}`);
+  // 槽底仍然比開口窄——側壁還是放射狀的，鉛直側壁高度圖表達不了（見 CONTRACT §13.10）
+  assert.ok(cut[cut.length - 1].y - cut[0].y < open - 1);
+});
+
+test('圓柱素材：分度鑽孔的孔心仍然剛好等於孔底（平底修正不影響正上方）', async () => {
+  const out = await runCyl([
+    'M6T6(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+    'G98G81Z10.R25.F70M8',
+    'A90.',
+    'G80',
+  ].join('\n'), 20);
+  const k = Math.PI / 180 * 20;
+  near(NC.sim.heightAt(out, 20, 0), 10, 1e-6);
+  near(NC.sim.heightAt(out, 20, 90 * k), 10, 1e-6);
+});
+
 test('estimateRadius：優先用真正垂直鑽的孔，不被偏在側邊的刀撐大', () => {
   // 兩刀垂直鑽（Y0，R 點 Z25）＋ 兩刀偏在側邊 21.474（起點離軸心 √(25²+21.474²) ≈ 33）
   const res = full([

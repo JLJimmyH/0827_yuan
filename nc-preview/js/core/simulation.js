@@ -288,7 +288,12 @@
     return [i0, i1];
   }
 
-  function cutLine(sim, ax, ay, bx, by, za, zb, prof, acc) {
+  /**
+   * @param {{R:number, axisS:number}} [cyl]
+   *   圓柱模式的刀軸資訊：`R` 圓棒半徑、`axisS` 刀軸方向（A 角換成弧長）。
+   *   給了就改用機台幾何算覆蓋與深度（見迴圈裡的註解）；三軸不給，行為完全不變。
+   */
+  function cutLine(sim, ax, ay, bx, by, za, zb, prof, acc, cyl) {
     const { cellX, cellY, nx, ny, origin, height, mask, floorZ, wrapY } = sim;
     const r = prof.r - XY_TOL, r2 = r * r;
     const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, L = Math.sqrt(L2);
@@ -304,23 +309,54 @@
       const cy = origin.y + iy * cellY;
       const py = cy - ay;
       const rowY = wrapY ? (((iy % ny) + ny) % ny) : iy;
+      // 圓柱模式：這一排離刀軸多少角度。只用 sin/cos，所以 s 或 A 差幾圈都無所謂。
+      let sinC = 0, cosC = 1;
+      if (cyl) {
+        const phi = (cy - cyl.axisS) / cyl.R;
+        sinC = Math.sin(phi); cosC = Math.cos(phi);
+        if (cosC <= 1e-3) continue;   // 側面或背面：刀底平面照不到
+      }
       for (let ix = ix0; ix <= ix1; ix++) {
         const cx = origin.x + ix * cellX;
         const px = cx - ax;
+        const idx = rowY * nx + ix;
         let t = L2 > 0 ? (px * dx + py * dy) / L2 : 0;
         const tc = t < 0 ? 0 : (t > 1 ? 1 : t);
-        const ex = px - tc * dx, ey = py - tc * dy;
-        const d2 = ex * ex + ey * ey;
-        if (d2 >= r2) continue;
-        let h;
-        if (constZ) {
-          h = prof.kind === FLAT ? zLo : zLo + dzOf(prof, Math.sqrt(d2));
+        // 圓柱模式的刀是**平行機台 Z 的圓柱**，不是從軸心射出去的楔子。
+        // 把刀尖的 (r, θ) 換回機台座標（相對迴轉中心）的 (y, z)，再照機台幾何算：
+        //   覆蓋 → 這一格表面點與刀軸的橫向距離（弦長，不是弧長）≤ 刀半徑 → 開口寬度 = 刀徑
+        //   深度 → 這一格的射線打到刀底平面 z = zTool 的長度 = zTool / cos φ → 平底，不是同心圓弧
+        // 側壁仍然是放射狀的（一格只記一個半徑，鉛直側壁表達不了，同底切的限制）。
+        let d2, eX = 0, phiT = 0, yTool = 0;
+        if (cyl) {
+          phiT = (ay + tc * dy - cyl.axisS) / cyl.R;
+          yTool = (za + (zb - za) * tc) * Math.sin(phiT);   // 刀軸的機台 y（相對迴轉中心）
+          eX = px - tc * dx;
+          const eY = height[idx] * sinC - yTool;            // 這一格「表面」點到刀軸的橫向距離
+          d2 = eX * eX + eY * eY;
         } else {
-          // 平面足跡、Z 沿線變化：格子被圓盤蓋到的參數區間 [t−w, t+w] ∩ [0,1]，取區間內最低 Z
+          const ex = px - tc * dx, ey = py - tc * dy;
+          d2 = ex * ex + ey * ey;
+        }
+        if (d2 >= r2) continue;
+        // 刀底的參數位置：Z 沿線變化時取「格子被圓盤蓋到的區間 [t−w, t+w] ∩ [0,1]」內最低的 Z
+        let sPar = tc;
+        if (!constZ) {
           const qx = px - t * dx, qy = py - t * dy;
           const w = Math.sqrt(Math.max(0, r2 - (qx * qx + qy * qy))) / L;
-          const s = zb < za ? Math.min(1, t + w) : Math.max(0, t - w);
-          h = za + (zb - za) * s;
+          sPar = zb < za ? Math.min(1, t + w) : Math.max(0, t - w);
+        }
+        const zBase = constZ ? zLo : za + (zb - za) * sPar;
+        let h;
+        if (cyl) {
+          const cosD = constZ ? Math.cos(phiT) : Math.cos((ay + sPar * dy - cyl.axisS) / cyl.R);
+          const zTool = zBase * cosD;                       // 刀底平面的機台 z
+          // 錐尖／球端的橫向距離要在**刀底那個深度**量，不是在表面量（在表面量會讓孔心多挖一點）
+          const eB = (zTool / cosC) * sinC - yTool;
+          const coneOff = (constZ && prof.kind !== FLAT) ? dzOf(prof, Math.hypot(eX, eB)) : 0;
+          h = (zTool + coneOff) / cosC;
+        } else {
+          h = zBase + ((constZ && prof.kind !== FLAT) ? dzOf(prof, Math.sqrt(d2)) : 0);
         }
         // 圓柱素材：h 是「離軸心多遠」。刀尖切到負的代表**穿過軸心**（貫穿孔），
         // 對面那半圈也被挖穿了——高度圖一格只記一個半徑，不補這一刀的話
@@ -330,7 +366,6 @@
           if (wrapY) through = floorZ - h;
           h = floorZ;
         }
-        const idx = rowY * nx + ix;
         const old = height[idx];
         if (h < old - 1e-7) {
           if (mask[idx]) { acc.fixtureHit = mask[idx]; acc.fixturePos = { x: cx, y: cy, z: old }; continue; }
@@ -397,7 +432,7 @@
   }
 
   /**
-   * 圓柱模式：把一段（機台座標）映射成展開座標的折線 [{x, s, r}]。
+   * 圓柱模式：把一段（機台座標）映射成展開座標的折線 [{x, s, r, a}]。
    *   機台 (x,y,z) + A 角度 → 繞軸心反轉 A → (x, θ, r) → (x, s = θ·R, r)
    * A 在轉的段映射後是曲線，rotary.samples 已經依角度細分過。
    */
@@ -406,17 +441,27 @@
     if (!RG || typeof RG.samples !== 'function' || typeof RG.unrollPath !== 'function') return [];
     const pw = RG.samples(seg, { center: sim.center, tol: sim.cell / 2 });
     const k = Math.PI / 180 * sim.radius;
-    // unrollPath 已經處理跨 ±180 與穿過軸心（r 變號），這裡只換算成弧長
-    return RG.unrollPath(pw, sim.center).map((u) => ({ x: u.x, s: u.theta * k, r: u.r }));
+    // unrollPath 已經處理跨 ±180 與穿過軸心（r 變號），這裡只換算成弧長。
+    // 每個點也帶上當下的 A：刀軸方向要靠它才算得出來（rotarySamples 是等分內插 aFrom→a，照同一個比例還原）。
+    const up = RG.unrollPath(pw, sim.center);
+    const a1 = Number(seg.a) || 0;
+    const a0 = seg.aFrom === undefined ? a1 : (Number(seg.aFrom) || 0);
+    const n = up.length;
+    return up.map((u, i) => ({
+      x: u.x, s: u.theta * k, r: u.r,
+      a: n > 1 ? a0 + (a1 - a0) * (i / (n - 1)) : a1,
+    }));
   }
 
-  /** 圓柱模式的切削：映射之後就是一般的平面蓋章 */
+  /** 圓柱模式的切削：映射之後就是一般的平面蓋章，只是刀底要照機台幾何算（見 cutLine 的 cyl） */
   function cutSegmentCyl(sim, seg, prof) {
     const acc = { removed: 0, fixtureHit: 0, fixturePos: null };
     const pts = unrollPoints(sim, seg);
     const sub = sim.cell / 2;
+    const k = Math.PI / 180 * sim.radius;
     for (let i = 0; i + 1 < pts.length; i++) {
       const a = pts[i], b = pts[i + 1];
+      const cyl = { R: sim.radius, axisS: (a.a + b.a) / 2 * k };
       const L = Math.hypot(b.x - a.x, b.s - a.s);
       const dr = b.r - a.r;
       if (L < XY_TOL) {
@@ -424,16 +469,16 @@
         const rr = Math.min(a.r, b.r);
         const sx = sim.origin.x + Math.round((a.x - sim.origin.x) / sim.cellX) * sim.cellX;
         const sy = sim.origin.y + Math.round((a.s - sim.origin.y) / sim.cellY) * sim.cellY;
-        cutLine(sim, sx, sy, sx, sy, rr, rr, prof, acc);
+        cutLine(sim, sx, sy, sx, sy, rr, rr, prof, acc, cyl);
       } else if (Math.abs(dr) < 1e-9 || prof.kind === FLAT) {
-        cutLine(sim, a.x, a.s, b.x, b.s, a.r, b.r, prof, acc);
+        cutLine(sim, a.x, a.s, b.x, b.s, a.r, b.r, prof, acc, cyl);
       } else {
         const n = Math.max(1, Math.ceil(Math.abs(dr) / sub));
         for (let j = 0; j < n; j++) {
           const t0 = j / n, t1 = (j + 1) / n;
           const rr = Math.min(a.r + dr * t0, a.r + dr * t1);
           cutLine(sim, a.x + (b.x - a.x) * t0, a.s + (b.s - a.s) * t0,
-            a.x + (b.x - a.x) * t1, a.s + (b.s - a.s) * t1, rr, rr, prof, acc);
+            a.x + (b.x - a.x) * t1, a.s + (b.s - a.s) * t1, rr, rr, prof, acc, cyl);
         }
       }
     }
