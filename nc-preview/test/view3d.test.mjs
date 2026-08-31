@@ -722,6 +722,40 @@ test('buildCylinderMesh：所有三角形都朝外（背面剔除才不會看穿
   assert.equal(bad, 0, `${bad} 個三角形朝內`);
 });
 
+test('buildCylinderMesh：有內部空洞的格會多鋪幾層，槽壁與孔壁才畫得出來', () => {
+  const sim = fakeCylSim(20, 5, 16);
+  sim.extra = new Map();
+  // 第 3 圈第 2 格：材料 [0,14] ∪ [18,20]（中間 14~18 是空洞，例如槽壁外側那條射線）
+  sim.extra.set(3 * 5 + 2, [0, 14, 18, 20]);
+  const m = NC.ui.view3d.buildCylinderMesh(sim);
+  assert.equal(m.sheets, 4, '那一格有兩段材料 → 四個端點 → 四層');
+  // 那一格在三層各有一個頂點，半徑分別是 14 / 18 / 20
+  const want = [14, 18, 20];
+  const got = [];
+  for (let i = 0; i < m.counts.vertices; i++) {
+    const y = m.positions[i * 3 + 1], z = m.positions[i * 3 + 2];
+    const r = Math.hypot(y, z);
+    if (Math.abs(m.positions[i * 3] - 2) < 1e-6 && want.some((w) => Math.abs(r - w) < 1e-4)) got.push(Math.round(r));
+  }
+  for (const w of want) assert.ok(got.includes(w), `第 ${w} 層的頂點沒建出來`);
+  // 內向面（空洞的外緣）法線要朝軸心，否則背面剔除會把孔壁剃掉
+  let inward = 0;
+  for (let i = 0; i < m.counts.vertices; i++) {
+    const y = m.positions[i * 3 + 1], z = m.positions[i * 3 + 2];
+    if (Math.abs(Math.hypot(y, z) - 18) > 1e-4) continue;
+    if (m.normals[i * 3 + 1] * y + m.normals[i * 3 + 2] * z < 0) inward++;
+  }
+  assert.ok(inward > 0, '空洞外緣的法線應該朝內');
+});
+
+test('buildCylinderMesh：沒切過的圓棒只鋪外表面那一層，跟舊版一樣', () => {
+  const sim = fakeCylSim(20, 5, 16);
+  const m = NC.ui.view3d.buildCylinderMesh(sim);
+  assert.equal(m.sheets, 2, '一段材料 = lo（軸心）與 hi（表面）兩個端點');
+  // 但軸心那一層四個角都貼在軸心、沒有面積，不鋪 → 頂點數跟舊版一樣
+  assert.equal(m.counts.vertices, 5 * 16 + (16 + 1) * 2);
+});
+
 test('buildCylinderMesh：兩端封口的法線分別朝 ∓X', () => {
   const sim = fakeCylSim(20, 5, 16);
   const m = NC.ui.view3d.buildCylinderMesh(sim);

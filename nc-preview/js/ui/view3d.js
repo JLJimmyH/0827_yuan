@@ -147,6 +147,8 @@
    * 降採樣格點高度。mode：'min'（預設，保住口袋深度）／'max'／'sample'（最近取樣）。
    * k = 1 時直接沿用原陣列（不複製）。
    */
+  const MAX_SHEETS = 6;      // 圓棒網格的層數上限（每格最多 3 段材料 → 6 個端點）
+
   function downsampleHeights(heightArr, nx0, ny0, k, mode) {
     if (!(k > 1)) return { z: heightArr, nx: nx0, ny: ny0 };
     const nx = dsDim(nx0, k), ny = dsDim(ny0, k);
@@ -611,20 +613,31 @@
   }
 
   /**
-   * 圓柱高度圖 → 三角網格（純函式，不碰 WebGL）。
+   * 圓棒素材 → 三角網格（純函式，不碰 WebGL）。
    *
-   * 素材是 (X, 弧長) → 半徑 的格網（simulation.createCylinder）。每個格點放到 3D：
+   * 素材每格記的是**一串材料區間**（見 CONTRACT §13.10）。把每格的邊界由內往外編號，
+   * 第 k 層就是一張 (X, 弧長) 的格網「面」：
    *   θ = 弧長 / 半徑 ;  x = 軸向 ;  y = cy + r·sinθ ;  z = cz + r·cosθ
-   * 周向是循環的，所以最後一圈接回第 0 圈（不重複頂點）。
-   * 法線用高度梯度算：徑向再減掉沿軸向與周向的斜率，孔壁的明暗才不會糊成一片。
    *
-   * 兩端加封口（圓面），否則從側面看得進圓棒內部。
+   * 為什麼要分層：一格只畫最外面那個邊界的話，槽口那一格會直接連到槽底，
+   * 側壁就被畫成一條斜的倒角。真正的側壁是**相鄰射線的內側邊界連起來**的那一面
+   * ——它在第 1 層。沒有那一層的格（例如槽正中央，整條射線都被挖掉）就把該層
+   * 夾到自己最外面的邊界，讓面自然收合，不會破洞。
+   *
+   * 層數 L 取全場最多的邊界數：沒切過的圓棒 L = 1，跟舊版一模一樣（單一張面 + 兩端封口）。
+   * 第 1 層以上只在「四個角至少有一個真的有那一層」的地方才鋪面，
+   * 否則整根棒子會被三張重疊的面蓋住（互相 z-fighting，又白白多三倍三角形）。
+   *
+   * 法線用半徑梯度算（徑向再減掉軸向與周向的斜率），內向的面要反過來，
+   * 背面剔除才不會把孔壁剃掉。
+   *
    * @param {Object} sim  cylinder 模式的 SimResult 或 sim
-   * @param {{height?:Float32Array, downsample?:number}} [opts]
+   * @param {{height?:Float32Array, extra?:Map, downsample?:number}} [opts]
    */
   function buildCylinderMesh(sim, opts) {
     opts = opts || {};
     const H = opts.height || sim.height;
+    const src = { height: H, extra: opts.extra !== undefined ? opts.extra : sim.extra };
     const k = Math.max(1, Math.floor(opts.downsample > 0 ? opts.downsample : 1));
     const nx0 = sim.nx, ny0 = sim.ny;
     const nx = Math.floor((nx0 - 1) / k) + 1;
@@ -634,14 +647,56 @@
     const R = sim.radius;
     const cy = (sim.center && sim.center.y) || 0;
     const cz = (sim.center && sim.center.z) || 0;
-    const at = (ix, iy) => {
+    const srcIdx = (ix, iy) => {
       const sx = Math.min(nx0 - 1, ix * k);
       const sy = ((Math.round(iy * ny0 / ny) % ny0) + ny0) % ny0;
-      return H[sy * nx0 + sx];
+      return sy * nx0 + sx;
     };
-    const nSide = nx * ny;
+    // 每個格點的材料區間 [lo0,hi0,lo1,hi1,…]。層 = 區間的端點：偶數是內向面（lo）、
+    // 奇數是外向面（hi）。core 沒載入時退回單一區間 [0, 高度]，行為同舊版。
+    const bounds = new Array(nx * ny);
+    let L = 1;
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const si = srcIdx(ix, iy);
+        const b = (NC.sim && typeof NC.sim.spansOf === 'function')
+          ? NC.sim.spansOf(src, si)
+          : (H[si] > 0 ? [0, H[si]] : []);
+        bounds[iy * nx + ix] = b;
+        if (b.length > L) L = b.length;
+      }
+    }
+    L = Math.min(L, MAX_SHEETS);
+    const lenAt = (i) => bounds[i].length;
+    const rAt = (i, lv) => { const b = bounds[i]; return b[lv < b.length ? lv : b.length - 1]; };
+    // 端點是內向（lo，面朝軸心）還是外向（hi）；夾到最外面時一律是外向
+    const outAt = (i, lv) => { const n = bounds[i].length; return (Math.min(lv, n - 1) % 2) === 1; };
+
+    // ---- 哪些（層, 格點）真的要頂點 ----
+    const vid = new Int32Array(L * nx * ny).fill(-1);
+    const quads = [];   // [lv, i00, i10, i11, i01, outward]
+    for (let iy = 0; iy < ny; iy++) {
+      const iy1 = (iy + 1) % ny;
+      for (let ix = 0; ix + 1 < nx; ix++) {
+        const c = [iy * nx + ix, iy * nx + ix + 1, iy1 * nx + ix + 1, iy1 * nx + ix];
+        if (lenAt(c[0]) === 0 || lenAt(c[1]) === 0 || lenAt(c[2]) === 0 || lenAt(c[3]) === 0) continue;
+        let maxN = 0, argMax = c[0];
+        for (const i of c) if (lenAt(i) > maxN) { maxN = lenAt(i); argMax = i; }
+        for (let lv = 0; lv < L; lv++) {
+          if (lv > 0 && maxN <= lv) break;          // 四個角都沒有這一層 → 不鋪（會跟下一層重疊）
+          // 四個角都貼在軸心（實心棒的第 0 層就是這樣）→ 沒有面積，不必鋪
+          if (rAt(c[0], lv) < 1e-9 && rAt(c[1], lv) < 1e-9 && rAt(c[2], lv) < 1e-9 && rAt(c[3], lv) < 1e-9) continue;
+          quads.push(lv, c[0], c[1], c[2], c[3], outAt(argMax, lv) ? 1 : 0);
+          for (const i of c) vid[lv * nx * ny + i] = 0;
+        }
+      }
+    }
+    // ---- 頂點 ----
+    let nv = 0;
+    for (let i = 0; i < vid.length; i++) if (vid[i] === 0) vid[i] = nv++;
     const nCap = ny + 1;                    // 每個端面：圓心 + 一圈
-    const nv = nSide + nCap * 2;
+    const capBase = [nv, nv + nCap];
+    nv += nCap * 2;
     const positions = new Float32Array(nv * 3);
     const normals = new Float32Array(nv * 3);
     let rMin = Infinity, rMax = -Infinity;
@@ -651,30 +706,35 @@
       sn[iy] = Math.sin(th[iy]);
       cs[iy] = Math.cos(th[iy]);
     }
-    for (let iy = 0; iy < ny; iy++) {
-      for (let ix = 0; ix < nx; ix++) {
-        const i = iy * nx + ix, o = i * 3;
-        const r = at(ix, iy);
-        if (r < rMin) rMin = r;
-        if (r > rMax) rMax = r;
-        positions[o] = sim.origin.x + ix * cellX;
-        positions[o + 1] = cy + r * sn[iy];
-        positions[o + 2] = cz + r * cs[iy];
-        // 梯度法線：軸向與周向的半徑斜率
-        const rx0 = at(Math.max(0, ix - 1), iy), rx1 = at(Math.min(nx - 1, ix + 1), iy);
-        const ry0 = at(ix, (iy - 1 + ny) % ny), ry1 = at(ix, (iy + 1) % ny);
-        const dr_dx = (rx1 - rx0) / (2 * cellX);
-        const dr_ds = (ry1 - ry0) / (2 * cellY);
-        // 徑向 − 軸向斜率 − 周向斜率（切向 = (0, cos, −sin)）
-        let nxv = -dr_dx;
-        let nyv = sn[iy] - dr_ds * cs[iy];
-        let nzv = cs[iy] + dr_ds * sn[iy];
-        const len = Math.hypot(nxv, nyv, nzv) || 1;
-        normals[o] = nxv / len; normals[o + 1] = nyv / len; normals[o + 2] = nzv / len;
+    for (let lv = 0; lv < L; lv++) {
+      const base = lv * nx * ny;
+      for (let iy = 0; iy < ny; iy++) {
+        for (let ix = 0; ix < nx; ix++) {
+          const i = iy * nx + ix;
+          const v = vid[base + i];
+          if (v < 0) continue;
+          const r = rAt(i, lv);
+          if (r < rMin) rMin = r;
+          if (r > rMax) rMax = r;
+          const o = v * 3;
+          positions[o] = sim.origin.x + ix * cellX;
+          positions[o + 1] = cy + r * sn[iy];
+          positions[o + 2] = cz + r * cs[iy];
+          // 梯度法線：軸向與周向的半徑斜率
+          const rx0 = rAt(iy * nx + Math.max(0, ix - 1), lv), rx1 = rAt(iy * nx + Math.min(nx - 1, ix + 1), lv);
+          const ry0 = rAt(((iy - 1 + ny) % ny) * nx + ix, lv), ry1 = rAt(((iy + 1) % ny) * nx + ix, lv);
+          const dr_dx = (rx1 - rx0) / (2 * cellX);
+          const dr_ds = (ry1 - ry0) / (2 * cellY);
+          const f = outAt(i, lv) ? 1 : -1;      // 內向面（孔壁、槽壁）法線要反過來
+          let nxv = -dr_dx * f;
+          let nyv = (sn[iy] - dr_ds * cs[iy]) * f;
+          let nzv = (cs[iy] + dr_ds * sn[iy]) * f;
+          const len = Math.hypot(nxv, nyv, nzv) || 1;
+          normals[o] = nxv / len; normals[o + 1] = nyv / len; normals[o + 2] = nzv / len;
+        }
       }
     }
-    // 端面（x = 兩端）：圓心 + 一圈，法線沿 ∓X
-    const capBase = [nSide, nSide + nCap];
+    // 端面（x = 兩端）：圓心 + 一圈，法線沿 ∓X。用最外圈的邊界（看得到的輪廓）
     for (let c = 0; c < 2; c++) {
       const ix = c === 0 ? 0 : nx - 1;
       const x = sim.origin.x + ix * cellX;
@@ -684,24 +744,28 @@
       positions[o] = x; positions[o + 1] = cy; positions[o + 2] = cz;
       normals[o] = nsign; normals[o + 1] = 0; normals[o + 2] = 0;
       for (let iy = 0; iy < ny; iy++) {
-        const r = at(ix, iy);
+        const bb = bounds[iy * nx + ix];
+        const r = bb.length ? bb[bb.length - 1] : 0;   // 最外圈 = 看得到的輪廓
         o = (b + 1 + iy) * 3;
         positions[o] = x; positions[o + 1] = cy + r * sn[iy]; positions[o + 2] = cz + r * cs[iy];
         normals[o] = nsign; normals[o + 1] = 0; normals[o + 2] = 0;
       }
     }
-    const quads = (nx - 1) * ny;
-    const triCount = quads * 2 + ny * 2;
+    const nq = quads.length / 6;
+    const triCount = nq * 2 + ny * 2;
     const Idx = nv > 65535 ? Uint32Array : Uint16Array;
     const indices = new Idx(triCount * 3);
     let t = 0;
-    for (let iy = 0; iy < ny; iy++) {
-      const iy1 = (iy + 1) % ny;
-      for (let ix = 0; ix + 1 < nx; ix++) {
-        const a = iy * nx + ix, b = iy * nx + ix + 1;
-        const c = iy1 * nx + ix + 1, d = iy1 * nx + ix;
-        indices[t++] = a; indices[t++] = b; indices[t++] = c;
-        indices[t++] = a; indices[t++] = c; indices[t++] = d;
+    for (let q = 0; q < quads.length; q += 6) {
+      const lv = quads[q], base = lv * nx * ny;
+      const a = vid[base + quads[q + 1]], b2 = vid[base + quads[q + 2]];
+      const c2 = vid[base + quads[q + 3]], d = vid[base + quads[q + 4]];
+      if (quads[q + 5]) {
+        indices[t++] = a; indices[t++] = b2; indices[t++] = c2;
+        indices[t++] = a; indices[t++] = c2; indices[t++] = d;
+      } else {                                  // 內向面：繞向反過來，正面才朝向空洞
+        indices[t++] = a; indices[t++] = c2; indices[t++] = b2;
+        indices[t++] = a; indices[t++] = d; indices[t++] = c2;
       }
     }
     // 端面繞向：θ 增加的方向繞出來的法線是 +X（右手定則），
@@ -716,12 +780,11 @@
       }
     }
     return {
-      positions, normals, indices,
-      counts: { vertices: nv, triangles: triCount, indices: indices.length },
-      cylinder: true, nx, ny, downsample: k,
-      zMin: Number.isFinite(rMin) ? cz - R : cz - R,
-      zMax: Number.isFinite(rMax) ? cz + R : cz + R,
-      rMin, rMax, radius: R,
+      positions, normals, indices: indices.subarray(0, t),
+      counts: { vertices: nv, triangles: t / 3, indices: t },
+      cylinder: true, nx, ny, sheets: L, downsample: k,
+      zMin: cz - R, zMax: cz + R,
+      rMin: Number.isFinite(rMin) ? rMin : 0, rMax: Number.isFinite(rMax) ? rMax : R, radius: R,
     };
   }
 
@@ -1208,6 +1271,7 @@
     const S = {
       data: { sim: null, segments: [], stock: null, toolTable: null, scenario: 'off' },
       heightArr: null,
+      extraMap: null,          // 圓棒的材料區間（跟 heightArr 同一份來源）
       snapshotIndex: null,
       // rotary = 工件轉動時刀的相對軌跡（那些大弧）。預設關：現場看到會以為刀在轉彎。
       visible: { rapid: true, feed: true, stock: true, surface: true, rotary: false, tools: null },
@@ -1336,7 +1400,10 @@
       // 圓柱素材（第四軸）：(X, 弧長) → 半徑 的高度圖，一次建完，不用分塊
       if (sim.cylinder) {
         S.building = false;
-        const mesh = buildCylinderMesh(sim, { height: S.heightArr, downsample: S.downsampleOpt > 1 ? S.downsampleOpt : 1 });
+        const mesh = buildCylinderMesh(sim, {
+          height: S.heightArr, extra: S.extraMap,
+          downsample: S.downsampleOpt > 1 ? S.downsampleOpt : 1,
+        });
         const c = uploadChunk(mesh);
         if (c) S.meshChunks.push(c);
         S.meshInfo = { vertices: mesh.counts.vertices, triangles: mesh.counts.triangles, downsample: mesh.downsample, chunks: S.meshChunks.length };
@@ -1865,6 +1932,7 @@
         if (typeof d.onProgress === 'function') S.progressCb = d.onProgress;
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;
+        S.extraMap = S.data.sim ? S.data.sim.extra : null;
         S.needFit = true;
         rebuildPath(); rebuildStock(); rebuildAxes(); rebuildSection();
         updateZRange(S.data.sim ? S.data.sim.floorZ : NaN, NaN);
@@ -1889,6 +1957,7 @@
         const arr = snap ? snap.height : sim.height;
         if (arr === S.heightArr) { updateHud(); return api; }
         S.heightArr = arr;
+        S.extraMap = snap ? snap.extra : sim.extra;
         if (!fastUpdateHeights(arr)) rebuildMesh();
         updateHud();
         return api;

@@ -641,8 +641,7 @@ test('圓柱素材：沒鑽到軸心就不會動到對面', async () => {
   // CYL_PROG 只鑽到剩半徑 10（沒過軸心），四個孔彼此不該互相挖穿
   for (const a of [0, 90, 180, 270]) near(NC.sim.heightAt(out, 20, a * k), 10, 0.5);
 });
-
-/** 某個 X 位置的橫截面：被切到的格 → {角度（弧度，相對正上方）, 半徑, 機台 Z, 機台 Y} */
+/** 某個 X 位置的橫截面：被挖到表面的格 → {角度（弧度，相對正上方）, 半徑, 機台 Z, 機台 Y} */
 function crossSection(out, x) {
   const ix = Math.round((x - out.origin.x) / out.cellX);
   const cut = [];
@@ -656,30 +655,83 @@ function crossSection(out, x) {
   return cut.sort((a, b) => a.th - b.th);
 }
 
-test('圓柱素材：直上直下的刀切出平底，不是同心圓弧', async () => {
-  // 刀是平行機台 Z 的圓柱，不是從軸心射出去的楔子：
-  // 槽底應該是 Z14 那個**平面**，每一格的半徑要隨角度變大（14 / cos φ），不是整片等於 14。
-  const out = await runCyl([
+/** 直上直下的 Ø10 平銑刀，沿 X 在 Ø40 圓棒上銑一條刀底 Z14 的槽 */
+function slotProgram() {
+  return [
     'M6T1(10MM)',
     'G0G90G54X10.Y0.A0.G43H1Z50.M3S1200',
     'G1Z14.F100.',
     'X40.F300.',
     'G0Z50.',
-  ].join('\n'), 20);
+  ].join('\n');
+}
+
+test('圓柱素材：直上直下的刀切出平底，不是同心圓弧', async () => {
+  // 槽底應該是 Z14 那個**平面**，每一格的半徑要隨角度變大（14 / cos φ），不是整片等於 14
+  const out = await runCyl(slotProgram(), 20);
   const cut = crossSection(out, 25);
   assert.ok(cut.length > 10, `槽的橫截面應該有一排格子，實際 ${cut.length}`);
   for (const c of cut) near(c.z, 14, 1e-6, `φ${(c.th * 180 / Math.PI).toFixed(1)}° 的刀底 Z`);
   // 兩側的半徑一定比正中間大（等半徑 = 舊的圓弧底）
-  const edge = cut[cut.length - 1];
-  assert.ok(edge.r > 14 + 0.05, `槽緣的半徑應該大於 14，實際 ${edge.r}`);
+  assert.ok(cut[cut.length - 1].r > 14.05, `槽緣的半徑應該大於 14，實際 ${cut[cut.length - 1].r}`);
   // 開口（原始表面那一圈）的寬度是刀徑的**弦長**，不是弧長；容差一格
   const open = 2 * out.radius * Math.sin(cut[cut.length - 1].th);
   assert.ok(Math.abs(open - 10) <= 2 * out.cellY, `開口寬度應該接近刀徑 10，實際 ${open}`);
-  // 槽底仍然比開口窄——側壁還是放射狀的，鉛直側壁高度圖表達不了（見 CONTRACT §13.10）
-  assert.ok(cut[cut.length - 1].y - cut[0].y < open - 1);
 });
 
-test('圓柱素材：分度鑽孔的孔心仍然剛好等於孔底（平底修正不影響正上方）', async () => {
+test('圓柱素材：槽壁是鉛直的（y = ±刀半徑），不是指向軸心的放射線', async () => {
+  // 這是整個徑向 dexel 的重點：一格記一串材料區間，
+  // 槽緣外側那些射線會變成「表面有料 → 中間空 → 下面又有料」，空洞的外緣就落在槽壁上。
+  const out = await runCyl(slotProgram(), 20);
+  const ix = Math.round((25 - out.origin.x) / out.cellX);
+  let n = 0;
+  for (let iy = 0; iy < out.ny; iy++) {
+    const sp = NC.sim.spansOf(out, iy * out.nx + ix);
+    if (sp.length < 4) continue;                       // 沒有內部空洞的射線跳過
+    const th = (out.origin.y + iy * out.cellY) / out.radius;
+    const y = sp[2] * Math.sin(th);                    // 空洞外緣 = 槽壁上的點
+    const z = sp[2] * Math.cos(th);
+    assert.ok(z > 13.9, `槽壁上的點應該在槽底之上，實際 z=${z}`);
+    near(Math.abs(y), 5, 1e-3, `槽壁應該貼在 |y| = 5（刀半徑），實際 ${y}`);
+    n++;
+  }
+  assert.ok(n >= 4, `槽緣兩側應該有一排帶空洞的射線，實際 ${n}`);
+});
+
+test('圓柱素材：貫穿孔有孔道，不再只是兩個開口', async () => {
+  // 舊模型一格只記一個半徑，孔道（工件內部的空洞）根本存不下來。
+  const out = await runCyl([
+    'M6T6(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+    'G98G81Z-25.R25.F70M8',
+    'G80',
+  ].join('\n'), 20);
+  const k = Math.PI / 180 * 20;
+  const idx = (deg) => NC.sim.cellIndex(out, 20, deg * k);
+  assert.deepEqual(NC.sim.spansOf(out, idx(0)), [], 'A0 側整條射線都被鑽穿');
+  assert.deepEqual(NC.sim.spansOf(out, idx(180)), [], 'A180 側也被穿出開口');
+  // 側邊 90°：孔道把離軸心 4.25（刀半徑）以內的材料挖掉了，表面完好
+  const side = NC.sim.spansOf(out, idx(90));
+  assert.equal(side.length, 2, `側邊應該是一段材料（內部有孔道），實際 ${JSON.stringify(side)}`);
+  near(side[0], 4.25, 0.3, '孔道的半徑就是刀半徑');
+  near(side[1], 20, 1e-6, '側邊表面完好');
+});
+
+test('圓柱素材：只越過軸心一點點 → 對面是內部空洞，表面不動', async () => {
+  const out = await runCyl([
+    'M6T6(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+    'G98G81Z-6.R25.F70M8',
+    'G80',
+  ].join('\n'), 20);
+  const k = Math.PI / 180 * 20;
+  const back = NC.sim.spansOf(out, NC.sim.cellIndex(out, 20, 180 * k));
+  assert.equal(back.length, 2);
+  near(back[0], 6, 0.1, '孔底越過軸心 6 mm');
+  near(back[1], 20, 1e-6, '對面的表面完好');
+});
+
+test('圓柱素材：分度鑽孔的孔心仍然剛好等於孔底', async () => {
   const out = await runCyl([
     'M6T6(SG-8.5)',
     'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
@@ -690,6 +742,43 @@ test('圓柱素材：分度鑽孔的孔心仍然剛好等於孔底（平底修�
   const k = Math.PI / 180 * 20;
   near(NC.sim.heightAt(out, 20, 0), 10, 1e-6);
   near(NC.sim.heightAt(out, 20, 90 * k), 10, 1e-6);
+});
+
+test('cylSection：內部空洞自成一圈，剖面才畫得出鉛直側壁', async () => {
+  const out = await runCyl(slotProgram(), 20);
+  const sec = NC.sim.cylSection(out, 25);
+  assert.ok(sec && sec.loops.length >= 3, `外圈 + 兩側空洞，實際 ${sec ? sec.loops.length : 0} 圈`);
+  const outer = sec.loops.reduce((a, b) => (a.length >= b.length ? a : b));
+  assert.equal(outer.length, out.ny, '外圈每條射線一個點');
+  // 空洞那兩圈都貼著 |y| = 5 的槽壁
+  for (const loop of sec.loops) {
+    if (loop === outer) continue;
+    const minAbsY = Math.min.apply(null, loop.map((p) => Math.abs(p.y)));
+    near(minAbsY, 5, 0.12, '空洞的內側就是槽壁');
+  }
+});
+
+test('cylSection：鑽孔的截面是一條直上直下的槽，不是橫貫整根棒子的假面', async () => {
+  // 配對規則踩過的坑：相鄰射線的材料要用**段的重疊關係**配。
+  // 拿邊界由內往外配的話，孔正上方（軸心是空的）那些射線會把軸心接到外表面，
+  // 剖面上就多出一條橫貫整根棒子的假面。
+  const out = await runCyl([
+    'M6T1(SG-6.)',
+    'G0G90G54X20.Y0.A0.G43H1Z50.M3S900',
+    'G98G81Z0.R30.F80.',
+    'G80',
+  ].join('\n'), 30);
+  const sec = NC.sim.cylSection(out, 20);
+  assert.ok(sec && sec.loops.length === 1, `孔通到軸心 → 只有一圈輪廓，實際 ${sec ? sec.loops.length : 0}`);
+  const wall = sec.loops[0].filter((p) => p.z > 5 && p.z < 25 && Math.abs(p.y) < 10);
+  assert.ok(wall.length > 20, `孔壁上應該有一整排點，實際 ${wall.length}`);
+  for (const p of wall) near(Math.abs(p.y), 3, 1e-3, '孔壁應該貼在 |y| = 3（刀半徑）');
+});
+
+test('圓柱素材：沒切過的圓棒不佔 extra，height 自己就講完了', async () => {
+  const out = await runCyl('M6T1(10MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1200\nG0A90.', 20);
+  assert.equal(out.extra.size, 0);
+  assert.deepEqual(NC.sim.spansOf(out, 0), [0, 20]);
 });
 
 test('estimateRadius：優先用真正垂直鑽的孔，不被偏在側邊的刀撐大', () => {

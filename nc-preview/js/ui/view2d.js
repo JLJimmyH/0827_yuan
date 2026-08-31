@@ -373,6 +373,7 @@
     const S = {
       data: { segments: [], sim: null, stock: null, toolTable: null, scenario: 'off' },
       heightArr: null,          // 目前顯示的高度陣列（sim.height 或某個 snapshot）
+      extraMap: null,           // 同一份的材料區間（圓棒才有）
       snapshotIndex: null,
       mode: 'top',
       section: 0,
@@ -389,6 +390,7 @@
       needFit: true,
       imageCache: null,
       cylCache: null,           // 圓棒高度圖攤成直角座標的結果（俯視／剖面 Y 用）
+      secCache: null,           // 圓棒某個 X 的橫截面輪廓（剖面 X 用）
       workCache: null,          // 段換算到工件座標的取樣（四軸的俯視／剖面共用）
       cssSized: null,           // canvas 尺寸是否由 CSS 決定（null = 還沒探測）
       toolRadius: new Map(),
@@ -1209,19 +1211,19 @@
       return out;
     }
 
-    /** 圓柱高度圖在某個 X 位置的截面輪廓 → [{y, z}]（工件座標） */
-    function cylProfile(sim, heightArr, x) {
-      const ix = Math.round((x - sim.origin.x) / sim.cellX);
-      if (!(ix >= 0 && ix < sim.nx)) return null;
-      const cy = (sim.center && sim.center.y) || 0;
-      const cz = (sim.center && sim.center.z) || 0;
-      const out = [];
-      for (let iy = 0; iy < sim.ny; iy++) {
-        const rr = heightArr[iy * sim.nx + ix];
-        const th = iy * sim.cellY / sim.radius;
-        out.push({ y: cy + rr * Math.sin(th), z: cz + rr * Math.cos(th) });
-      }
-      return out;
+    /**
+     * 圓柱素材在某個 X 位置的截面 → 一組封閉輪廓（工件座標）。
+     * 走 core 的 `NC.sim.cylSection`：每格記的是一串材料區間，
+     * 相鄰射線的材料段配對之後，槽壁與孔壁是真的鉛直的（見 CONTRACT §13.10）。
+     * 內部空洞會自成一圈，用 evenodd 填就會變成洞。
+     */
+    function cylProfile(sim, x) {
+      if (!(NC.sim && typeof NC.sim.cylSection === 'function')) return null;
+      const c = S.secCache;
+      if (c && c.arr === S.heightArr && c.x === x) return c.val;
+      const val = NC.sim.cylSection(sim, x, { height: S.heightArr, extra: S.extraMap });
+      S.secCache = { arr: S.heightArr, x, val };
+      return val;
     }
 
     /**
@@ -1237,15 +1239,18 @@
       const [cx, cy] = toScreen(c.y || 0, c.z || 0);
       ctx.setLineDash([]);
       const sim = S.data.sim;
-      const prof = (sim && sim.cylinder && S.heightArr) ? cylProfile(sim, S.heightArr, S.section) : null;
-      if (prof) {
+      const prof = (sim && sim.cylinder && S.heightArr) ? cylProfile(sim, S.section) : null;
+      if (prof && prof.loops.length) {
         ctx.beginPath();
-        for (let i = 0; i < prof.length; i++) {
-          const [sx, sy] = toScreen(prof[i].y, prof[i].z);
-          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        for (const loop of prof.loops) {
+          for (let i = 0; i < loop.length; i++) {
+            const [sx, sy] = toScreen(loop[i].y, loop[i].z);
+            if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+          }
+          ctx.closePath();
         }
-        ctx.closePath();
-        ctx.fillStyle = C.stockFill; ctx.fill();
+        // evenodd：內部空洞（孔道、槽壁下的那一小塊）自成一圈，填出來就是洞
+        ctx.fillStyle = C.stockFill; ctx.fill('evenodd');
         ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
         // 原始外圓用虛線當參考，一眼看出切掉多少
         ctx.beginPath(); ctx.arc(cx, cy, sim.radius * V.scale, 0, TAU);
@@ -1626,8 +1631,10 @@
         };
         S.snapshotIndex = null;
         S.heightArr = S.data.sim ? S.data.sim.height : null;
+        S.extraMap = S.data.sim ? S.data.sim.extra : null;   // 圓棒的材料區間（見 CONTRACT §13.10）
         S.imageCache = null;
         S.cylCache = null;
+        S.secCache = null;
         rebuildIndex();
         const V = curView();
         if (!V || V.empty) S.needFit = true;
@@ -1652,8 +1659,10 @@
         const snap = i != null && Array.isArray(sim.snapshots) ? sim.snapshots[i] : null;
         S.snapshotIndex = snap ? i : null;
         S.heightArr = snap ? snap.height : sim.height;
+        S.extraMap = snap ? snap.extra : sim.extra;
         S.imageCache = null;
         S.cylCache = null;
+        S.secCache = null;
         requestRender();
         return api;
       },
@@ -1688,6 +1697,7 @@
         if (winResize) { window.removeEventListener('resize', winResize); winResize = null; }
         S.imageCache = null;
         S.cylCache = null;
+        S.secCache = null;
       },
     };
 

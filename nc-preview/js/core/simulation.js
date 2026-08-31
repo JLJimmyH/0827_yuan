@@ -106,15 +106,14 @@
   /**
    * 圓柱素材（第四軸）。
    *
-   * 平面加工用 (X, Y) → Z 的高度圖；圓棒加工用 **(X, 弧長) → 半徑**：
-   * 每一格記「工件表面在這裡離軸心多遠」，初始值就是圓棒半徑，刀切過去就把半徑挖低。
-   * 展開之後 (X, 弧長) 也是一個平面、半徑就是「高度」，**和平面高度圖完全同構**，
-   * 所以 cutLine／cutArc／checkRapid 一行都不用改，只多兩件事：
+   * 平面加工用 (X, Y) → Z 的高度圖；圓棒加工用 (X, 弧長) 的格網，每一格記的是
+   * **沿著射線的一串材料區間** [lo, hi]（離軸心的距離）——徑向的 dexel。
+   * 一格只記一個半徑的話，鉛直的槽壁／孔壁記不下來，只會塌成指向軸心的放射線
+   * （見 CONTRACT §13.10）。格網本身與高度圖同構，所以：
    *   - 兩個方向的格距不同（周向格距 = 圓周 / 格數），所以有 cellX／cellY
    *   - 周向是循環的（wrapY），索引要繞回來
    *
-   * 限制與平面高度圖相同：表達不了側凹（橫向穿孔的內壁那種）。
-   * 對分度鑽孔與軸向銑槽是夠的。
+   * height 保留＝最外層材料的外緣（下游照舊讀它），空洞放在稀疏的 extra 裡。
    *
    * @param {{kind:'cylinder', radius:number, xMin:number, xMax:number, center?:{y:number,z:number}}} stock
    */
@@ -138,6 +137,8 @@
       origin: { x: xMin, y: 0 },
       height,
       initial: height.slice(),
+      // 每格的材料區間；只有被挖出空洞的格才進來（見「圓柱素材：每格的材料區間」）
+      extra: new Map(),
       floorZ: 0,          // 軸心
       topZ: radius,       // 圓棒表面
       radius, center, circumference,
@@ -288,13 +289,9 @@
     return [i0, i1];
   }
 
-  /**
-   * @param {{R:number, axisS:number}} [cyl]
-   *   圓柱模式的刀軸資訊：`R` 圓棒半徑、`axisS` 刀軸方向（A 角換成弧長）。
-   *   給了就改用機台幾何算覆蓋與深度（見迴圈裡的註解）；三軸不給，行為完全不變。
-   */
-  function cutLine(sim, ax, ay, bx, by, za, zb, prof, acc, cyl) {
-    const { cellX, cellY, nx, ny, origin, height, mask, floorZ, wrapY } = sim;
+  /** 平面高度圖的線段蓋章（膠囊）。圓柱素材走 scanCyl，不進這裡。 */
+  function cutLine(sim, ax, ay, bx, by, za, zb, prof, acc) {
+    const { cellX, cellY, nx, origin, height, mask } = sim;
     const r = prof.r - XY_TOL, r2 = r * r;
     const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, L = Math.sqrt(L2);
     const constZ = (za === zb) || L < XY_TOL;
@@ -308,81 +305,300 @@
     for (let iy = iy0; iy <= iy1; iy++) {
       const cy = origin.y + iy * cellY;
       const py = cy - ay;
-      const rowY = wrapY ? (((iy % ny) + ny) % ny) : iy;
-      // 圓柱模式：這一排離刀軸多少角度。只用 sin/cos，所以 s 或 A 差幾圈都無所謂。
-      let sinC = 0, cosC = 1;
-      if (cyl) {
-        const phi = (cy - cyl.axisS) / cyl.R;
-        sinC = Math.sin(phi); cosC = Math.cos(phi);
-        if (cosC <= 1e-3) continue;   // 側面或背面：刀底平面照不到
-      }
       for (let ix = ix0; ix <= ix1; ix++) {
         const cx = origin.x + ix * cellX;
         const px = cx - ax;
-        const idx = rowY * nx + ix;
         let t = L2 > 0 ? (px * dx + py * dy) / L2 : 0;
         const tc = t < 0 ? 0 : (t > 1 ? 1 : t);
-        // 圓柱模式的刀是**平行機台 Z 的圓柱**，不是從軸心射出去的楔子。
-        // 把刀尖的 (r, θ) 換回機台座標（相對迴轉中心）的 (y, z)，再照機台幾何算：
-        //   覆蓋 → 這一格表面點與刀軸的橫向距離（弦長，不是弧長）≤ 刀半徑 → 開口寬度 = 刀徑
-        //   深度 → 這一格的射線打到刀底平面 z = zTool 的長度 = zTool / cos φ → 平底，不是同心圓弧
-        // 側壁仍然是放射狀的（一格只記一個半徑，鉛直側壁表達不了，同底切的限制）。
-        let d2, eX = 0, phiT = 0, yTool = 0;
-        if (cyl) {
-          phiT = (ay + tc * dy - cyl.axisS) / cyl.R;
-          yTool = (za + (zb - za) * tc) * Math.sin(phiT);   // 刀軸的機台 y（相對迴轉中心）
-          eX = px - tc * dx;
-          const eY = height[idx] * sinC - yTool;            // 這一格「表面」點到刀軸的橫向距離
-          d2 = eX * eX + eY * eY;
-        } else {
-          const ex = px - tc * dx, ey = py - tc * dy;
-          d2 = ex * ex + ey * ey;
-        }
+        const ex = px - tc * dx, ey = py - tc * dy;
+        const d2 = ex * ex + ey * ey;
         if (d2 >= r2) continue;
-        // 刀底的參數位置：Z 沿線變化時取「格子被圓盤蓋到的區間 [t−w, t+w] ∩ [0,1]」內最低的 Z
-        let sPar = tc;
-        if (!constZ) {
+        let h;
+        if (constZ) {
+          h = prof.kind === FLAT ? zLo : zLo + dzOf(prof, Math.sqrt(d2));
+        } else {
+          // 平面足跡、Z 沿線變化：格子被圓盤蓋到的參數區間 [t−w, t+w] ∩ [0,1]，取區間內最低 Z
           const qx = px - t * dx, qy = py - t * dy;
           const w = Math.sqrt(Math.max(0, r2 - (qx * qx + qy * qy))) / L;
-          sPar = zb < za ? Math.min(1, t + w) : Math.max(0, t - w);
+          const s = zb < za ? Math.min(1, t + w) : Math.max(0, t - w);
+          h = za + (zb - za) * s;
         }
-        const zBase = constZ ? zLo : za + (zb - za) * sPar;
-        let h;
-        if (cyl) {
-          const cosD = constZ ? Math.cos(phiT) : Math.cos((ay + sPar * dy - cyl.axisS) / cyl.R);
-          const zTool = zBase * cosD;                       // 刀底平面的機台 z
-          // 錐尖／球端的橫向距離要在**刀底那個深度**量，不是在表面量（在表面量會讓孔心多挖一點）
-          const eB = (zTool / cosC) * sinC - yTool;
-          const coneOff = (constZ && prof.kind !== FLAT) ? dzOf(prof, Math.hypot(eX, eB)) : 0;
-          h = (zTool + coneOff) / cosC;
-        } else {
-          h = zBase + ((constZ && prof.kind !== FLAT) ? dzOf(prof, Math.sqrt(d2)) : 0);
-        }
-        // 圓柱素材：h 是「離軸心多遠」。刀尖切到負的代表**穿過軸心**（貫穿孔），
-        // 對面那半圈也被挖穿了——高度圖一格只記一個半徑，不補這一刀的話
-        // 鑽穿的孔在成品上只會有一半。穿出去多深，對面就挖到多深。
-        let through = 0;
-        if (h < floorZ) {
-          if (wrapY) through = floorZ - h;
-          h = floorZ;
-        }
+        const idx = iy * nx + ix;
         const old = height[idx];
         if (h < old - 1e-7) {
           if (mask[idx]) { acc.fixtureHit = mask[idx]; acc.fixturePos = { x: cx, y: cy, z: old }; continue; }
           removed += old - h;
           height[idx] = h;
         }
-        if (through > 0) {
-          const oi = (((rowY + (ny >> 1)) % ny) * nx) + ix;
-          const oldO = height[oi];
-          // 刀尖要**真的穿出對面表面**才會有開口。只是越過軸心一點點的話，
-          // 對面那一段材料還好好的（洞在工件內部），高度圖表達不了那種內部空洞——
-          // 若照「表面被挖低」記進去，會憑空削掉一大塊還在的材料。
-          if (through >= oldO - 1e-7) { removed += oldO; height[oi] = 0; }
-        }
       }
     }
     acc.removed += removed * cellX * cellY;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 圓柱素材：每格的材料區間（徑向 dexel）
+  //
+  // 平面高度圖每格只記一個數字，鉛直側壁在徑向射線上會變成「表面有料 → 中間空 →
+  // 下面又有料」，記不下來就只能塌成一條指向軸心的放射線——那不是物理事實。
+  // 所以圓柱素材每格記的是**一串材料區間** [lo, hi]（離軸心的距離）。
+  //
+  // 存法是稀疏的：絕大多數格都是實心的 [0, height]，那種格不進 extra，
+  // height[idx] 自己就講完了。只有真的被挖出空洞的格才在 extra 裡放完整的區間表
+  // （升冪、不重疊、最後一段的 hi 一定等於 height[idx]）。
+  // 這樣 height 的語意不變（= 最外層材料的外緣），俯視、剖面 Y、碰撞、R20／R33
+  // 這些既有的下游一行都不用改。
+  // ---------------------------------------------------------------------------
+  const MAX_SPANS = 3;        // 每格最多幾段材料；超過就把最薄的空洞填掉
+
+  /** 複製一份 extra（快照與回傳結果都要獨立的一份，不然會被後續切削改掉） */
+  function cloneExtra(extra) {
+    const out = new Map();
+    if (extra) for (const [k, v] of extra) out.set(k, v.slice());
+    return out;
+  }
+
+  /** 這一格的材料區間 → [lo0,hi0,lo1,hi1,…]（升冪）。實心格不佔 extra 的位子 */
+  function spansOf(sim, idx) {
+    const e = sim.extra && sim.extra.get(idx);
+    if (e) return e;
+    const h = sim.height[idx];
+    return h > 0 ? [0, h] : [];
+  }
+
+  /** 寫回一格的材料區間；順便維持 height ＝ 最外層的外緣 */
+  function setSpans(sim, idx, sp) {
+    const n = sp.length;
+    sim.height[idx] = n ? sp[n - 1] : sim.floorZ;
+    if (n === 0 || (n === 2 && sp[0] <= 0)) sim.extra.delete(idx);   // 實心格：height 就講完了
+    else sim.extra.set(idx, sp);
+  }
+
+  /**
+   * 從一格的材料裡挖掉 [lo, hi]。
+   * 回傳挖掉的**面積矩** Σ(hi²−lo²)/2 —— 乘上 Δx·Δθ 就是體積
+   * （圓柱格的斷面積隨半徑變，拿長度乘格距會高估外圈、低估內圈）。
+   */
+  function spanSubtract(sim, idx, lo, hi) {
+    if (!(hi > lo)) return 0;
+    const cur = spansOf(sim, idx);
+    if (!cur.length) return 0;
+    const out = [];
+    let m2 = 0;
+    for (let i = 0; i < cur.length; i += 2) {
+      const a = cur[i], b = cur[i + 1];
+      if (hi <= a || lo >= b) { out.push(a, b); continue; }
+      const ca = Math.max(a, lo), cb = Math.min(b, hi);
+      m2 += (cb * cb - ca * ca) / 2;
+      if (a < lo - 1e-9) out.push(a, lo);
+      if (hi + 1e-9 < b) out.push(hi, b);
+    }
+    if (m2 <= 1e-12) return 0;
+    // 段數上限：超過就把最薄的那個空洞填回去（一格記不了無限層，寧可少一個內部空洞）
+    while (out.length > MAX_SPANS * 2) {
+      let best = 1, bestGap = Infinity;
+      for (let i = 1; i + 1 < out.length; i += 2) {
+        const gap = out[i + 1] - out[i];
+        if (gap < bestGap) { bestGap = gap; best = i; }
+      }
+      out.splice(best, 2);
+    }
+    setSpans(sim, idx, out);
+    return m2;
+  }
+
+  /** 這一格的材料與 [lo, hi] 有沒有交集；有的話回傳交集最外緣的半徑，沒有回 -1 */
+  function spanHit(sim, idx, lo, hi) {
+    const cur = spansOf(sim, idx);
+    let best = -1;
+    for (let i = 0; i < cur.length; i += 2) {
+      const a = cur[i], b = cur[i + 1];
+      if (hi <= a || lo >= b) continue;
+      const cb = Math.min(b, hi);
+      if (cb > best) best = cb;
+    }
+    return best;
+  }
+
+  /**
+   * 兩條相鄰射線的材料段配對（兩邊都是升冪、不重疊的 `[lo,hi]` 串）。
+   *
+   * **在 r 上有重疊的段就配成一對**——那是同一塊材料延續到隔壁射線；
+   * 配不到的段就地封口，封口的那一面就是**鉛直側壁**：槽壁、孔壁、鑽尖的底面
+   * 都是這樣長出來的。用「段」而不是「邊界」配，兩種情形才會同時對：
+   *   - 銑槽：槽緣外側的射線多一段薄殼 → 薄殼配不到，就地封口 = 槽壁
+   *   - 鑽孔：孔正上方的射線軸心是空的 → 兩邊的段仍然重疊、照配，
+   *     孔壁與孔底自然接起來（拿邊界由內往外配的話，會把軸心接到外表面）
+   *
+   * 一段最多只配一次（隔壁分岔成兩段時，第二段封口），這樣每個端點在這一側
+   * 剛好一條連線，輪廓才串得成封閉圈。
+   */
+  function matchSpans(A, B, onPair, onCapA, onCapB) {
+    const nA = A.length / 2, nB = B.length / 2;
+    let i = 0, j = 0;
+    while (i < nA && j < nB) {
+      if (A[2 * i + 1] <= B[2 * j]) { onCapA(i); i++; }
+      else if (B[2 * j + 1] <= A[2 * i]) { onCapB(j); j++; }
+      else { onPair(i, j); i++; j++; }
+    }
+    while (i < nA) { onCapA(i); i++; }
+    while (j < nB) { onCapB(j); j++; }
+  }
+
+  /**
+   * 某個 X 位置的橫截面 → 一組封閉輪廓（工件座標的 {y, z}）。
+   * 剖面 X 直接畫這個：外圈是圓棒表面，槽與孔的內壁自成一圈或接在外圈上，
+   * 側壁是真的鉛直的（相鄰射線的內側邊界連起來就是那面牆）。
+   * @param {Object} [src] 要讀的來源（`{height, extra}`，例如某個 snapshot）；不給就用 sim 本身
+   * @returns {{loops: Array<Array<{y:number,z:number}>>}|null}
+   */
+  function cylSection(sim, x, src) {
+    if (!sim || !sim.cylinder) return null;
+    const ix = Math.round((x - sim.origin.x) / (sim.cellX || sim.cell));
+    if (!(ix >= 0 && ix < sim.nx)) return null;
+    const ny = sim.ny, R = sim.radius;
+    const cy = (sim.center && sim.center.y) || 0, cz = (sim.center && sim.center.z) || 0;
+    const SP = new Array(ny), link = new Array(ny), seen = new Array(ny);
+    for (let i = 0; i < ny; i++) {
+      SP[i] = spansOf(src || sim, i * sim.nx + ix);
+      link[i] = new Int32Array(SP[i].length * 4).fill(-1);   // 每個端點兩個鄰居：[左ray,左k, 右ray,右k]
+      seen[i] = new Uint8Array(SP[i].length);
+    }
+    const set = (i, k, side, i2, k2) => { const o = k * 4 + (side ? 2 : 0); link[i][o] = i2; link[i][o + 1] = k2; };
+    for (let i = 0; i < ny; i++) {
+      const j = (i + 1) % ny;
+      matchSpans(SP[i], SP[j],
+        (a, b) => {
+          for (let e = 0; e < 2; e++) { set(i, 2 * a + e, 1, j, 2 * b + e); set(j, 2 * b + e, 0, i, 2 * a + e); }
+        },
+        (a) => { set(i, 2 * a, 1, i, 2 * a + 1); set(i, 2 * a + 1, 1, i, 2 * a); },
+        (b) => { set(j, 2 * b, 0, j, 2 * b + 1); set(j, 2 * b + 1, 0, j, 2 * b); });
+    }
+    const pt = (i, k) => {
+      const th = i * sim.cellY / R, r = SP[i][k];
+      return { y: cy + r * Math.sin(th), z: cz + r * Math.cos(th), r };
+    };
+    const loops = [];
+    for (let i0 = 0; i0 < ny; i0++) {
+      for (let k0 = 0; k0 < SP[i0].length; k0++) {
+        if (seen[i0][k0]) continue;
+        const loop = [];
+        let i = i0, k = k0, side = 1, rMax = 0;      // side=1 往右走
+        while (i >= 0 && !seen[i][k]) {
+          seen[i][k] = 1;
+          const p = pt(i, k);
+          if (p.r > rMax) rMax = p.r;
+          loop.push({ y: p.y, z: p.z });
+          const o = k * 4 + (side ? 2 : 0);
+          const i2 = link[i][o], k2 = link[i][o + 1];
+          if (i2 < 0) break;
+          // 到了下一個點是從哪一側進來的：它的右鄰指回我們就是右側
+          side = (link[i2][k2 * 4 + 2] === i && link[i2][k2 * 4 + 3] === k) ? 0 : 1;
+          i = i2; k = k2;
+        }
+        // 實心軸心那一圈全部落在軸心上（每段的 lo 都是 0），不是輪廓
+        if (loop.length > 1 && rMax > 1e-6) loops.push(loop);
+      }
+    }
+    return { loops };
+  }
+
+  /**
+   * 圓柱模式的核心：**這一格的射線 ∩ 刀具實體** → 離軸心的距離區間 [lo, hi]，沒交集回 null。
+   *
+   * 全部在機台座標算（相對迴轉中心）。刀是平行機台 Z 的旋轉體，
+   * 射線從軸心往角度 φ 射出去，半徑 r 的點在機台座標是 (x, r·sinφ, r·cosφ)：
+   *   側面（圓柱）：|r·sinφ − y刀| ≤ √(刀半徑² − Δx²)   → r 的一段區間
+   *   刀底（平底）：r·cosφ ≥ z刀                        → r 的半直線
+   * 刀具實體是凸的 ⇒ 與射線的交集一定是**單一區間**，不會有第二段。
+   *
+   * 錐尖（鑽頭）與球端（球刀）的底不是平面，各自多解一個二次式，一樣是封閉解。
+   * cosφ < 0 的格是對面那半圈：只有刀尖越過軸心（z刀 < 0）才有交集——
+   * 貫穿孔的孔道與對面的開口因此是自然算出來的，不必再另外補一刀。
+   *
+   * @param {{r:number,kind:number,tanHalf:number}} prof 刀具足跡剖面
+   * @param {number} sinC 這一格射線角度 φ（相對刀軸方向）的 sin
+   * @param {number} cosC 同上的 cos
+   * @param {number} eX   這一格與刀軸的軸向距離
+   * @param {number} yT   刀軸的機台 y（相對迴轉中心）
+   * @param {number} zT   刀底的機台 z（相對迴轉中心）
+   * @returns {{lo:number, hi:number}|null}
+   */
+  function toolRayInterval(prof, sinC, cosC, eX, yT, zT) {
+    const Rt = prof.r - XY_TOL;
+    const q = Rt * Rt - eX * eX;
+    if (q <= 0) return null;
+    const Rp = Math.sqrt(q);            // 這個軸向位置上刀的半徑
+    let lo = 0, hi = Infinity;
+    // 側面
+    if (Math.abs(sinC) < 1e-12) {
+      if (Math.abs(yT) >= Rp) return null;
+    } else {
+      const r1 = (yT - Rp) / sinC, r2 = (yT + Rp) / sinC;
+      lo = Math.max(lo, Math.min(r1, r2));
+      hi = Math.min(hi, Math.max(r1, r2));
+    }
+    // 刀底（先當平底；錐／球再往上抬）
+    if (Math.abs(cosC) < 1e-12) { if (zT > 0) return null; }
+    else if (cosC > 0) lo = Math.max(lo, zT / cosC);
+    else hi = Math.min(hi, zT / cosC);
+    if (!(hi > lo)) return null;
+
+    if (prof.kind === CONE) {
+      // ζ = r·cosφ − z刀 ≥ 0 之下，「在錐面之上」是 ζ·T ≥ ρ，平方之後對 r 是二次式
+      const T = prof.tanHalf;
+      if (!(T > 0)) return null;
+      const a = T * T * cosC * cosC - sinC * sinC;
+      const b = -2 * T * T * cosC * zT + 2 * sinC * yT;
+      const k = T * T * zT * zT - yT * yT - eX * eX;
+      const res = quadRange(a, b, k, cosC > 0);
+      if (!res) return null;
+      lo = Math.max(lo, res.lo); hi = Math.min(hi, res.hi);
+    } else if (prof.kind === SPHERE) {
+      // 球端 ＝（圓柱 ∩ ζ ≥ 刀半徑）∪ 球心在刀軸上、離刀尖一個刀半徑的球。兩塊相接，取聯集
+      const zc = zT + Rt;
+      let sLo = Infinity, sHi = -Infinity;
+      if (Math.abs(cosC) > 1e-12) {
+        const rc = zc / cosC;
+        if (cosC > 0) { if (hi > rc) { sLo = Math.max(lo, rc); sHi = hi; } }
+        else if (lo < rc) { sLo = lo; sHi = Math.min(hi, rc); }
+      } else if (zc <= 0) { sLo = lo; sHi = hi; }
+      // 球：r² − 2r(sinφ·y刀 + cosφ·zc) + (y刀² + zc² + Δx² − 刀半徑²) ≤ 0
+      const bb = -2 * (sinC * yT + cosC * zc);
+      const kk = yT * yT + zc * zc + eX * eX - Rt * Rt;
+      const disc = bb * bb - 4 * kk;
+      if (disc >= 0) {
+        const sq = Math.sqrt(disc);
+        const q0 = (-bb - sq) / 2, q1 = (-bb + sq) / 2;
+        if (q1 > lo && q0 < hi) {
+          sLo = Math.min(sLo, Math.max(lo, q0));
+          sHi = Math.max(sHi, Math.min(hi, q1));
+        }
+      }
+      if (!(sHi > sLo)) return null;
+      lo = sLo; hi = sHi;
+    }
+    if (lo < 0) lo = 0;
+    return (hi > lo) ? { lo, hi } : null;
+  }
+
+  /**
+   * a·r² + b·r + k ≥ 0 的解集合。
+   * 刀具實體是凸的 ⇒ 最後交出來一定是單一區間，所以 a > 0（解在兩根之外）時
+   * 只會取到其中一支：射線往外走 ζ 增加的那一支（outward）。
+   */
+  function quadRange(a, b, k, outward) {
+    if (Math.abs(a) < 1e-12) {
+      if (Math.abs(b) < 1e-12) return (k >= 0) ? { lo: -Infinity, hi: Infinity } : null;
+      const r = -k / b;
+      return b > 0 ? { lo: r, hi: Infinity } : { lo: -Infinity, hi: r };
+    }
+    const disc = b * b - 4 * a * k;
+    if (disc < 0) return a > 0 ? { lo: -Infinity, hi: Infinity } : null;
+    const sq = Math.sqrt(disc);
+    const r0 = (-b - sq) / (2 * a), r1 = (-b + sq) / (2 * a);
+    const lo = Math.min(r0, r1), hi = Math.max(r0, r1);
+    if (a < 0) return { lo, hi };
+    return outward ? { lo: hi, hi: Infinity } : { lo: -Infinity, hi: lo };
   }
 
   // ---------------------------------------------------------------------------
@@ -453,36 +669,126 @@
     }));
   }
 
-  /** 圓柱模式的切削：映射之後就是一般的平面蓋章，只是刀底要照機台幾何算（見 cutLine 的 cyl） */
-  function cutSegmentCyl(sim, seg, prof) {
-    const acc = { removed: 0, fixtureHit: 0, fixturePos: null };
-    const pts = unrollPoints(sim, seg);
-    const sub = sim.cell / 2;
-    const k = Math.PI / 180 * sim.radius;
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const a = pts[i], b = pts[i + 1];
-      const cyl = { R: sim.radius, axisS: (a.a + b.a) / 2 * k };
-      const L = Math.hypot(b.x - a.x, b.s - a.s);
-      const dr = b.r - a.r;
-      if (L < XY_TOL) {
-        // 原地往中心扎（分度鑽孔）：對齊格點，孔心那格才會剛好等於孔底
-        const rr = Math.min(a.r, b.r);
-        const sx = sim.origin.x + Math.round((a.x - sim.origin.x) / sim.cellX) * sim.cellX;
-        const sy = sim.origin.y + Math.round((a.s - sim.origin.y) / sim.cellY) * sim.cellY;
-        cutLine(sim, sx, sy, sx, sy, rr, rr, prof, acc, cyl);
-      } else if (Math.abs(dr) < 1e-9 || prof.kind === FLAT) {
-        cutLine(sim, a.x, a.s, b.x, b.s, a.r, b.r, prof, acc, cyl);
-      } else {
-        const n = Math.max(1, Math.ceil(Math.abs(dr) / sub));
-        for (let j = 0; j < n; j++) {
-          const t0 = j / n, t1 = (j + 1) / n;
-          const rr = Math.min(a.r + dr * t0, a.r + dr * t1);
-          cutLine(sim, a.x + (b.x - a.x) * t0, a.s + (b.s - a.s) * t0,
-            a.x + (b.x - a.x) * t1, a.s + (b.s - a.s) * t1, rr, rr, prof, acc, cyl);
+  /**
+   * 圓柱模式：掃過一步的刀（刀尖半徑 r、刀軸方向 axisS）會碰到的格。
+   *
+   * `cut` 為真就把「射線 ∩ 刀具」從材料區間裡挖掉；為假只檢查有沒有撞到還在的材料
+   * （快速移動的碰撞檢查與切削共用同一套幾何，兩邊不會各算各的）。
+   */
+  function scanCyl(sim, ax, as, bx, bs, r, axisS, prof, cut, acc) {
+    const { cellX, cellY, nx, ny, origin, mask } = sim;
+    const R = sim.radius;
+    const dx = bx - ax, ds = bs - as, L2 = dx * dx + ds * ds;
+    const ix0 = Math.max(0, Math.floor((Math.min(ax, bx) - prof.r - origin.x) / cellX));
+    const ix1 = Math.min(nx - 1, Math.ceil((Math.max(ax, bx) + prof.r - origin.x) / cellX));
+    if (ix0 > ix1) return;
+    // 周向範圍：射線要同時滿足側面與刀底才有交集。刀底在 z刀 > 0 時
+    // tanφ ≤ (|y刀| + 刀半徑) / z刀 就是角度上限；刀尖越過軸心（z刀 ≤ 0）時整圈都可能被挖到。
+    const phi0 = (as - axisS) / R, phi1 = (bs - axisS) / R;
+    const zT0 = Math.min(r * Math.cos(phi0), r * Math.cos(phi1));
+    const yT0 = Math.max(Math.abs(r * Math.sin(phi0)), Math.abs(r * Math.sin(phi1)));
+    const phiMax = zT0 > 1e-6 ? Math.atan((yT0 + prof.r) / zT0) : Math.PI;
+    const yr = yRange(sim, axisS - R * phiMax, axisS + R * phiMax);
+    let m2 = 0;
+    for (let iy = yr[0]; iy <= yr[1]; iy++) {
+      const cs = origin.y + iy * cellY;
+      const phi = (cs - axisS) / R;
+      const sinC = Math.sin(phi), cosC = Math.cos(phi);
+      const rowY = ((iy % ny) + ny) % ny;
+      const py = cs - as;
+      for (let ix = ix0; ix <= ix1; ix++) {
+        const cx = origin.x + ix * cellX;
+        const px = cx - ax;
+        let t = L2 > 0 ? (px * dx + py * ds) / L2 : 0;
+        const tc = t < 0 ? 0 : (t > 1 ? 1 : t);
+        const phiT = (as + tc * ds - axisS) / R;
+        const iv = toolRayInterval(prof, sinC, cosC, px - tc * dx, r * Math.sin(phiT), r * Math.cos(phiT));
+        if (!iv) continue;
+        const idx = rowY * nx + ix;
+        if (cut) {
+          if (mask[idx]) {
+            if (spanHit(sim, idx, iv.lo, iv.hi) >= 0) {
+              acc.fixtureHit = mask[idx];
+              acc.fixturePos = { x: cx, y: cs, z: sim.height[idx] };
+            }
+            continue;
+          }
+          m2 += spanSubtract(sim, idx, iv.lo, iv.hi);
+        } else {
+          const hitR = spanHit(sim, idx, iv.lo, iv.hi);
+          if (hitR < 0) continue;
+          const excess = hitR - iv.lo;
+          if (excess > Z_TOL && (!acc.worst || excess > acc.worst.excess)) {
+            acc.worst = {
+              x: cx, y: cs, z: hitR, toolZ: iv.lo, tipZ: r,
+              cone: prof.kind !== FLAT, excess, fixture: mask[idx],
+            };
+          }
         }
       }
     }
+    // 圓柱格的斷面積隨半徑變，所以體積用面積矩 × Δx × Δθ，不是長度 × 格距
+    if (cut) acc.removed += m2 * cellX * (cellY / R);
+  }
+
+  /**
+   * 圓柱模式的切削。
+   * 映射到展開座標之後把路徑細分成小步（每步的周向與徑向位移都 ≤ 半格），
+   * 每一步當成一個靜止的刀位。純軸向的走刀（分度銑槽最常見）Δs = Δr = 0，
+   * 一步就走完，不會被細分拖慢；原地下扎也是一步——刀軸不動時只有最深的那個刀位算數。
+   */
+  function cutSegmentCyl(sim, seg, prof) {
+    const acc = { removed: 0, fixtureHit: 0, fixturePos: null };
+    forEachCylStep(sim, seg, (ax, as, bx, bs, r, axisS) => {
+      scanCyl(sim, ax, as, bx, bs, r, axisS, prof, true, acc);
+    });
     return acc;
+  }
+
+  /**
+   * 圓柱模式的快速移動碰撞檢查：跟切削同一套幾何，只是不挖，只看有沒有撞到還在的材料。
+   * 回傳的 z／toolZ／tipZ 都是「離軸心多遠」，現場看到的才是熟悉的數字。
+   */
+  function checkRapidCyl(sim, seg, prof) {
+    const acc = { worst: null };
+    let minR = Infinity;
+    for (const p of unrollPoints(sim, seg)) minR = Math.min(minR, p.r);
+    if (minR >= sim.topZ) return null;    // 整段都在圓棒外面，不可能撞
+    forEachCylStep(sim, seg, (ax, as, bx, bs, r, axisS) => {
+      scanCyl(sim, ax, as, bx, bs, r, axisS, prof, false, acc);
+    });
+    return acc.worst;
+  }
+
+  /**
+   * 一段 → 一連串「靜止刀位」的小步：(ax, as) → (bx, bs)、刀尖半徑 r、刀軸方向 axisS（弧長）。
+   * 刀軸方向與刀尖半徑在一步之內當成固定，所以周向與徑向的位移都切到半格以內；
+   * 軸向（X）不必切——同一個刀軸掃過去，逐格取最近的刀位就是精確解。
+   */
+  function forEachCylStep(sim, seg, fn) {
+    const pts = unrollPoints(sim, seg);
+    const sub = Math.max(sim.cell / 2, 1e-6);
+    const k = Math.PI / 180 * sim.radius;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const dsAbs = Math.abs(b.s - a.s);
+      if (Math.hypot(b.x - a.x, b.s - a.s) < XY_TOL) {
+        // 原地往中心扎（分度鑽孔）：刀軸不動，只有最深的刀位算數。
+        // 對齊格點，孔心那格才會剛好等於孔底（不然錐尖落在格與格之間，孔心永遠差一點）
+        const sx = sim.origin.x + Math.round((a.x - sim.origin.x) / sim.cellX) * sim.cellX;
+        const sy = sim.origin.y + Math.round((a.s - sim.origin.y) / sim.cellY) * sim.cellY;
+        fn(sx, sy, sx, sy, Math.min(a.r, b.r), (a.a + b.a) / 2 * k);
+        continue;
+      }
+      const n = Math.max(1, Math.ceil(Math.max(dsAbs, Math.abs(b.r - a.r)) / sub));
+      for (let j = 0; j < n; j++) {
+        const t0 = j / n, t1 = (j + 1) / n;
+        const lerp = (u, v, t) => u + (v - u) * t;
+        fn(lerp(a.x, b.x, t0), lerp(a.s, b.s, t0), lerp(a.x, b.x, t1), lerp(a.s, b.s, t1),
+          Math.min(lerp(a.r, b.r, t0), lerp(a.r, b.r, t1)),
+          lerp(a.a, b.a, (t0 + t1) / 2) * k);
+      }
+    }
   }
 
   /** 對一個切削段蓋章；回傳累積資訊 */
@@ -578,22 +884,6 @@
     return worst;
   }
 
-  /**
-   * 圓柱模式的快速移動碰撞檢查。
-   * 映射到展開座標之後，每個小段就是一般的平面問題；整段取最差的一個干涉點。
-   * 回傳的座標換回機台座標的 Z（= 半徑），現場看到的才是熟悉的數字。
-   */
-  function checkRapidCyl(sim, seg, prof) {
-    const pts = unrollPoints(sim, seg);
-    let worst = null;
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const a = pts[i], b = pts[i + 1];
-      const fake = { from: { x: a.x, y: a.s, z: a.r }, to: { x: b.x, y: b.s, z: b.r } };
-      const w = checkRapidPlanar(sim, fake, prof);
-      if (w && (!worst || w.excess > worst.excess)) worst = w;
-    }
-    return worst;
-  }
 
   // ---------------------------------------------------------------------------
   // run
@@ -663,6 +953,7 @@
     let closed = -1; // 已結束（已存 snapshot 或不需再跑）的最大 op 索引
     if (base) {
       height.set(base.height);
+      if (sim.extra) sim.extra = cloneExtra(base.extra);
       closed = base.afterOpIndex;
       snapshots = sim.snapshots.filter((s) => s.afterOpIndex <= closed);
       events = (sim.events || []).filter((e) => e.opIndex == null || e.opIndex <= closed);
@@ -670,13 +961,17 @@
       pre = (sim.time && sim.time.pre) || 0;
     } else {
       height.set(sim.initial);
+      if (sim.extra) sim.extra.clear();
     }
     sim.scenario = scenario;
 
     const closeOpsBefore = (o) => {
       for (let i = closed + 1; i < o && i < nOps; i++) {
         if ((i + 1) % stride === 0 || i === nOps - 1) {
-          snapshots.push({ afterOpIndex: i, tool: ops[i] ? ops[i].tool : null, height: height.slice() });
+          snapshots.push({
+            afterOpIndex: i, tool: ops[i] ? ops[i].tool : null,
+            height: height.slice(), extra: cloneExtra(sim.extra),
+          });
         }
         closed = i;
       }
@@ -829,6 +1124,7 @@
       cylinder: !!sim.cylinder,
       radius: sim.radius, center: sim.center, circumference: sim.circumference,
       height: height.slice(),
+      extra: cloneExtra(sim.extra),
       floorZ: sim.floorZ,
       snapshots: snapshots.slice(),
       events: events.slice(),
@@ -857,5 +1153,8 @@
     return idx < 0 ? null : s.height[idx];
   }
 
-  NC.sim = { create, run, profileFor, selectSegments, heightAt, cellIndex, segLength };
+  NC.sim = {
+    create, run, profileFor, selectSegments, heightAt, cellIndex, segLength,
+    spansOf, matchSpans, cylSection,
+  };
 })(globalThis.NC = globalThis.NC || {});
