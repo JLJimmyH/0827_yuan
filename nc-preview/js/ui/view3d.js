@@ -695,6 +695,7 @@
     /**
      * 封口面（鉛直的槽壁／孔壁）自己配一組頂點，法線不跟表面平滑在一起。
      * 隔壁那格也有同一個封口就鋪四邊形；沒有就收成三角形（特徵在這一格結束）。
+     * 插了轉角點（cornerTheta／cornerX）會多到五、六個點：從第一點扇形三角化。
      */
     function capFace(pts, want) {
       const base = pos.length / 3;
@@ -705,9 +706,67 @@
       const vx = pl[0] - p0[0], vy = pl[1] - p0[1], vz = pl[2] - p0[2];
       const nxv = uy * vz - uz * vy, nyv = uz * vx - ux * vz, nzv = ux * vy - uy * vx;
       const flip = (nxv * want[0] + nyv * want[1] + nzv * want[2]) < 0;
-      if (pts.length === 4) quad(base, base + 1, base + 2, base + 3, flip);
-      else if (flip) tri(base, base + 2, base + 1);
-      else tri(base, base + 1, base + 2);
+      for (let i = 1; i + 1 < pts.length; i++) {
+        if (flip) tri(base, base + i + 1, base + i);
+        else tri(base, base + i, base + i + 1);
+      }
+    }
+    /**
+     * 封口外緣的**轉角外插**——跟剖面的 capCorner 同一招（CONTRACT §13.10）。
+     * 牆與外緣的交角幾乎都落在兩條射線之間，封口照射線畫會把角落斜切掉一格
+     * （格距 0.5、槽深 8 時是一條 0.5 寬、3.5 mm 深的斜口）。資料是對的，是畫法丟了轉角。
+     *
+     * 走向從封口的**內側端點（牆點）**抓：查隔壁一列（欄）半徑最接近的**同型**端點
+     * （lo 對 lo、hi 對 hi——牆是同一個邊界延續過去的），外插回外緣半徑 r1。
+     * 轉角點是**插進** p0→p1 之間，不是移動 p1：p1 那條邊還要跟隔壁的表面條帶密合，
+     * 移走會沿著槽緣開出一條細縫。缺口太淺（≤ 一格）、抓不到走向、
+     * 或外插跑太遠（t ∉ (1,4)，走向不可靠）就回 null，維持原本的直線封口。
+     */
+    function wallNeighbor(ix2, iy2, r0, parity) {
+      const sp = spansAt(ix2, iy2);
+      let best = -1;
+      for (let k = parity; k < sp.length; k += 2) {
+        if (best < 0 || Math.abs(sp[k] - r0) < Math.abs(best - r0)) best = sp[k];
+      }
+      return best;   // -1 = 這一格沒有同型端點
+    }
+    /** 周向封口的轉角：x 固定，在 (y,z) 平面解 |pn + t·d| = r1 的二次式（同 capCorner） */
+    function cornerTheta(ix2, iy2, r0, r1, parity) {
+      if (!(r1 - r0 > cellY)) return null;
+      let pn = null;
+      for (const d of [-1, 1]) {
+        const jy = ((iy2 + d) % ny + ny) % ny;
+        const r = wallNeighbor(ix2, jy, r0, parity);
+        if (r >= 0 && (!pn || Math.abs(r - r0) < Math.abs(pn.r - r0))) pn = { r, jy };
+      }
+      if (!pn) return null;
+      const py = pn.r * sn[pn.jy], pz = pn.r * cs[pn.jy];
+      const dy = r0 * sn[iy2] - py, dz = r0 * cs[iy2] - pz;
+      const a = dy * dy + dz * dz;
+      if (!(a > 1e-12)) return null;
+      const b = 2 * (py * dy + pz * dz);
+      const c = py * py + pz * pz - r1 * r1;
+      const disc = b * b - 4 * a * c;
+      if (disc <= 0) return null;
+      const t = (-b + Math.sqrt(disc)) / (2 * a);
+      if (!(t > 1 && t < 4)) return null;
+      return [sim.origin.x + ix2 * cellX, cy + py + t * dy, cz + pz + t * dz];
+    }
+    /** 軸向封口的轉角：θ 固定，在 (x, r) 平面直線外插到 r1 */
+    function cornerX(ix2, iy2, r0, r1, parity) {
+      if (!(r1 - r0 > cellX)) return null;
+      let pn = null;
+      for (const d of [-1, 1]) {
+        const jx = ix2 + d;
+        if (jx < 0 || jx >= nx) continue;
+        const r = wallNeighbor(jx, iy2, r0, parity);
+        if (r >= 0 && (!pn || Math.abs(r - r0) < Math.abs(pn.r - r0))) pn = { r, jx };
+      }
+      if (!pn || Math.abs(r0 - pn.r) < 1e-9) return null;
+      const t = (r1 - pn.r) / (r0 - pn.r);
+      if (!(t > 1 && t < 4)) return null;
+      const x = sim.origin.x + (pn.jx + t * (ix2 - pn.jx)) * cellX;
+      return [x, cy + r1 * sn[iy2], cz + r1 * cs[iy2]];
     }
 
     /** 一整列的材料區間 */
@@ -785,10 +844,20 @@
           const s = ((e % 2) === 0) ? 1 : -1;
           const want = [0, s * cs[iy], -s * sn[iy]];
           const p0 = ptOf(Ea, ix, iy, e), p1 = ptOf(Ea, ix, iy, e1);
+          const c0 = cornerTheta(ix, iy, A[e], A[e1], e % 2);
           if (f0 >= 0 && f1 >= 0 && T.ca[ix + 1][f0] === f1) {
-            capFace([p0, p1, ptOf(Ea, ix + 1, iy, f1), ptOf(Ea, ix + 1, iy, f0)], want);
+            const c1 = cornerTheta(ix + 1, iy, Ea[ix + 1][f0], Ea[ix + 1][f1], e % 2);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Ea, ix + 1, iy, f1));
+            if (c1) pts.push(c1);
+            pts.push(ptOf(Ea, ix + 1, iy, f0));
+            capFace(pts, want);
           } else if (f0 >= 0 || f1 >= 0) {
-            capFace([p0, p1, ptOf(Ea, ix + 1, iy, f0 >= 0 ? f0 : f1)], want);   // 特徵在這一格收口
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Ea, ix + 1, iy, f0 >= 0 ? f0 : f1));   // 特徵在這一格收口
+            capFace(pts, want);
           }
         }
         // 周向封口——B 側：特徵從 −θ 冒出來，封在 row iyb。跟 ca 成鏡像：
@@ -801,10 +870,20 @@
           const s = ((e % 2) === 0) ? -1 : 1;
           const want = [0, s * cs[iyb], -s * sn[iyb]];
           const p0 = ptOf(Eb, ix, iyb, e), p1 = ptOf(Eb, ix, iyb, e1);
+          const c0 = cornerTheta(ix, iyb, Eb[ix][e], Eb[ix][e1], e % 2);
           if (f0 >= 0 && f1 >= 0 && T.cb[ix + 1][f0] === f1) {
-            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, f1), ptOf(Eb, ix + 1, iyb, f0)], want);
+            const c1 = cornerTheta(ix + 1, iyb, Eb[ix + 1][f0], Eb[ix + 1][f1], e % 2);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Eb, ix + 1, iyb, f1));
+            if (c1) pts.push(c1);
+            pts.push(ptOf(Eb, ix + 1, iyb, f0));
+            capFace(pts, want);
           } else if (f0 >= 0 || f1 >= 0) {
-            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, f0 >= 0 ? f0 : f1)], want);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Eb, ix + 1, iyb, f0 >= 0 ? f0 : f1));
+            capFace(pts, want);
           }
         }
         // 軸向封口（槽頭那一面）——A 側：特徵往 +X 消失，封在 ix
@@ -814,10 +893,20 @@
           const d0 = T.la[ix][e], d1 = T.la[ix][e1];
           const s = ((e % 2) === 0) ? 1 : -1;
           const p0 = ptOf(Ea, ix, iy, e), p1 = ptOf(Ea, ix, iy, e1);
+          const c0 = cornerX(ix, iy, A[e], A[e1], e % 2);
           if (d0 >= 0 && d1 >= 0 && Xb.cf[ix][d0] === d1) {
-            capFace([p0, p1, ptOf(Eb, ix, iyb, d1), ptOf(Eb, ix, iyb, d0)], [s, 0, 0]);
+            const c1 = cornerX(ix, iyb, Eb[ix][d0], Eb[ix][d1], e % 2);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Eb, ix, iyb, d1));
+            if (c1) pts.push(c1);
+            pts.push(ptOf(Eb, ix, iyb, d0));
+            capFace(pts, [s, 0, 0]);
           } else if (d0 >= 0 || d1 >= 0) {
-            capFace([p0, p1, ptOf(Eb, ix, iyb, d0 >= 0 ? d0 : d1)], [s, 0, 0]);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Eb, ix, iyb, d0 >= 0 ? d0 : d1));
+            capFace(pts, [s, 0, 0]);
           }
         }
         // 軸向封口——B 側：特徵從 −X 冒出來，封在 ix+1（跟 cf 成鏡像，法線取反）
@@ -827,10 +916,20 @@
           const d0 = T.la[ix + 1][e], d1 = T.la[ix + 1][e1];
           const s = ((e % 2) === 0) ? 1 : -1;
           const p0 = ptOf(Ea, ix + 1, iy, e), p1 = ptOf(Ea, ix + 1, iy, e1);
+          const c0 = cornerX(ix + 1, iy, Ea[ix + 1][e], Ea[ix + 1][e1], e % 2);
           if (d0 >= 0 && d1 >= 0 && Xb.cb[ix][d0] === d1) {
-            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, d1), ptOf(Eb, ix + 1, iyb, d0)], [-s, 0, 0]);
+            const c1 = cornerX(ix + 1, iyb, Eb[ix + 1][d0], Eb[ix + 1][d1], e % 2);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Eb, ix + 1, iyb, d1));
+            if (c1) pts.push(c1);
+            pts.push(ptOf(Eb, ix + 1, iyb, d0));
+            capFace(pts, [-s, 0, 0]);
           } else if (d0 >= 0 || d1 >= 0) {
-            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, d0 >= 0 ? d0 : d1)], [-s, 0, 0]);
+            const pts = [p0];
+            if (c0) pts.push(c0);
+            pts.push(p1, ptOf(Eb, ix + 1, iyb, d0 >= 0 ? d0 : d1));
+            capFace(pts, [-s, 0, 0]);
           }
         }
       }

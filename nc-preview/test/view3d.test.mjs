@@ -797,6 +797,27 @@ test('buildCylinderMesh：空洞帶的兩端都有封口面（網格水密、繞
   assert.equal(cylOpenEdges(NC.ui.view3d.buildCylinderMesh(sim)), 0, '空洞帶四個端面都要封起來');
 });
 
+test('buildCylinderMesh：槽口的轉角要補回表面（跟剖面的 capCorner 同一招）', async () => {
+  // Ø10 平刀在 R20 圓棒銑槽底 Z14 → 槽壁 y = ±5，轉角在 (±5, √(400−25) = 19.36)。
+  // 轉角幾乎都落在兩條射線之間，封口不外插的話槽緣會被斜切掉一格。
+  // ±5 兩側各走一條封口路徑（一側 ca、一側 cb），兩邊都要有轉角點。
+  const res = NC.analyzeSync({
+    text: '%\nO1\nM6T1(10MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1200\nG1Z14.F100.\nX40.F300.\nG0Z50.\nM30\n%',
+  });
+  const sim = NC.sim.create({ kind: 'cylinder', radius: 20, xMin: -5, xMax: 65, center: { y: 0, z: 0 } }, 0.5);
+  const out = await NC.sim.run(sim, res.scenarios.off, res.toolTable, NC.util.defaultSettings(), {});
+  const m = NC.ui.view3d.buildCylinderMesh(out);
+  const zc = Math.sqrt(20 * 20 - 25);
+  for (const sgn of [1, -1]) {
+    let hit = false;
+    for (let i = 0; i < m.counts.vertices && !hit; i++) {
+      const x = m.positions[i * 3], y = m.positions[i * 3 + 1], z = m.positions[i * 3 + 2];
+      hit = x > 15 && x < 35 && Math.abs(y - sgn * 5) < 0.15 && Math.abs(z - zc) < 0.2;
+    }
+    assert.ok(hit, `網格上應該有 (${sgn * 5}, ${zc.toFixed(2)}) 的槽口轉角點`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 剖面：3D 上的那片平面 + 剖切
 // ---------------------------------------------------------------------------
