@@ -744,18 +744,37 @@ test('圓柱素材：分度鑽孔的孔心仍然剛好等於孔底', async () =>
   near(NC.sim.heightAt(out, 20, 90 * k), 10, 1e-6);
 });
 
-test('cylSection：內部空洞自成一圈，剖面才畫得出鉛直側壁', async () => {
+test('cylSection：槽壁在輪廓上是一條鉛直線', async () => {
   const out = await runCyl(slotProgram(), 20);
   const sec = NC.sim.cylSection(out, 25);
-  assert.ok(sec && sec.loops.length >= 3, `外圈 + 兩側空洞，實際 ${sec ? sec.loops.length : 0} 圈`);
-  const outer = sec.loops.reduce((a, b) => (a.length >= b.length ? a : b));
-  assert.equal(outer.length, out.ny, '外圈每條射線一個點');
-  // 空洞那兩圈都貼著 |y| = 5 的槽壁
-  for (const loop of sec.loops) {
-    if (loop === outer) continue;
-    const minAbsY = Math.min.apply(null, loop.map((p) => Math.abs(p.y)));
-    near(minAbsY, 5, 0.12, '空洞的內側就是槽壁');
-  }
+  assert.ok(sec && sec.loops.length >= 1, '至少要有一圈輪廓');
+  // 槽底 Z14、外圓 R20：這個帶狀範圍裡只會有槽壁的點（外圓在這個 z 要 |y| > 8.7）
+  const wall = sec.loops.reduce((a, l) => a.concat(l), [])
+    .filter((p) => p.z > 14.2 && p.z < 18 && Math.abs(p.y) > 2 && Math.abs(p.y) < 8);
+  assert.ok(wall.length >= 4, `槽壁上應該有一排輪廓點，實際 ${wall.length}`);
+  for (const p of wall) near(Math.abs(p.y), 5, 0.15, '槽壁應該貼在 |y| = 5（刀半徑）');
+});
+
+test('鑽到迴轉中心：θ 在軸心沒有意義，不能讓刀軸「掃過去一大段」', async () => {
+  // unrollPath 踩過的坑：刀尖剛好落在軸心時 atan2(0,0) 回 0，
+  // 展開座標上會從原本的角度瞬間跳到 0，模擬就沿路挖掉一整片扇形。
+  const out = await runCyl([
+    'M6T1(6MM)',
+    'G0G90G54X20.Y0.A0.G43H1Z50.M3S1200',
+    'G98G81Z0.R30.F80.',    // 鑽到 Z0 = 迴轉中心
+    'G80',
+  ].join('\n'), 30);
+  const ix = Math.round((20 - out.origin.x) / out.cellX);
+  let opened = 0;
+  for (let iy = 0; iy < out.ny; iy++) if (out.height[iy * out.nx + ix] < 30 - 1e-6) opened++;
+  // Ø6 的孔在 R30 的表面只開一條 6 mm 的口（約 12 格），不是半圈
+  assert.ok(opened < 20, `表面只該開一條孔口，實際開了 ${opened} 格（共 ${out.ny} 格）`);
+  // 側邊 45°：孔道把離軸心 3/sin45 以內挖掉了，表面完好
+  const k = Math.PI / 180 * 30;
+  const side = NC.sim.spansOf(out, NC.sim.cellIndex(out, 20, 45 * k));
+  assert.equal(side.length, 2, `側邊應該是一段材料（內部有孔道），實際 ${JSON.stringify(side)}`);
+  near(side[0], 3 / Math.sin(Math.PI / 4), 0.2, '孔道邊界');
+  near(side[1], 30, 1e-6, '表面完好');
 });
 
 test('cylSection：鑽孔的截面是一條直上直下的槽，不是橫貫整根棒子的假面', async () => {

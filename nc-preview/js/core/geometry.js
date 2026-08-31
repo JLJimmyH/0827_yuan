@@ -972,7 +972,11 @@
         let d = th - prev;
         while (d > 180) { th -= 360; d -= 360; }
         while (d < -180) { th += 360; d += 360; }
-        if (Math.abs(d) > 90) { th = prev; r = -r; }   // 穿過軸心
+        // 剛好落在軸心（鑽到 Z = 迴轉中心）：atan2(0,0) 回 0，θ 沒有意義。
+        // 照字面收下的話，展開座標上會從原本的角度瞬間跳到 0，模擬就把它讀成
+        // 「刀軸掃過去一大段」，沿路挖掉一整片扇形。沿用前一點的角度才對。
+        if (r < 1e-9) th = prev;
+        else if (Math.abs(d) >= 90) { th = prev; r = -r; }   // 穿過軸心
       }
       prev = th;
       out.push({ x: u.x, theta: th, r });

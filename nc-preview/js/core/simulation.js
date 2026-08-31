@@ -420,28 +420,49 @@
   }
 
   /**
-   * 兩條相鄰射線的材料段配對（兩邊都是升冪、不重疊的 `[lo,hi]` 串）。
+   * 兩條相鄰射線的材料配對（兩邊都是升冪、不重疊的 `[lo,hi]` 串）。
    *
-   * **在 r 上有重疊的段就配成一對**——那是同一塊材料延續到隔壁射線；
-   * 配不到的段就地封口，封口的那一面就是**鉛直側壁**：槽壁、孔壁、鑽尖的底面
-   * 都是這樣長出來的。用「段」而不是「邊界」配，兩種情形才會同時對：
-   *   - 銑槽：槽緣外側的射線多一段薄殼 → 薄殼配不到，就地封口 = 槽壁
-   *   - 鑽孔：孔正上方的射線軸心是空的 → 兩邊的段仍然重疊、照配，
-   *     孔壁與孔底自然接起來（拿邊界由內往外配的話，會把軸心接到外表面）
+   * 先把在 r 上互相重疊的段收成一「群」，再對每一群接：
+   *   - 群最內側的 lo 對 lo、群最外側的 hi 對 hi（那是同一塊材料延續過去）
+   *   - 群裡其他邊界**就地封口**（`hi_k` 接 `lo_{k+1}`）——封口的那一面就是**鉛直側壁**
+   *   - 整群只有一邊有（隔壁完全沒有）→ 這一群自己收口（最內的 lo 接最外的 hi）
    *
-   * 一段最多只配一次（隔壁分岔成兩段時，第二段封口），這樣每個端點在這一側
-   * 剛好一條連線，輪廓才串得成封閉圈。
+   * 為什麼要分群，不能一段對一段：一邊是完整的 `[0,30]`、隔壁被挖成
+   * `[0,1.8]` + `[3.3,30]` 時，一段對一段會把 30 接到 1.8，剖面上就多一條
+   * 橫貫整根棒子的假面。分群之後 0 接 0、30 接 30，中間的 1.8→3.3 自己封口＝孔壁。
+   *
+   * 每個端點在這一側剛好一條連線，輪廓才串得成封閉圈。
+   *
+   * @param {number[]} A 這一側的材料區間
+   * @param {number[]} B 隔壁那一側
+   * @param {(ka:number, kb:number)=>void} onPair  A 的第 ka 個端點接 B 的第 kb 個
+   * @param {(k0:number, k1:number)=>void} onCapA  A 自己的兩個端點就地接起來
+   * @param {(k0:number, k1:number)=>void} onCapB
    */
   function matchSpans(A, B, onPair, onCapA, onCapB) {
     const nA = A.length / 2, nB = B.length / 2;
     let i = 0, j = 0;
-    while (i < nA && j < nB) {
-      if (A[2 * i + 1] <= B[2 * j]) { onCapA(i); i++; }
-      else if (B[2 * j + 1] <= A[2 * i]) { onCapB(j); j++; }
-      else { onPair(i, j); i++; j++; }
+    while (i < nA || j < nB) {
+      const i0 = i, j0 = j;
+      let end;
+      if (i < nA && (j >= nB || A[2 * i] <= B[2 * j])) { end = A[2 * i + 1]; i++; }
+      else { end = B[2 * j + 1]; j++; }
+      for (let grew = true; grew;) {          // 把所有跟這一群重疊的段拉進來
+        grew = false;
+        while (i < nA && A[2 * i] < end) { if (A[2 * i + 1] > end) end = A[2 * i + 1]; i++; grew = true; }
+        while (j < nB && B[2 * j] < end) { if (B[2 * j + 1] > end) end = B[2 * j + 1]; j++; grew = true; }
+      }
+      if (i > i0 && j > j0) {
+        onPair(2 * i0, 2 * j0);                       // 群最內側的 lo
+        onPair(2 * (i - 1) + 1, 2 * (j - 1) + 1);     // 群最外側的 hi
+      } else if (i > i0) {
+        onCapA(2 * i0, 2 * (i - 1) + 1);              // 這一群在隔壁整個不見了
+      } else {
+        onCapB(2 * j0, 2 * (j - 1) + 1);
+      }
+      for (let k = i0; k + 1 < i; k++) onCapA(2 * k + 1, 2 * (k + 1));   // 群裡的空洞各自封口
+      for (let k = j0; k + 1 < j; k++) onCapB(2 * k + 1, 2 * (k + 1));
     }
-    while (i < nA) { onCapA(i); i++; }
-    while (j < nB) { onCapB(j); j++; }
   }
 
   /**
@@ -467,11 +488,9 @@
     for (let i = 0; i < ny; i++) {
       const j = (i + 1) % ny;
       matchSpans(SP[i], SP[j],
-        (a, b) => {
-          for (let e = 0; e < 2; e++) { set(i, 2 * a + e, 1, j, 2 * b + e); set(j, 2 * b + e, 0, i, 2 * a + e); }
-        },
-        (a) => { set(i, 2 * a, 1, i, 2 * a + 1); set(i, 2 * a + 1, 1, i, 2 * a); },
-        (b) => { set(j, 2 * b, 0, j, 2 * b + 1); set(j, 2 * b + 1, 0, j, 2 * b); });
+        (ka, kb) => { set(i, ka, 1, j, kb); set(j, kb, 0, i, ka); },
+        (k0, k1) => { set(i, k0, 1, i, k1); set(i, k1, 1, i, k0); },
+        (k0, k1) => { set(j, k0, 0, j, k1); set(j, k1, 0, j, k0); });
     }
     const pt = (i, k) => {
       const th = i * sim.cellY / R, r = SP[i][k];

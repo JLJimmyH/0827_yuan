@@ -615,21 +615,20 @@
   /**
    * 圓棒素材 → 三角網格（純函式，不碰 WebGL）。
    *
-   * 素材每格記的是**一串材料區間**（見 CONTRACT §13.10）。把每格的邊界由內往外編號，
-   * 第 k 層就是一張 (X, 弧長) 的格網「面」：
-   *   θ = 弧長 / 半徑 ;  x = 軸向 ;  y = cy + r·sinθ ;  z = cz + r·cosθ
+   * 素材每格記的是**一串材料區間**（見 CONTRACT §13.10），所以一個格點上有好幾個
+   * 「面上的點」＝區間的端點（偶數是內向的 lo、奇數是外向的 hi）。要把它們鋪成面，
+   * 關鍵是**相鄰射線的端點要怎麼對**——用 `NC.sim.matchSpans`（跟剖面同一套）：
+   * 重疊的材料成群、群最內側的 lo 對 lo、最外側的 hi 對 hi，配不到的就地封口。
    *
-   * 為什麼要分層：一格只畫最外面那個邊界的話，槽口那一格會直接連到槽底，
-   * 側壁就被畫成一條斜的倒角。真正的側壁是**相鄰射線的內側邊界連起來**的那一面
-   * ——它在第 1 層。沒有那一層的格（例如槽正中央，整條射線都被挖掉）就把該層
-   * 夾到自己最外面的邊界，讓面自然收合，不會破洞。
+   * 一格四個角，沿 X 與沿周向各配一次；四條連線繞回原點才鋪面（`a→b→c→d→a`）。
+   * 繞不回來的地方是拓樸真的變了（孔口、槽頭），那裡改用**封口面**補上——
+   * 封口面就是鉛直的槽壁與孔壁。封口面自己配一組頂點（不跟表面共用），
+   * 法線才不會被平滑掉、看起來像倒角。
    *
-   * 層數 L 取全場最多的邊界數：沒切過的圓棒 L = 1，跟舊版一模一樣（單一張面 + 兩端封口）。
-   * 第 1 層以上只在「四個角至少有一個真的有那一層」的地方才鋪面，
-   * 否則整根棒子會被三張重疊的面蓋住（互相 z-fighting，又白白多三倍三角形）。
+   * 不能用「第 k 層」硬對：一邊是完整的 [0,30]、隔壁被挖成 [0,1.8]+[3.3,30] 時，
+   * 第 1 層會把外表面 30 接到孔壁 1.8，成品上就多出一片橫貫整根棒子的假面。
    *
-   * 法線用半徑梯度算（徑向再減掉軸向與周向的斜率），內向的面要反過來，
-   * 背面剔除才不會把孔壁剃掉。
+   * 兩端加封口圓面（用最外圈的輪廓），否則從側面看得進圓棒內部。
    *
    * @param {Object} sim  cylinder 模式的 SimResult 或 sim
    * @param {{height?:Float32Array, extra?:Map, downsample?:number}} [opts]
@@ -647,142 +646,203 @@
     const R = sim.radius;
     const cy = (sim.center && sim.center.y) || 0;
     const cz = (sim.center && sim.center.z) || 0;
-    const srcIdx = (ix, iy) => {
+    const hasCore = !!(NC.sim && typeof NC.sim.spansOf === 'function' && typeof NC.sim.matchSpans === 'function');
+    const spansAt = (ix, iy) => {
       const sx = Math.min(nx0 - 1, ix * k);
       const sy = ((Math.round(iy * ny0 / ny) % ny0) + ny0) % ny0;
-      return sy * nx0 + sx;
+      const si = sy * nx0 + sx;
+      if (hasCore) return NC.sim.spansOf(src, si);
+      return H[si] > 0 ? [0, H[si]] : [];      // core 沒載入：退回單一區間，行為同舊版
     };
-    // 每個格點的材料區間 [lo0,hi0,lo1,hi1,…]。層 = 區間的端點：偶數是內向面（lo）、
-    // 奇數是外向面（hi）。core 沒載入時退回單一區間 [0, 高度]，行為同舊版。
-    const bounds = new Array(nx * ny);
-    let L = 1;
-    for (let iy = 0; iy < ny; iy++) {
-      for (let ix = 0; ix < nx; ix++) {
-        const si = srcIdx(ix, iy);
-        const b = (NC.sim && typeof NC.sim.spansOf === 'function')
-          ? NC.sim.spansOf(src, si)
-          : (H[si] > 0 ? [0, H[si]] : []);
-        bounds[iy * nx + ix] = b;
-        if (b.length > L) L = b.length;
-      }
-    }
-    L = Math.min(L, MAX_SHEETS);
-    const lenAt = (i) => bounds[i].length;
-    const rAt = (i, lv) => { const b = bounds[i]; return b[lv < b.length ? lv : b.length - 1]; };
-    // 端點是內向（lo，面朝軸心）還是外向（hi）；夾到最外面時一律是外向
-    const outAt = (i, lv) => { const n = bounds[i].length; return (Math.min(lv, n - 1) % 2) === 1; };
-
-    // ---- 哪些（層, 格點）真的要頂點 ----
-    const vid = new Int32Array(L * nx * ny).fill(-1);
-    const quads = [];   // [lv, i00, i10, i11, i01, outward]
-    for (let iy = 0; iy < ny; iy++) {
-      const iy1 = (iy + 1) % ny;
-      for (let ix = 0; ix + 1 < nx; ix++) {
-        const c = [iy * nx + ix, iy * nx + ix + 1, iy1 * nx + ix + 1, iy1 * nx + ix];
-        if (lenAt(c[0]) === 0 || lenAt(c[1]) === 0 || lenAt(c[2]) === 0 || lenAt(c[3]) === 0) continue;
-        let maxN = 0, argMax = c[0];
-        for (const i of c) if (lenAt(i) > maxN) { maxN = lenAt(i); argMax = i; }
-        for (let lv = 0; lv < L; lv++) {
-          if (lv > 0 && maxN <= lv) break;          // 四個角都沒有這一層 → 不鋪（會跟下一層重疊）
-          // 四個角都貼在軸心（實心棒的第 0 層就是這樣）→ 沒有面積，不必鋪
-          if (rAt(c[0], lv) < 1e-9 && rAt(c[1], lv) < 1e-9 && rAt(c[2], lv) < 1e-9 && rAt(c[3], lv) < 1e-9) continue;
-          quads.push(lv, c[0], c[1], c[2], c[3], outAt(argMax, lv) ? 1 : 0);
-          for (const i of c) vid[lv * nx * ny + i] = 0;
-        }
-      }
-    }
-    // ---- 頂點 ----
-    let nv = 0;
-    for (let i = 0; i < vid.length; i++) if (vid[i] === 0) vid[i] = nv++;
-    const nCap = ny + 1;                    // 每個端面：圓心 + 一圈
-    const capBase = [nv, nv + nCap];
-    nv += nCap * 2;
-    const positions = new Float32Array(nv * 3);
-    const normals = new Float32Array(nv * 3);
-    let rMin = Infinity, rMax = -Infinity;
     const th = new Float64Array(ny), sn = new Float64Array(ny), cs = new Float64Array(ny);
     for (let iy = 0; iy < ny; iy++) {
       th[iy] = iy * cellY / R;
       sn[iy] = Math.sin(th[iy]);
       cs[iy] = Math.cos(th[iy]);
     }
-    for (let lv = 0; lv < L; lv++) {
-      const base = lv * nx * ny;
-      for (let iy = 0; iy < ny; iy++) {
-        for (let ix = 0; ix < nx; ix++) {
-          const i = iy * nx + ix;
-          const v = vid[base + i];
-          if (v < 0) continue;
-          const r = rAt(i, lv);
-          if (r < rMin) rMin = r;
-          if (r > rMax) rMax = r;
-          const o = v * 3;
-          positions[o] = sim.origin.x + ix * cellX;
-          positions[o + 1] = cy + r * sn[iy];
-          positions[o + 2] = cz + r * cs[iy];
-          // 梯度法線：軸向與周向的半徑斜率
-          const rx0 = rAt(iy * nx + Math.max(0, ix - 1), lv), rx1 = rAt(iy * nx + Math.min(nx - 1, ix + 1), lv);
-          const ry0 = rAt(((iy - 1 + ny) % ny) * nx + ix, lv), ry1 = rAt(((iy + 1) % ny) * nx + ix, lv);
-          const dr_dx = (rx1 - rx0) / (2 * cellX);
-          const dr_ds = (ry1 - ry0) / (2 * cellY);
-          const f = outAt(i, lv) ? 1 : -1;      // 內向面（孔壁、槽壁）法線要反過來
-          let nxv = -dr_dx * f;
-          let nyv = (sn[iy] - dr_ds * cs[iy]) * f;
-          let nzv = (cs[iy] + dr_ds * sn[iy]) * f;
-          const len = Math.hypot(nxv, nyv, nzv) || 1;
-          normals[o] = nxv / len; normals[o + 1] = nyv / len; normals[o + 2] = nzv / len;
+
+    const pos = [], nor = [], idx = [];
+    let rMin = Infinity, rMax = -Infinity;
+    /** 取得（或建立）某個格點某個端點的頂點編號 */
+    function vertexOf(vid, E, ix, iy, e) {
+      let v = vid[ix][e];
+      if (v >= 0) return v;
+      const r = E[ix][e];
+      if (r < rMin) rMin = r;
+      if (r > rMax) rMax = r;
+      v = pos.length / 3;
+      pos.push(sim.origin.x + ix * cellX, cy + r * sn[iy], cz + r * cs[iy]);
+      nor.push(0, 0, 0);
+      vid[ix][e] = v;
+      return v;
+    }
+    /** 四邊形 → 兩個三角形；法線累加到頂點（平滑），繞向由 flip 決定 */
+    function quad(a, b, c, d, flip) {
+      if (flip) { const t = b; b = d; d = t; }
+      tri(a, b, c); tri(a, c, d);
+    }
+    function tri(a, b, c) {
+      const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+      const ux = pos[b * 3] - ax, uy = pos[b * 3 + 1] - ay, uz = pos[b * 3 + 2] - az;
+      const vx = pos[c * 3] - ax, vy = pos[c * 3 + 1] - ay, vz = pos[c * 3 + 2] - az;
+      const nxv = uy * vz - uz * vy, nyv = uz * vx - ux * vz, nzv = ux * vy - uy * vx;
+      if (!(Math.abs(nxv) + Math.abs(nyv) + Math.abs(nzv) > 1e-12)) return;   // 退化三角形不要
+      idx.push(a, b, c);
+      for (const i of [a, b, c]) { nor[i * 3] += nxv; nor[i * 3 + 1] += nyv; nor[i * 3 + 2] += nzv; }
+    }
+    /**
+     * 封口面（鉛直的槽壁／孔壁）自己配一組頂點，法線不跟表面平滑在一起。
+     * 隔壁那格也有同一個封口就鋪四邊形；沒有就收成三角形（特徵在這一格結束）。
+     */
+    function capFace(pts, want) {
+      const base = pos.length / 3;
+      for (const p of pts) { pos.push(p[0], p[1], p[2]); nor.push(0, 0, 0); }
+      // 想要的法線方向：從材料那側指向空的那側
+      const p0 = pts[0], p1 = pts[1], pl = pts[pts.length - 1];
+      const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+      const vx = pl[0] - p0[0], vy = pl[1] - p0[1], vz = pl[2] - p0[2];
+      const nxv = uy * vz - uz * vy, nyv = uz * vx - ux * vz, nzv = ux * vy - uy * vx;
+      const flip = (nxv * want[0] + nyv * want[1] + nzv * want[2]) < 0;
+      if (pts.length === 4) quad(base, base + 1, base + 2, base + 3, flip);
+      else if (flip) tri(base, base + 2, base + 1);
+      else tri(base, base + 1, base + 2);
+    }
+
+    /** 一整列的材料區間 */
+    const rowSpans = (iy) => { const a = new Array(nx); for (let ix = 0; ix < nx; ix++) a[ix] = spansAt(ix, iy); return a; };
+    const rowVid = (E) => { const a = new Array(nx); for (let ix = 0; ix < nx; ix++) a[ix] = new Int32Array(E[ix].length).fill(-1); return a; };
+    /** 兩排對應點的連線：l = 對面的端點編號、c = 自己這排被封口的對象 */
+    function links(EA, EB) {
+      const la = new Array(nx), lb = new Array(nx), ca = new Array(nx), cb = new Array(nx);
+      for (let ix = 0; ix < nx; ix++) {
+        const A = EA[ix], B = EB[ix];
+        const _la = new Int32Array(A.length).fill(-1), _lb = new Int32Array(B.length).fill(-1);
+        const _ca = new Int32Array(A.length).fill(-1), _cb = new Int32Array(B.length).fill(-1);
+        if (hasCore) {
+          NC.sim.matchSpans(A, B,
+            (a, b) => { _la[a] = b; _lb[b] = a; },
+            (a0, a1) => { _ca[a0] = a1; _ca[a1] = a0; },
+            (b0, b1) => { _cb[b0] = b1; _cb[b1] = b0; });
+        } else {
+          for (let e = 0; e < Math.min(A.length, B.length); e++) { _la[e] = e; _lb[e] = e; }
+        }
+        la[ix] = _la; lb[ix] = _lb; ca[ix] = _ca; cb[ix] = _cb;
+      }
+      return { la, lb, ca, cb };
+    }
+    /** 同一排上沿 X 的連線（ix → ix+1） */
+    function linksX(E) {
+      const f = new Array(nx - 1), b = new Array(nx - 1), cf = new Array(nx - 1), cb = new Array(nx - 1);
+      for (let ix = 0; ix + 1 < nx; ix++) {
+        const A = E[ix], B = E[ix + 1];
+        const _f = new Int32Array(A.length).fill(-1), _b = new Int32Array(B.length).fill(-1);
+        const _cf = new Int32Array(A.length).fill(-1), _cb = new Int32Array(B.length).fill(-1);
+        if (hasCore) {
+          NC.sim.matchSpans(A, B,
+            (a, bb) => { _f[a] = bb; _b[bb] = a; },
+            (a0, a1) => { _cf[a0] = a1; _cf[a1] = a0; },
+            (b0, b1) => { _cb[b0] = b1; _cb[b1] = b0; });
+        } else {
+          for (let e = 0; e < Math.min(A.length, B.length); e++) { _f[e] = e; _b[e] = e; }
+        }
+        f[ix] = _f; b[ix] = _b; cf[ix] = _cf; cb[ix] = _cb;
+      }
+      return { f, b, cf, cb };
+    }
+
+    const E0 = rowSpans(0), V0 = rowVid(E0), X0 = linksX(E0);
+    let Ea = E0, Va = V0, Xa = X0;
+    for (let iy = 0; iy < ny; iy++) {
+      const last = iy === ny - 1;
+      const Eb = last ? E0 : rowSpans(iy + 1);
+      const Vb = last ? V0 : rowVid(Eb);
+      const Xb = last ? X0 : linksX(Eb);
+      const T = links(Ea, Eb);                    // 周向：iy → iy+1
+      const iyb = last ? 0 : iy + 1;
+      const ptOf = (E, ix, iyy, e) => [sim.origin.x + ix * cellX, cy + E[ix][e] * sn[iyy], cz + E[ix][e] * cs[iyy]];
+      for (let ix = 0; ix + 1 < nx; ix++) {
+        const A = Ea[ix];
+        for (let e = 0; e < A.length; e++) {
+          // a(ix,iy,e) → b(ix+1,iy) → c(ix+1,iy+1) → d(ix,iy+1) → 繞回 a
+          const eb = Xa.f[ix][e]; if (eb < 0) continue;
+          const ec = T.la[ix + 1][eb]; if (ec < 0) continue;
+          const ed = T.la[ix][e]; if (ed < 0) continue;
+          if (Xb.f[ix][ed] !== ec) continue;
+          const ra = A[e], rb = Ea[ix + 1][eb], rc = Eb[ix + 1][ec], rd = Eb[ix][ed];
+          if (ra < 1e-9 && rb < 1e-9 && rc < 1e-9 && rd < 1e-9) continue;   // 四個角都在軸心，沒有面積
+          quad(vertexOf(Va, Ea, ix, iy, e), vertexOf(Va, Ea, ix + 1, iy, eb),
+            vertexOf(Vb, Eb, ix + 1, iyb, ec), vertexOf(Vb, Eb, ix, iyb, ed),
+            (e % 2) === 0);                        // 偶數端點是內向面（lo），繞向要反過來
+        }
+        // 周向封口（槽壁沿 X 延伸的那一面）
+        const Ca = T.ca[ix];
+        for (let e = 0; e < Ca.length; e++) {
+          const e1 = Ca[e]; if (e1 < 0 || e1 < e) continue;
+          const f0 = Xa.f[ix][e], f1 = Xa.f[ix][e1];
+          // 材料在 e→e1 之間（e 是 lo）→ 法線朝 +θ；是空洞（e 是 hi）→ 朝 −θ
+          const s = ((e % 2) === 0) ? 1 : -1;
+          const want = [0, s * cs[iy], -s * sn[iy]];
+          const p0 = ptOf(Ea, ix, iy, e), p1 = ptOf(Ea, ix, iy, e1);
+          if (f0 >= 0 && f1 >= 0 && T.ca[ix + 1][f0] === f1) {
+            capFace([p0, p1, ptOf(Ea, ix + 1, iy, f1), ptOf(Ea, ix + 1, iy, f0)], want);
+          } else if (f0 >= 0 || f1 >= 0) {
+            capFace([p0, p1, ptOf(Ea, ix + 1, iy, f0 >= 0 ? f0 : f1)], want);   // 特徵在這一格收口
+          }
+        }
+        // 軸向封口（槽頭那一面）
+        const Cx = Xa.cf[ix];
+        for (let e = 0; e < Cx.length; e++) {
+          const e1 = Cx[e]; if (e1 < 0 || e1 < e) continue;
+          const d0 = T.la[ix][e], d1 = T.la[ix][e1];
+          const s = ((e % 2) === 0) ? 1 : -1;
+          const p0 = ptOf(Ea, ix, iy, e), p1 = ptOf(Ea, ix, iy, e1);
+          if (d0 >= 0 && d1 >= 0 && Xb.cf[ix][d0] === d1) {
+            capFace([p0, p1, ptOf(Eb, ix, iyb, d1), ptOf(Eb, ix, iyb, d0)], [s, 0, 0]);
+          } else if (d0 >= 0 || d1 >= 0) {
+            capFace([p0, p1, ptOf(Eb, ix, iyb, d0 >= 0 ? d0 : d1)], [s, 0, 0]);
+          }
         }
       }
+      Ea = Eb; Va = Vb; Xa = Xb;
     }
-    // 端面（x = 兩端）：圓心 + 一圈，法線沿 ∓X。用最外圈的邊界（看得到的輪廓）
+
+    // 端面（x = 兩端）：圓心 + 一圈，法線沿 ∓X。用最外圈的輪廓（看得到的那一圈）
     for (let c = 0; c < 2; c++) {
       const ix = c === 0 ? 0 : nx - 1;
       const x = sim.origin.x + ix * cellX;
       const nsign = c === 0 ? -1 : 1;
-      const b = capBase[c];
-      let o = b * 3;
-      positions[o] = x; positions[o + 1] = cy; positions[o + 2] = cz;
-      normals[o] = nsign; normals[o + 1] = 0; normals[o + 2] = 0;
+      const base = pos.length / 3;
+      pos.push(x, cy, cz); nor.push(nsign, 0, 0);
       for (let iy = 0; iy < ny; iy++) {
-        const bb = bounds[iy * nx + ix];
-        const r = bb.length ? bb[bb.length - 1] : 0;   // 最外圈 = 看得到的輪廓
-        o = (b + 1 + iy) * 3;
-        positions[o] = x; positions[o + 1] = cy + r * sn[iy]; positions[o + 2] = cz + r * cs[iy];
-        normals[o] = nsign; normals[o + 1] = 0; normals[o + 2] = 0;
+        const sp = spansAt(ix, iy);
+        const r = sp.length ? sp[sp.length - 1] : 0;
+        pos.push(x, cy + r * sn[iy], cz + r * cs[iy]);
+        nor.push(nsign, 0, 0);
+      }
+      // 繞向：θ 增加的方向繞出來的法線是 +X（右手定則），
+      // 所以 xMax 那端照 (心, i0, i1) 走、xMin 那端要反過來，兩端的正面才都朝外。
+      // 寫反的話背面剔除會把端面剃掉，從某些角度就會直接看穿進圓棒內部。
+      for (let iy = 0; iy < ny; iy++) {
+        const i0 = base + 1 + iy, i1 = base + 1 + ((iy + 1) % ny);
+        if (c === 0) idx.push(base, i0, i1); else idx.push(base, i1, i0);
       }
     }
-    const nq = quads.length / 6;
-    const triCount = nq * 2 + ny * 2;
+
+    const nv = pos.length / 3;
+    const positions = new Float32Array(pos);
+    const normals = new Float32Array(nv * 3);
+    for (let i = 0; i < nv; i++) {
+      const o = i * 3;
+      const len = Math.hypot(nor[o], nor[o + 1], nor[o + 2]);
+      if (len > 1e-12) { normals[o] = nor[o] / len; normals[o + 1] = nor[o + 1] / len; normals[o + 2] = nor[o + 2] / len; }
+      else { normals[o] = 0; normals[o + 1] = positions[o + 1] - cy; normals[o + 2] = positions[o + 2] - cz; const l2 = Math.hypot(normals[o + 1], normals[o + 2]) || 1; normals[o + 1] /= l2; normals[o + 2] /= l2; }
+    }
     const Idx = nv > 65535 ? Uint32Array : Uint16Array;
-    const indices = new Idx(triCount * 3);
-    let t = 0;
-    for (let q = 0; q < quads.length; q += 6) {
-      const lv = quads[q], base = lv * nx * ny;
-      const a = vid[base + quads[q + 1]], b2 = vid[base + quads[q + 2]];
-      const c2 = vid[base + quads[q + 3]], d = vid[base + quads[q + 4]];
-      if (quads[q + 5]) {
-        indices[t++] = a; indices[t++] = b2; indices[t++] = c2;
-        indices[t++] = a; indices[t++] = c2; indices[t++] = d;
-      } else {                                  // 內向面：繞向反過來，正面才朝向空洞
-        indices[t++] = a; indices[t++] = c2; indices[t++] = b2;
-        indices[t++] = a; indices[t++] = d; indices[t++] = c2;
-      }
-    }
-    // 端面繞向：θ 增加的方向繞出來的法線是 +X（右手定則），
-    // 所以 xMax 那端照 (心, i0, i1) 走、xMin 那端要反過來，兩端的正面才都朝外。
-    // 寫反的話背面剔除會把端面剃掉，從某些角度就會直接看穿進圓棒內部。
-    for (let c = 0; c < 2; c++) {
-      const b = capBase[c];
-      for (let iy = 0; iy < ny; iy++) {
-        const i0 = b + 1 + iy, i1 = b + 1 + ((iy + 1) % ny);
-        if (c === 0) { indices[t++] = b; indices[t++] = i0; indices[t++] = i1; }
-        else { indices[t++] = b; indices[t++] = i1; indices[t++] = i0; }
-      }
-    }
+    const indices = new Idx(idx);
     return {
-      positions, normals, indices: indices.subarray(0, t),
-      counts: { vertices: nv, triangles: t / 3, indices: t },
-      cylinder: true, nx, ny, sheets: L, downsample: k,
+      positions, normals, indices,
+      counts: { vertices: nv, triangles: indices.length / 3, indices: indices.length },
+      cylinder: true, nx, ny, downsample: k,
       zMin: cz - R, zMax: cz + R,
       rMin: Number.isFinite(rMin) ? rMin : 0, rMax: Number.isFinite(rMax) ? rMax : R, radius: R,
     };
