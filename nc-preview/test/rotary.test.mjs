@@ -794,6 +794,20 @@ test('cylSection：鑽孔的截面是一條直上直下的槽，不是橫貫整�
   for (const p of wall) near(Math.abs(p.y), 3, 1e-3, '孔壁應該貼在 |y| = 3（刀半徑）');
 });
 
+test('cylSection：槽口的轉角要補回表面，不會被斜切掉一格', async () => {
+  // 槽壁與表面的交角幾乎都落在兩條射線之間；封口照射線畫的話，
+  // 角落會缺一條「一格寬、好幾 mm 深」的斜口，放大看像被啃了一角。
+  // capCorner 用鄰居的牆點外插回表面半徑，輪廓上要有那個轉角點。
+  const out = await runCyl(slotProgram(), 20);   // Ø10 刀、槽底 Z14、R20 → 轉角在 (±5, 19.36)
+  const sec = NC.sim.cylSection(out, 25);
+  const zc = Math.sqrt(20 * 20 - 25);            // 19.36
+  for (const sgn of [1, -1]) {
+    const hit = sec.loops.reduce((a, l) => a.concat(l), []).some(
+      (p) => Math.abs(p.y - sgn * 5) < 0.15 && Math.abs(p.z - zc) < 0.2);
+    assert.ok(hit, `輪廓上應該有 (${sgn * 5}, ${zc.toFixed(2)}) 的槽口轉角點`);
+  }
+});
+
 test('圓柱素材：沒切過的圓棒不佔 extra，height 自己就講完了', async () => {
   const out = await runCyl('M6T1(10MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1200\nG0A90.', 20);
   assert.equal(out.extra.size, 0);

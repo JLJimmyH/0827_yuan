@@ -496,6 +496,32 @@
       const th = i * sim.cellY / R, r = SP[i][k];
       return { y: cy + r * Math.sin(th), z: cz + r * Math.cos(th), r };
     };
+    /**
+     * 封口邊的**轉角外插**。槽壁與表面的交角幾乎都落在兩條射線**之間**，
+     * 封口照射線畫的話，角落會被斜切掉一格（格距 0.5 時是一條 0.5 寬、
+     * 好幾 mm 深的斜口，放大看像被啃了一角）。用 k0 那個牆點在**另一側**的
+     * 鄰居抓牆的走向，外插回 k1 的半徑，補一個轉角點，缺口就閉起來了。
+     * @returns {{y,z}|null}
+     */
+    function capCorner(i, k0, k1, side) {
+      const r1 = SP[i][k1];
+      if (!(r1 - SP[i][k0] > sim.cellY)) return null;       // 缺口太淺，不值得補
+      const oo = k0 * 4 + (side ? 0 : 2);                   // k0 在封口另一側的鄰居
+      const i2 = link[i][oo], k2 = link[i][oo + 1];
+      if (i2 < 0 || i2 === i) return null;                  // 沒有走向可抓（孤立的封口）
+      const p0 = pt(i, k0), pn = pt(i2, k2);
+      const dy = p0.y - pn.y, dz = p0.z - pn.z;
+      // 解 |pn + t·d| = r1（取 t > 1 的那個根）
+      const a = dy * dy + dz * dz;
+      if (!(a > 1e-12)) return null;
+      const b = 2 * ((pn.y - cy) * dy + (pn.z - cz) * dz);
+      const c = (pn.y - cy) * (pn.y - cy) + (pn.z - cz) * (pn.z - cz) - r1 * r1;
+      const disc = b * b - 4 * a * c;
+      if (disc <= 0) return null;
+      const t = (-b + Math.sqrt(disc)) / (2 * a);
+      if (!(t > 1 && t < 4)) return null;                   // 走向不可靠就退回原本的直線封口
+      return { y: pn.y + t * dy, z: pn.z + t * dz };
+    }
     const loops = [];
     for (let i0 = 0; i0 < ny; i0++) {
       for (let k0 = 0; k0 < SP[i0].length; k0++) {
@@ -510,6 +536,12 @@
           const o = k * 4 + (side ? 2 : 0);
           const i2 = link[i][o], k2 = link[i][o + 1];
           if (i2 < 0) break;
+          if (i2 === i) {                            // 同一條射線 = 封口邊 → 試著補轉角點
+            const lo = SP[i][k] < SP[i][k2] ? k : k2;
+            const hi = lo === k ? k2 : k;
+            const corner = capCorner(i, lo, hi, side);
+            if (corner) loop.push(corner);
+          }
           // 到了下一個點是從哪一側進來的：它的右鄰指回我們就是右側
           side = (link[i2][k2 * 4 + 2] === i && link[i2][k2 * 4 + 3] === k) ? 0 : 1;
           i = i2; k = k2;
