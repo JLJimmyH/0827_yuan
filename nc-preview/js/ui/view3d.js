@@ -622,8 +622,10 @@
    *
    * 一格四個角，沿 X 與沿周向各配一次；四條連線繞回原點才鋪面（`a→b→c→d→a`）。
    * 繞不回來的地方是拓樸真的變了（孔口、槽頭），那裡改用**封口面**補上——
-   * 封口面就是鉛直的槽壁與孔壁。封口面自己配一組頂點（不跟表面共用），
-   * 法線才不會被平滑掉、看起來像倒角。
+   * 封口面就是鉛直的槽壁與孔壁，而且 matchSpans 的**兩側（ca/cf 與 cb）都要鋪**：
+   * 特徵往 +θ／+X 消失封 A 側，從 −θ／−X 冒出來封 B 側，漏掉一側，
+   * 空洞帶的那個端面就是背面剔除下看得進工件內部的破洞。
+   * 封口面自己配一組頂點（不跟表面共用），法線才不會被平滑掉、看起來像倒角。
    *
    * 不能用「第 k 層」硬對：一邊是完整的 [0,30]、隔壁被挖成 [0,1.8]+[3.3,30] 時，
    * 第 1 層會把外表面 30 接到孔壁 1.8，成品上就多出一片橫貫整根棒子的假面。
@@ -774,7 +776,7 @@
             vertexOf(Vb, Eb, ix + 1, iyb, ec), vertexOf(Vb, Eb, ix, iyb, ed),
             (e % 2) === 0);                        // 偶數端點是內向面（lo），繞向要反過來
         }
-        // 周向封口（槽壁沿 X 延伸的那一面）
+        // 周向封口（槽壁沿 X 延伸的那一面）——A 側：特徵往 +θ 消失，封在 row iy
         const Ca = T.ca[ix];
         for (let e = 0; e < Ca.length; e++) {
           const e1 = Ca[e]; if (e1 < 0 || e1 < e) continue;
@@ -789,7 +791,23 @@
             capFace([p0, p1, ptOf(Ea, ix + 1, iy, f0 >= 0 ? f0 : f1)], want);   // 特徵在這一格收口
           }
         }
-        // 軸向封口（槽頭那一面）
+        // 周向封口——B 側：特徵從 −θ 冒出來，封在 row iyb。跟 ca 成鏡像：
+        // 材料（或空洞）在 +θ 那邊延續，法線取反；漏掉這一側的話，
+        // 空洞帶在 −θ 的端面就是從外面看得進工件內部的破洞。
+        const Cb = T.cb[ix];
+        for (let e = 0; e < Cb.length; e++) {
+          const e1 = Cb[e]; if (e1 < 0 || e1 < e) continue;
+          const f0 = Xb.f[ix][e], f1 = Xb.f[ix][e1];
+          const s = ((e % 2) === 0) ? -1 : 1;
+          const want = [0, s * cs[iyb], -s * sn[iyb]];
+          const p0 = ptOf(Eb, ix, iyb, e), p1 = ptOf(Eb, ix, iyb, e1);
+          if (f0 >= 0 && f1 >= 0 && T.cb[ix + 1][f0] === f1) {
+            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, f1), ptOf(Eb, ix + 1, iyb, f0)], want);
+          } else if (f0 >= 0 || f1 >= 0) {
+            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, f0 >= 0 ? f0 : f1)], want);
+          }
+        }
+        // 軸向封口（槽頭那一面）——A 側：特徵往 +X 消失，封在 ix
         const Cx = Xa.cf[ix];
         for (let e = 0; e < Cx.length; e++) {
           const e1 = Cx[e]; if (e1 < 0 || e1 < e) continue;
@@ -800,6 +818,19 @@
             capFace([p0, p1, ptOf(Eb, ix, iyb, d1), ptOf(Eb, ix, iyb, d0)], [s, 0, 0]);
           } else if (d0 >= 0 || d1 >= 0) {
             capFace([p0, p1, ptOf(Eb, ix, iyb, d0 >= 0 ? d0 : d1)], [s, 0, 0]);
+          }
+        }
+        // 軸向封口——B 側：特徵從 −X 冒出來，封在 ix+1（跟 cf 成鏡像，法線取反）
+        const Cxb = Xa.cb[ix];
+        for (let e = 0; e < Cxb.length; e++) {
+          const e1 = Cxb[e]; if (e1 < 0 || e1 < e) continue;
+          const d0 = T.la[ix + 1][e], d1 = T.la[ix + 1][e1];
+          const s = ((e % 2) === 0) ? 1 : -1;
+          const p0 = ptOf(Ea, ix + 1, iy, e), p1 = ptOf(Ea, ix + 1, iy, e1);
+          if (d0 >= 0 && d1 >= 0 && Xb.cb[ix][d0] === d1) {
+            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, d1), ptOf(Eb, ix + 1, iyb, d0)], [-s, 0, 0]);
+          } else if (d0 >= 0 || d1 >= 0) {
+            capFace([p0, p1, ptOf(Eb, ix + 1, iyb, d0 >= 0 ? d0 : d1)], [-s, 0, 0]);
           }
         }
       }

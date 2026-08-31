@@ -762,6 +762,41 @@ test('buildCylinderMesh：兩端封口的法線分別朝 ∓X', () => {
   assert.equal(m.normals[capB * 3], 1, 'xMax 端法線朝 +X');
 });
 
+/**
+ * 網格的「開放邊」數：每條三角形邊用量化座標配對，水密且繞向一致的網格，
+ * 每條邊都該有一條同位置、方向相反的邊（封口面雖然自配頂點，位置仍然重合；
+ * 薄片的兩面繞向相反，也剛好配平）。配不平的邊 = 破洞或繞向錯誤。
+ */
+function cylOpenEdges(m) {
+  const q = (v) => Math.round(v * 1e4);
+  const key = (i) => `${q(m.positions[i * 3])},${q(m.positions[i * 3 + 1])},${q(m.positions[i * 3 + 2])}`;
+  const cnt = new Map();
+  for (let t = 0; t < m.indices.length; t += 3) {
+    for (let e = 0; e < 3; e++) {
+      const a = key(m.indices[t + e]), b = key(m.indices[t + (e + 1) % 3]);
+      if (a === b) continue;
+      cnt.set(a + '|' + b, (cnt.get(a + '|' + b) || 0) + 1);
+    }
+  }
+  let bad = 0;
+  for (const [k, n] of cnt) {
+    const i = k.indexOf('|');
+    if (n !== (cnt.get(k.slice(i + 1) + '|' + k.slice(0, i)) || 0)) bad++;
+  }
+  return bad;
+}
+
+test('buildCylinderMesh：空洞帶的兩端都有封口面（網格水密、繞向一致）', () => {
+  // matchSpans 的 B 側封口（cb）漏鋪的話，空洞帶在 −θ 與 −X 的端面
+  // 就是從外面看得進工件內部的破洞——這條測試釘住「四個端面都要封」。
+  assert.equal(cylOpenEdges(NC.ui.view3d.buildCylinderMesh(fakeCylSim(20, 8, 24))), 0, '實心圓棒要水密');
+  const sim = fakeCylSim(20, 8, 24);
+  sim.extra = new Map();
+  // 第 6~8 圈、第 2~4 格：材料 [0,14] ∪ [18,20]（槽壁外側那種薄殼＋空洞帶）
+  for (let iy = 6; iy <= 8; iy++) for (let ix = 2; ix <= 4; ix++) sim.extra.set(iy * 8 + ix, [0, 14, 18, 20]);
+  assert.equal(cylOpenEdges(NC.ui.view3d.buildCylinderMesh(sim)), 0, '空洞帶四個端面都要封起來');
+});
+
 // ---------------------------------------------------------------------------
 // 剖面：3D 上的那片平面 + 剖切
 // ---------------------------------------------------------------------------
