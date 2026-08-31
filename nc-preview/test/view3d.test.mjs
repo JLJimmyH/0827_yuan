@@ -818,6 +818,19 @@ test('buildCylinderMesh：槽口的轉角要補回表面（跟剖面的 capCorne
   }
 });
 
+test('buildPathLines：轉動段的 segRange 標成 rotate 類（高亮靠它把「工件在轉」畫淡）', () => {
+  // 游標行高亮不分青紅皂白全畫成粗亮紅的話，A90. 這種分度行的相對軌跡
+  // （半徑＝刀待機高度的大弧）會被讀成「刀繞著工件轉了一圈」。
+  const segs = [
+    { kind: 'rapid', from: { x: 0, y: 0, z: 50 }, to: { x: 20, y: 0, z: 50 }, line: 1, tool: 1, a: 0 },
+    { kind: 'rotate', from: { x: 20, y: 0, z: 50 }, to: { x: 20, y: 0, z: 50 }, line: 2, tool: 1, a: 90, aFrom: 0 },
+  ];
+  const r = V.buildPathLines(segs, { rotary: { center: { y: 0, z: 0 } } });
+  assert.equal(r.byLine.get(2)[0].cls, 'rotate');
+  assert.ok(r.byLine.get(2)[0].count >= 2, '轉動段要有取樣出來的弧');
+  assert.equal(r.byLine.get(1)[0].cls, 'rapid');
+});
+
 // ---------------------------------------------------------------------------
 // 剖面：3D 上的那片平面 + 剖切
 // ---------------------------------------------------------------------------

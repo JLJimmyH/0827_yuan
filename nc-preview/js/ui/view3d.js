@@ -601,7 +601,7 @@
           v += 2;
         }
         for (let i = sFirst; i < v; i++) { const o = i * 3; colors[o] = rgb[0]; colors[o + 1] = rgb[1]; colors[o + 2] = rgb[2]; }
-        const rec = { seg, first: sFirst, count: v - sFirst };
+        const rec = { seg, cls: b.cls, first: sFirst, count: v - sFirst };
         segRanges.push(rec);
         let arr = byLine.get(seg.line);
         if (!arr) { arr = []; byLine.set(seg.line, arr); }
@@ -1838,11 +1838,22 @@
       gl.uniform1f(LL.uAlpha, 1);
       bindLineBuf(S.pathBuf);
       gl.disable(gl.DEPTH_TEST);
+      // 轉動段（工件在轉，刀其實沒動）只畫細淡的一條：跟切削段一樣粗的亮紅
+      // 會被讀成「刀繞著工件轉了一圈」——理由同 rotary 開關的註解，但游標點到
+      // 該行時全藏起來也不對（會不知道這一行把工件轉去哪），所以取中間值。
+      const solid = recs.filter((r) => r.cls !== 'rotate');
+      const faint = recs.filter((r) => r.cls === 'rotate');
+      if (faint.length) {
+        gl.uniform1f(LL.uAlpha, 0.35);
+        gl.uniform2f(LL.uOffset, 0, 0);
+        for (const r of faint) gl.drawArrays(gl.LINES, r.first, r.count);
+        gl.uniform1f(LL.uAlpha, 1);
+      }
       // 加粗：同一批頂點以畫面空間微偏移多畫幾次（WebGL 的 lineWidth 多數瀏覽器只支援 1）
       const offs = [[0, 0], [1.4, 0], [-1.4, 0], [0, 1.4], [0, -1.4], [1, 1], [-1, -1], [1, -1], [-1, 1]];
       for (const o of offs) {
         gl.uniform2f(LL.uOffset, o[0], o[1]);
-        for (const r of recs) gl.drawArrays(gl.LINES, r.first, r.count);
+        for (const r of solid) gl.drawArrays(gl.LINES, r.first, r.count);
       }
       gl.uniform2f(LL.uOffset, 0, 0);
       gl.uniform1f(LL.uUseTint, 0);
