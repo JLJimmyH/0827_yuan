@@ -254,6 +254,8 @@
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
       diagBadge: $('diagBadge'), dropOverlay: $('dropOverlay'),
+      mnavDiagBadge: $('mnavDiagBadge'),
+      viewTools: $('viewTools'), btnBarMore: $('btnBarMore'), btnViewMore: $('btnViewMore'),
     };
 
     const state = {
@@ -279,6 +281,11 @@
       viewPref: { split: true, clip: true, clipFlip: false, ratio: 0.5 },
     };
 
+    /** 手機版（窄螢幕）判定。800px 這個門檻和 app.css 的 @media 是同一份，要一起改。 */
+    function isMobileLayout() {
+      return typeof matchMedia === 'function' && matchMedia('(max-width: 800px)').matches;
+    }
+
     // ---- 還原設定 ----
     (function restoreSettings() {
       const raw = store.get(SETTINGS_KEY);
@@ -297,6 +304,9 @@
         }
       } catch (e) { /* 壞掉就用預設 */ }
     })();
+    // 手機上並排 3D 一邊只剩半個手掌寬，什麼都看不出來：每次載入都強制關，
+    // 連存過的偏好也不理（在「選項」裡打開只影響這一次瀏覽）
+    if (isMobileLayout()) state.viewPref.split = false;
     /** 這支程式存過的第四軸設定（沒有就 null） */
     function loadRotary(key) {
       if (!key) return null;
@@ -469,10 +479,14 @@
         el.statusCounts.appendChild(sp);
       }
       const n = by.error || by.warning;
-      show(el.diagBadge, n > 0);
-      if (n > 0) {
-        el.diagBadge.textContent = String(by.error || by.warning);
-        el.diagBadge.classList.toggle('is-warn', !by.error);
+      // 手機版底部導覽的「資料」鈕也帶同一顆錯誤數徽章（人在視圖頁才知道有錯要看）
+      for (const badge of [el.diagBadge, el.mnavDiagBadge]) {
+        if (!badge) continue;
+        show(badge, n > 0);
+        if (n > 0) {
+          badge.textContent = String(by.error || by.warning);
+          badge.classList.toggle('is-warn', !by.error);
+        }
       }
     }
 
@@ -1113,7 +1127,10 @@
     function jumpToLine(line, opts) {
       if (!(line > 0)) return;
       selectLine(line, { scroll: true });
-      editor.focus();
+      // 手機版：從錯誤清單／作業摘要點行號時人在「資料」頁，要切回「程式」頁才看得到那一行；
+      // 也不搶 focus——手機上 focus 會彈出鍵盤，把半個畫面吃掉
+      if (isMobileLayout()) selectMobileView('editor');
+      else editor.focus();
     }
 
     function applyFix(item) {
@@ -1247,6 +1264,8 @@
       if (!hit) return false;
       viewMode = mode;
       el.rngSection.disabled = !sectionMode() || !state.result;
+      // 手機版收合時剖面滑桿只在剖面模式出現（app.css 靠這個 class 切）
+      if (el.viewTools) el.viewTools.classList.toggle('is-section', sectionMode());
       if (mode !== '3d') {
         view.setMode(mode);
         if (state.result) syncSectionRange(state.result.stock);
@@ -1396,8 +1415,9 @@
       bar.addEventListener('pointercancel', stop);
       bar.addEventListener('dblclick', () => { setRatio(0.5); persistSettings(); if (view3d) view3d.resize(); });
     })();
-    el.stockBanner.addEventListener('click', () => selectTab('stock'));
-    el.rotaryBanner.addEventListener('click', () => selectTab('diag'));
+    // 手機版點頂列橫幅時分頁藏在「資料」頁裡，要一併切過去
+    el.stockBanner.addEventListener('click', () => { selectTab('stock'); if (isMobileLayout()) selectMobileView('data'); });
+    el.rotaryBanner.addEventListener('click', () => { selectTab('diag'); if (isMobileLayout()) selectMobileView('data'); });
     el.rngSnapshot.addEventListener('input', () => {
       const v = Number(el.rngSnapshot.value);
       const sim = currentScenario() && currentScenario().sim;
@@ -1427,6 +1447,37 @@
     for (const tab of document.querySelectorAll('.app-tab')) {
       tab.addEventListener('click', () => selectTab(tab.dataset.tab));
     }
+
+    // ---- 手機版底部導覽 ----
+    // 桌機上 CSS 把導覽藏起來、data-mview 也沒有任何規則吃它，這段等於沒作用。
+    function selectMobileView(name) {
+      if (!el.app) return;
+      el.app.dataset.mview = name;
+      for (const b of document.querySelectorAll('.app-mnav__btn')) {
+        b.classList.toggle('is-on', b.dataset.mview === name);
+      }
+      if (name === 'view') {
+        // 剛從 display:none 放出來的 canvas 尺寸還是 0；ResizeObserver 會跟上，
+        // 這裡再踢一次讓它馬上畫，不要閃一下空白
+        view.requestRender();
+        if (view3d) view3d.resize();
+      }
+    }
+    for (const b of document.querySelectorAll('.app-mnav__btn')) {
+      b.addEventListener('click', () => selectMobileView(b.dataset.mview));
+    }
+    // 手機版的兩顆收合鈕：頂列 ☰（開檔那些）與視圖「選項」。桌機 CSS 直接把鈕藏起來，
+    // is-open 也沒有規則吃它，所以桌機不受影響。
+    function wireCollapse(btn, host) {
+      if (!btn || !host || typeof btn.addEventListener !== 'function') return;
+      btn.addEventListener('click', () => {
+        const on = host.classList.toggle('is-open');
+        btn.classList.toggle('is-on', on);
+        btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+      });
+    }
+    wireCollapse(el.btnBarMore, document.querySelector('.app-bar'));
+    wireCollapse(el.btnViewMore, el.viewTools);
 
     // 整頁拖放（只接檔案；在編輯器內拖曳文字不受影響）
     function dragHasFiles(ev) {
@@ -1511,7 +1562,8 @@
         box.checked = state.viewPref[pref];
       }
       if (p.mode) setViewMode(p.mode); else applyViewLayout({ fit3d: true });
-      if (p.tab) selectTab(p.tab);
+      // 手機版分頁藏在「資料」頁裡；分享的網址帶了 tab 參數就直接切過去，不然選了也看不到
+      if (p.tab && selectTab(p.tab) && isMobileLayout()) selectMobileView('data');
       if (p.section !== undefined && p.section !== '' && Number.isFinite(Number(p.section)) && sectionMode()) {
         sectionTouched = true;
         const v = Number(p.section);

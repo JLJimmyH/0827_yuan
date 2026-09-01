@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>NC 預演台 — Fanuc 加工中心 G-code 預演／檢錯</title>
 <link rel="stylesheet" href="css/panels.css">
 <link rel="stylesheet" href="css/editor.css">
@@ -12,11 +12,14 @@
 </head>
 <body>
 
-<div class="app" id="app">
+<div class="app" id="app" data-mview="view">
 
   <!-- ==================== 頂列工具列 ==================== -->
   <header class="app-bar">
     <div class="app-bar__title">NC 預演台</div>
+
+    <!-- 手機版：開檔／存檔／Block skip 收在這顆鈕後面（桌機由 CSS 隱藏這顆鈕、選單常駐） -->
+    <button type="button" class="nc-btn app-bar__more" id="btnBarMore" aria-expanded="false" title="開檔、存檔、Block skip 等設定">☰</button>
 
     <div class="app-bar__group">
       <button type="button" class="nc-btn" id="btnOpen" title="開啟本機的 NC 程式檔或刀具表 CSV（也可以直接把檔案拖進這個視窗）">開檔…</button>
@@ -83,7 +86,7 @@
     <section class="app-right" id="appRight">
 
       <div class="app-pane app-pane--view">
-        <div class="app-view-tools">
+        <div class="app-view-tools" id="viewTools">
           <div class="app-view-tools__row">
             <div class="app-seg" role="group" aria-label="視圖模式">
               <button type="button" class="app-seg__btn is-on" data-mode="top">俯視</button>
@@ -93,7 +96,7 @@
               <button type="button" class="app-seg__btn" data-mode="unroll" id="btnModeUnroll" title="第四軸展開圖：把圓柱工件的表面攤平（橫軸＝軸向位置，縱軸＝角度）" disabled>展開圖</button>
             </div>
 
-            <label class="app-slider" title="剖面位置（工件座標）">
+            <label class="app-slider" id="lblSection" title="剖面位置（工件座標）">
               <span class="app-slider__label">剖面</span>
               <input type="range" id="rngSection" min="-100" max="100" step="0.5" value="0" disabled>
               <span class="app-slider__value" id="secVal">—</span>
@@ -104,9 +107,12 @@
             <button type="button" class="nc-btn nc-btn-small nc-hidden" id="btnClipFlip" title="換一邊切。剖面拉到工件端面附近時，留下來的那塊會很薄，按這個換成留另一邊。">換邊</button>
 
             <button type="button" class="nc-btn nc-btn-small" id="btnFit" title="重設縮放，把整個工件放進畫面">全覽</button>
+
+            <!-- 手機版：並排 3D／模擬到／顯示圖層／刀具這些「調好就不動」的選項收在這後面 -->
+            <button type="button" class="nc-btn nc-btn-small app-view-tools__more" id="btnViewMore" aria-expanded="false" title="更多顯示選項（並排 3D、模擬到、顯示圖層、刀具）">選項</button>
           </div>
 
-          <div class="app-view-tools__row">
+          <div class="app-view-tools__row app-view-tools__row--snapshot">
             <label class="app-slider app-slider--wide" title="只顯示模擬到第 N 把刀為止的成品">
               <span class="app-slider__label">模擬到</span>
               <input type="range" id="rngSnapshot" min="0" max="0" step="1" value="0" disabled>
@@ -138,7 +144,8 @@
 
         <div class="app-view-foot">
           <span class="nc-view2d-scale">頂面 <i></i> 深處</span>
-          <span class="app-view-foot__hint">滾輪縮放 · 拖曳平移 · 雙擊全覽 · 點路徑跳到該行（右側 3D：拖曳旋轉）</span>
+          <span class="app-view-foot__hint app-view-foot__hint--mouse">滾輪縮放 · 拖曳平移 · 雙擊全覽 · 點路徑跳到該行（右側 3D：拖曳旋轉）</span>
+          <span class="app-view-foot__hint app-view-foot__hint--touch">雙指縮放 · 單指平移 · 點路徑跳到該行（3D：單指旋轉）</span>
         </div>
       </div>
 
@@ -166,6 +173,13 @@
 
     </section>
   </main>
+
+  <!-- ==================== 手機版底部導覽（桌機由 CSS 隱藏） ==================== -->
+  <nav class="app-mnav" aria-label="主要區域切換">
+    <button type="button" class="app-mnav__btn" data-mview="editor">程式</button>
+    <button type="button" class="app-mnav__btn is-on" data-mview="view">視圖</button>
+    <button type="button" class="app-mnav__btn" data-mview="data">資料 <span class="app-tab__badge nc-hidden" id="mnavDiagBadge"></span></button>
+  </nav>
 
   <!-- 整頁拖放提示 -->
   <div class="app-drop" id="dropOverlay" aria-hidden="true"><div class="app-drop__box">放開以載入<br>NC 程式，或刀具表 CSV</div></div>

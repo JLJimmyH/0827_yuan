@@ -325,6 +325,7 @@ html, body {
   white-space: nowrap;
 }
 .app-view-foot__hint { overflow: hidden; text-overflow: ellipsis; }
+.app-view-foot__hint--touch { display: none; }
 
 /* ==================== 分頁 ==================== */
 .app-tabs {
@@ -450,3 +451,133 @@ html, body {
 /* 刀位圖是固定尺寸的方塊，分頁窄的時候讓它自己捲，不要把整個版面推寬 */
 #tabMag { overflow: auto; }
 #tabMag .nc-panel-mag { padding: 2px 0 8px; }
+
+/* ==================== 手機版（窄螢幕） ==================== */
+/* 手機的重點是「看圖」：頂列與視圖工具列預設收合（各一顆展開鈕），畫布吃掉其餘空間。
+ * 底部導覽只在窄螢幕出現；一次只顯示一區（程式／視圖／資料），由 #app 的
+ * data-mview 屬性決定。桌機版完全不吃這個屬性、兩顆展開鈕也直接藏掉。
+ * 800px 這個門檻在 app.js（強制關並排 3D、跳行時切回程式頁）也有一份，要一起改。 */
+.app-mnav { display: none; }
+.app-bar__more, .app-view-tools__more { display: none; }
+
+@media (max-width: 800px) {
+  /* iOS Safari 的網址列會伸縮，100% 算的是最大視窗，底部導覽會被吃掉；
+   * dvh 跟著實際可視高度走 */
+  @supports (height: 100dvh) {
+    html, body { height: 100dvh; }
+  }
+
+  /* ---- 頂列：預設只留「標題＋狀態＋☰」一列，按 ☰ 才展開開檔那些鈕 ---- */
+  .app-bar {
+    flex-wrap: wrap;
+    white-space: normal;
+    row-gap: 4px;
+    padding: 6px 8px;
+  }
+  .app-bar:not(.is-open) .app-bar__group { display: none; }
+  /* 收合時撐空間的 spacer 會把橫幅擠到下一行，一併藏掉 */
+  .app-bar:not(.is-open) .app-bar__spacer { display: none; }
+  .app-bar__more {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+  }
+  .app-bar__more.is-on,
+  .app-view-tools__more.is-on {
+    background: var(--nc-selected, #e8f1fb);
+    border-color: var(--nc-accent, #2b6cb0);
+    color: var(--nc-accent, #2b6cb0);
+  }
+  .app-bar__status {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+  }
+  .app-bar__banner { max-width: 100%; }
+  #stockBanner { max-width: 100%; }
+
+  /* ---- 觸控目標放大 ---- */
+  .nc-btn { padding: 6px 12px; }
+  .nc-btn-small { padding: 4px 9px; }
+  .nc-select, .nc-num, .nc-text { padding: 5px 6px; }
+  .app-seg__btn { padding: 6px 10px; }
+  .nc-check { min-height: 30px; }
+  .app-view-tools input[type=range] { min-height: 30px; }
+
+  /* ---- 主體改直向，一次只顯示一區 ---- */
+  .app-main { flex-direction: column; }
+  .app-left, .app-right {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    padding: var(--app-gap);
+  }
+  /* 右欄裡視圖／分頁只會顯示其中一塊，中間的分隔就不需要了 */
+  .app-right .app-splitter { display: none; }
+
+  .app[data-mview="editor"] .app-right { display: none; }
+  .app[data-mview="view"] .app-left { display: none; }
+  .app[data-mview="view"] .app-pane--tabs { display: none; }
+  .app[data-mview="data"] .app-left { display: none; }
+  .app[data-mview="data"] .app-pane--view { display: none; }
+
+  /* ---- 底部導覽 ---- */
+  .app-mnav {
+    display: flex;
+    flex: none;
+    background: var(--nc-bg, #fff);
+    border-top: 1px solid var(--nc-border, #d9dde3);
+    padding-bottom: env(safe-area-inset-bottom, 0px);   /* iPhone 底部手勢條 */
+  }
+  .app-mnav__btn {
+    font: inherit;
+    font-weight: 600;
+    flex: 1 1 0;
+    min-height: 44px;
+    border: 0;
+    border-right: 1px solid var(--nc-border, #d9dde3);
+    background: transparent;
+    color: var(--nc-muted, #6b7480);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+  }
+  .app-mnav__btn:last-child { border-right: 0; }
+  .app-mnav__btn.is-on {
+    color: var(--nc-accent, #2b6cb0);
+    background: var(--nc-selected, #e8f1fb);
+    box-shadow: inset 0 2px 0 var(--nc-accent, #2b6cb0);
+  }
+
+  /* ---- 視圖工具列：預設只留「模式切換＋全覽＋選項」，其餘收在「選項」後面 ----
+   * 這些（並排 3D、模擬到、顯示圖層、刀具）現場回報是調好就不動的，常駐只會把圖擠扁。 */
+  .app-view-tools__row { flex-wrap: wrap; row-gap: 3px; }
+  .app-slider { flex: 1 1 100%; }
+  .app-view-tools__more { display: inline-flex; }
+  .app-view-tools:not(.is-open) .app-view-tools__row--snapshot,
+  .app-view-tools:not(.is-open) .app-view-tools__row--wrap,
+  .app-view-tools:not(.is-open) .app-view-tools__row--tools,
+  .app-view-tools:not(.is-open) #lblSplit,
+  .app-view-tools:not(.is-open) #lblClip,
+  .app-view-tools:not(.is-open) #btnClipFlip { display: none; }
+  /* 剖面滑桿只在剖面模式才有意義（is-section 由 app.js 跟著視圖模式切） */
+  .app-view-tools:not(.is-section) #lblSection { display: none; }
+
+  /* ---- 分頁列：分頁太多就左右捲，不硬擠 ---- */
+  .app-tabs {
+    height: auto;
+    min-height: 34px;
+    overflow-x: auto;
+  }
+  .app-tab { flex: none; white-space: nowrap; padding: 0 10px; }
+
+  /* ---- 操作提示換成觸控版 ---- */
+  .app-view-foot__hint--mouse { display: none; }
+  .app-view-foot__hint--touch { display: inline; }
+
+  /* ---- 編輯器：右側行旁資訊欄縮窄，留寬度給程式本文 ---- */
+  .nc-editor { --nc-editor-info-w: 12ch; }
+}

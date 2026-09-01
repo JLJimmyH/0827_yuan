@@ -406,6 +406,8 @@
       dpr: 1,
       hover: null,
       drag: null,
+      pointers: new Map(),      // 按著的指標（觸控雙指縮放用；滑鼠最多一筆）
+      pinch: null,              // 雙指縮放進行中：{ d: 兩指距離, c: 中點 }
       needFit: true,
       imageCache: null,
       cylCache: null,           // 圓棒高度圖攤成直角座標的結果（俯視／剖面 Y 用）
@@ -1614,12 +1616,34 @@
     function onDown(ev) {
       if (ev.button != null && ev.button !== 0) return;
       const [mx, my] = eventPos(ev);
+      if (ev.pointerId != null) S.pointers.set(ev.pointerId, [mx, my]);
+      if (S.pointers.size === 2) {
+        // 第二指落下 → 改成雙指縮放；取消原本的單指拖曳，放開時也不要誤觸「點選路徑」
+        const pts = Array.from(S.pointers.values());
+        S.pinch = { d: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]), c: [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2] };
+        S.drag = null;
+        setDragClass(false);
+        return;
+      }
       const V = curView();
       S.drag = { sx: mx, sy: my, ox: V ? V.ox : 0, oy: V ? V.oy : 0, moved: false };
       if (ev.pointerId != null && typeof canvas.setPointerCapture === 'function') { try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ } }
     }
     function onMove(ev) {
       const [mx, my] = eventPos(ev);
+      if (ev.pointerId != null && S.pointers.has(ev.pointerId)) S.pointers.set(ev.pointerId, [mx, my]);
+      if (S.pinch && S.pointers.size === 2) {
+        const pts = Array.from(S.pointers.values());
+        const d = Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]);
+        const c = [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2];
+        if (S.pinch.d > 1 && d > 1) zoomAt(c[0], c[1], d / S.pinch.d);
+        const V = curView();
+        if (V) { V.ox += c[0] - S.pinch.c[0]; V.oy += c[1] - S.pinch.c[1]; }
+        S.pinch = { d, c };
+        S.hover = null;
+        requestRender();
+        return;
+      }
       const d = S.drag, V = curView();
       if (d) {
         const dx = mx - d.sx, dy = my - d.sy;
@@ -1630,6 +1654,8 @@
       requestRender();
     }
     function onUp(ev) {
+      if (ev.pointerId != null) S.pointers.delete(ev.pointerId);
+      if (S.pointers.size < 2) S.pinch = null;
       const d = S.drag;
       S.drag = null;
       setDragClass(false);
@@ -1637,7 +1663,9 @@
       if (d && !d.moved) { const [mx, my] = eventPos(ev); pickAt(mx, my); }
       requestRender();
     }
-    function onLeave() {
+    function onLeave(ev) {
+      if (ev && ev.pointerId != null) S.pointers.delete(ev.pointerId);
+      if (S.pointers.size < 2) S.pinch = null;
       S.hover = null;
       S.drag = null;
       setDragClass(false);
@@ -1653,6 +1681,8 @@
       [evNames[0], onDown], [evNames[1], onMove], [evNames[2], onUp], [evNames[3], onLeave],
       ['dblclick', onDbl], ['contextmenu', onCtx],
     ];
+    // 觸控被系統打斷（來電、通知中心手勢）時清掉拖曳／縮放狀態，不然會黏在半路
+    if (usePointer) listeners.push(['pointercancel', onLeave]);
     if (typeof canvas.addEventListener === 'function') for (const l of listeners) canvas.addEventListener(l[0], l[1], l[2]);
 
     let ro = null, winResize = null;
