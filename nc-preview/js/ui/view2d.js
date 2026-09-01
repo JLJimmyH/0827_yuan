@@ -232,6 +232,24 @@
     return { pos, z };
   }
 
+  /**
+   * 逐欄取樣的剖面折線 → 畫圖用的點列。相鄰欄的值跳超過**兩格**視為鉛直牆，
+   * 在兩欄的中線插兩個點畫成真正的階梯——直接連線會把鉛直牆畫成一格寬的斜線
+   * （平底刀的孔壁 17→10 跳變在螢幕上斜 3~4°，「直上直下的刀」看起來就不直了）。
+   * 緩坡不動（鑽尖錐面每欄只差 0.3 格、球刀弧面同理），不會被畫成樓梯。
+   */
+  function steppedProfile(xs, vs, cell) {
+    const out = [];
+    for (let i = 0; i < xs.length; i++) {
+      if (i > 0 && Math.abs(vs[i] - vs[i - 1]) > 2 * cell) {
+        const xm = (xs[i - 1] + xs[i]) / 2;
+        out.push({ x: xm, v: vs[i - 1] }, { x: xm, v: vs[i] });
+      }
+      out.push({ x: xs[i], v: vs[i] });
+    }
+    return out;
+  }
+
   /** 標尺刻度：≥ raw 的 1/2/5×10^n */
   function niceStep(raw) {
     if (!(raw > 0) || !Number.isFinite(raw)) return 1;
@@ -345,7 +363,8 @@
 
   NC.ui.view2dUtil = {
     TOOL_COLORS, PAD, PICK_PX, toolColor, depthColor, buildHeightImage, simExtent, heightAt, sectionProfile, niceStep,
-    distPointSeg2D, arcDistance, segDistance2D, pickSegment, topBounds, sectionBounds, fitTransform, cylToCartesian,
+    steppedProfile, distPointSeg2D, arcDistance, segDistance2D, pickSegment, topBounds, sectionBounds, fitTransform,
+    cylToCartesian,
   };
 
   // ---------------------------------------------------------------------------
@@ -1300,9 +1319,13 @@
           let run = [];
           const flush = () => {
             if (run.length >= 2) {
+              // 鉛直牆（孔壁、槽壁）用 steppedProfile 畫成真正的階梯，
+              // 逐欄直連會把它畫成一格寬的斜線，直上直下的刀看起來會歪
+              const hiPts = steppedProfile(run.map((p) => p.x), run.map((p) => p.hi), cart.cell);
+              const loPts = steppedProfile(run.map((p) => p.x), run.map((p) => p.lo), cart.cell);
               ctx.beginPath();
-              for (let i = 0; i < run.length; i++) { const [sx, sy] = toScreen(run[i].x, run[i].hi); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
-              for (let i = run.length - 1; i >= 0; i--) { const [sx, sy] = toScreen(run[i].x, run[i].lo); ctx.lineTo(sx, sy); }
+              for (let i = 0; i < hiPts.length; i++) { const [sx, sy] = toScreen(hiPts[i].x, hiPts[i].v); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+              for (let i = loPts.length - 1; i >= 0; i--) { const [sx, sy] = toScreen(loPts[i].x, loPts[i].v); ctx.lineTo(sx, sy); }
               ctx.closePath();
               ctx.fillStyle = C.profileFill; ctx.fill();
               ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
@@ -1349,15 +1372,17 @@
         const prof = sectionProfile(sim, S.heightArr, ca, v);
         if (prof) {
           const floor = sim.floorZ;
+          // 鉛直牆（口袋壁、孔壁）畫成真正的階梯，理由同剖面 Y（見 steppedProfile）
+          const pts = steppedProfile(prof.pos, prof.z, sim.cell);
           ctx.beginPath();
-          let [sx, sy] = toScreen(prof.pos[0], floor);
+          let [sx, sy] = toScreen(pts[0].x, floor);
           ctx.moveTo(sx, sy);
-          for (let i = 0; i < prof.pos.length; i++) { [sx, sy] = toScreen(prof.pos[i], prof.z[i]); ctx.lineTo(sx, sy); }
-          [sx, sy] = toScreen(prof.pos[prof.pos.length - 1], floor);
+          for (const p of pts) { [sx, sy] = toScreen(p.x, p.v); ctx.lineTo(sx, sy); }
+          [sx, sy] = toScreen(pts[pts.length - 1].x, floor);
           ctx.lineTo(sx, sy); ctx.closePath();
           ctx.fillStyle = C.profileFill; ctx.fill();
           ctx.beginPath();
-          for (let i = 0; i < prof.pos.length; i++) { [sx, sy] = toScreen(prof.pos[i], prof.z[i]); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+          for (let i = 0; i < pts.length; i++) { [sx, sy] = toScreen(pts[i].x, pts[i].v); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
           ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
         }
       }
