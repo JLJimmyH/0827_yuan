@@ -410,6 +410,7 @@
       imageCache: null,
       cylCache: null,           // 圓棒高度圖攤成直角座標的結果（俯視／剖面 Y 用）
       secCache: null,           // 圓棒某個 X 的橫截面輪廓（剖面 X 用）
+      secYCache: null,          // 圓棒某個 Y 的縱剖面輪廓（剖面 Y 用）
       workCache: null,          // 段換算到工件座標的取樣（四軸的俯視／剖面共用）
       cssSized: null,           // canvas 尺寸是否由 CSS 決定（null = 還沒探測）
       toolRadius: new Map(),
@@ -1245,6 +1246,16 @@
       return val;
     }
 
+    /** 剖面 Y 的真剖面（core 的 cylSectionY）；core 沒載入時回 null → 退回包絡帶 */
+    function cylProfileY(sim, v) {
+      if (!(NC.sim && typeof NC.sim.cylSectionY === 'function')) return null;
+      const c = S.secYCache;
+      if (c && c.arr === S.heightArr && c.v === v) return c.val;
+      const val = NC.sim.cylSectionY(sim, v, { height: S.heightArr, extra: S.extraMap });
+      S.secYCache = { arr: S.heightArr, v, val };
+      return val;
+    }
+
     /**
      * 第四軸的剖面素材：圓棒的橫截面。
      * 有模擬結果時畫「這個 X 位置實際被挖成什麼樣」（同三軸剖面用 sectionProfile 的做法），
@@ -1313,7 +1324,25 @@
         ctx.strokeRect(rr[0], rr[1], rr[2], rr[3]);
         ctx.setLineDash([]);
       }
-      if (cart) {
+      const simC = S.data.sim;
+      const prof = (simC && simC.cylinder && S.heightArr) ? cylProfileY(simC, S.section) : null;
+      if (prof) {
+        // 真剖面（cylSectionY）：孔壁槽壁在任何 Y 都是鉛直的、孔寬是弦寬不是包絡的殘影；
+        // 內部空洞自成一圈，evenodd 填出來就是洞（同剖面 X）
+        if (prof.loops.length) {
+          ctx.beginPath();
+          for (const loop of prof.loops) {
+            for (let i = 0; i < loop.length; i++) {
+              const [sx, sy] = toScreen(loop[i].x, loop[i].z);
+              if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+            }
+            ctx.closePath();
+          }
+          ctx.fillStyle = C.profileFill; ctx.fill('evenodd');
+          ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+      } else if (cart) {
+        // 後備（core 沒載入）：上下包絡帶。偏離孔軸的剖面會把孔畫窄，僅供退化模式
         const iy = Math.round((S.section - cart.origin.y) / cart.cell);
         if (iy >= 0 && iy < cart.ny) {
           let run = [];

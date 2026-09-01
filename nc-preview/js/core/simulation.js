@@ -577,6 +577,186 @@
   }
 
   /**
+   * 沿軸向的**真剖面**：平面 y = v 切下去的材料區域 → 封閉輪廓（{x, z}，工件座標）。
+   *
+   * 剖面 Y 以前畫的是上下包絡（每欄取外表面掃過的最高／最低）：在孔的正中心
+   * 剛好等於真剖面，但偏離孔軸之後，徑向射線「看得到」的孔口越來越窄，
+   * Ø8.5 的直壁孔會被畫成尖刺（現場問過「某些剖面下是歪斜的」就是這個）。
+   * 多段 dexel 其實裝得下正確答案，所以這裡直接做平面剖切：
+   *
+   * 1. 每個 X 欄沿直線 y=v 掃 z（半格步），點 (v,z) → (θ, r) → 查最近射線的
+   *    材料區間判斷裡外；裡外轉換處用**二分法收斂**——槽底 z=17、外圓
+   *    z=√(R²−v²) 這類邊界的條件跟射線離散無關，收斂到的是準確值。
+   * 2. 相鄰欄用與剖面 X 同一套 matchSpans 配對、配不到就地封口、
+   *    封口邊補轉角點（兩條表面走向的交點，同 capCorner）。
+   * 3. 鉛直牆（孔壁、槽壁）落在兩欄**之間**：配對邊跳超過兩格就在兩欄的
+   *    中線踩一格階梯——直連會把鉛直牆畫成一格寬的斜線（理由同 steppedProfile）。
+   *
+   * @param {Object} sim  cylinder 模式的 sim
+   * @param {number} v    剖面的 Y（工件座標）
+   * @param {Object} [src] 要讀的來源（`{height, extra}`，例如某個 snapshot）
+   * @returns {{loops: Array<Array<{x:number,z:number}>>}|null}
+   */
+  function cylSectionY(sim, v, src) {
+    if (!sim || !sim.cylinder) return null;
+    const R = sim.radius, ny = sim.ny, nx = sim.nx;
+    const cy = (sim.center && sim.center.y) || 0, cz = (sim.center && sim.center.z) || 0;
+    const dv = v - cy;
+    if (!(Math.abs(dv) < R)) return { loops: [] };
+    const s = src || sim;
+    const cellY = sim.cellY, cellX = sim.cellX || sim.cell, x0 = sim.origin.x;
+    const PI2 = Math.PI * 2;
+    const insideAt = (ix, z) => {
+      const r = Math.hypot(dv, z);
+      let th = Math.atan2(dv, z);
+      if (th < 0) th += PI2;
+      const iy = Math.round(th * R / cellY) % ny;
+      const sp = spansOf(s, iy * nx + ix);
+      for (let k = 0; k < sp.length; k += 2) if (r >= sp[k] && r <= sp[k + 1]) return true;
+      return false;
+    };
+    const zMax = Math.sqrt(R * R - dv * dv);
+    const step = Math.max(cellY / 2, 1e-3);
+    const SP = new Array(nx);
+    for (let ix = 0; ix < nx; ix++) {
+      const iv = [];
+      let prevIn = false, prevZ = -zMax - step;
+      /** 這一列裡離 r 最近的區間端點（同型內插用；parity 0=lo、1=hi） */
+      const nearestEdge = (iyRaw, r, par) => {
+        const sp = spansOf(s, (((iyRaw % ny) + ny) % ny) * nx + ix);
+        let best = null;
+        for (let k = par == null ? 0 : par; k < sp.length; k += par == null ? 1 : 2) {
+          if (best == null || Math.abs(sp[k] - r) < Math.abs(best.v - r)) best = { v: sp[k], par: k % 2 };
+        }
+        return best;
+      };
+      const refine = (zOut, zIn) => {
+        const zo0 = zOut, zi0 = zIn;   // 原始括號（半格寬）：第二階段要用它，收斂後的針孔會兩端同號
+        for (let it = 0; it < 20; it++) {
+          const zm = (zOut + zIn) / 2;
+          if (insideAt(ix, zm)) zIn = zm; else zOut = zm;
+        }
+        // 「最近射線」判裡外會把 r(θ) 有斜率的面（槽底 r=14/cosθ）拉出 ~Δθ·tanθ 的偏差：
+        // 邊界值再用相鄰兩條射線的**同型端點**線性內插解一次，槽底就回到準確的 z=14。
+        // 端點差太多（牆那種近徑向的陡面）或括不住就維持第一階段的值。
+        const zb = (zOut + zIn) / 2;
+        const r0 = Math.hypot(dv, zb);
+        let th = Math.atan2(dv, zb);
+        if (th < 0) th += PI2;
+        const f = th * R / cellY;
+        const k0 = Math.floor(f);
+        const e0 = nearestEdge(k0, r0, null);
+        const e1 = e0 && nearestEdge(k0 + 1, r0, e0.par);
+        if (!e0 || !e1 || Math.abs(e0.v - e1.v) > 4 * cellY) return zb;
+        const g = (z) => {
+          let t2 = Math.atan2(dv, z);
+          if (t2 < 0) t2 += PI2;
+          const f2 = Math.max(0, Math.min(1, t2 * R / cellY - k0));
+          return Math.hypot(dv, z) - (e0.v + (e1.v - e0.v) * f2);
+        };
+        let a2 = zo0, b2 = zi0;
+        const ga = g(a2);
+        if (!(ga * g(b2) < 0)) return zb;
+        for (let it = 0; it < 20; it++) {
+          const zm = (a2 + b2) / 2;
+          if (g(zm) * ga > 0) a2 = zm; else b2 = zm;
+        }
+        return (a2 + b2) / 2;
+      };
+      for (let z = -zMax - step; z <= zMax + step + 1e-9; z += step) {
+        const now = insideAt(ix, z);
+        if (now && !prevIn) iv.push(refine(prevZ, z));
+        else if (!now && prevIn) iv.push(refine(z, prevZ));
+        prevIn = now; prevZ = z;
+      }
+      if (prevIn) iv.push(zMax);   // 掃出圓外必為外，理論到不了；保險而已
+      SP[ix] = iv;
+    }
+    // 相鄰欄配對 + 封口 + 轉角——跟 cylSection 同一套（站＝X 欄、不繞圈、無外圓後備）
+    const link = new Array(nx), seen = new Array(nx);
+    for (let i = 0; i < nx; i++) {
+      link[i] = new Int32Array(SP[i].length * 4).fill(-1);
+      seen[i] = new Uint8Array(SP[i].length);
+    }
+    const set = (i, k, side, i2, k2) => { const o = k * 4 + (side ? 2 : 0); link[i][o] = i2; link[i][o + 1] = k2; };
+    for (let i = 0; i + 1 < nx; i++) {
+      matchSpans(SP[i], SP[i + 1],
+        (ka, kb) => { set(i, ka, 1, i + 1, kb); set(i + 1, kb, 0, i, ka); },
+        (k0, k1) => { set(i, k0, 1, i, k1); set(i, k1, 1, i, k0); },
+        (k0, k1) => { set(i + 1, k0, 0, i + 1, k1); set(i + 1, k1, 0, i + 1, k0); });
+    }
+    // 站不繞圈（跟剖面 X 不同）：第 0 欄與最後一欄的外側要補「端面封口」，
+    // 否則端點少一側的連線，輪廓在棒料兩端閉不起來，evenodd 填色整個亂掉。
+    // 用「對空鄰居做 matchSpans」表達：每一段材料自己收口，跟其他封口同一套規則。
+    if (nx > 0) {
+      matchSpans([], SP[0], () => {}, () => {},
+        (k0, k1) => { set(0, k0, 0, 0, k1); set(0, k1, 0, 0, k0); });
+      matchSpans(SP[nx - 1], [], () => {},
+        (k0, k1) => { set(nx - 1, k0, 1, nx - 1, k1); set(nx - 1, k1, 1, nx - 1, k0); }, () => {});
+    }
+    const pt = (i, k) => ({ x: x0 + i * cellX, z: cz + SP[i][k] });
+    function tangentOf(i, k, side) {
+      const oo = k * 4 + (side ? 0 : 2);
+      const i2 = link[i][oo], k2 = link[i][oo + 1];
+      if (i2 < 0 || i2 === i) return null;
+      const p = pt(i, k), pn = pt(i2, k2);
+      const dx = p.x - pn.x, dz = p.z - pn.z;
+      if (!(dx * dx + dz * dz > 1e-12)) return null;
+      return { pn, dx, dz };
+    }
+    function capCorner(i, k0, k1, side) {
+      if (!(SP[i][k1] - SP[i][k0] > cellY)) return null;
+      const tIn = tangentOf(i, k0, side), tOut = tangentOf(i, k1, side);
+      if (!tIn || !tOut) return null;
+      const det = tIn.dx * tOut.dz - tIn.dz * tOut.dx;
+      if (!(Math.abs(det) > 1e-12)) return null;
+      const wx = tOut.pn.x - tIn.pn.x, wz = tOut.pn.z - tIn.pn.z;
+      const t = (wx * tOut.dz - wz * tOut.dx) / det;
+      const sPar = (wx * tIn.dz - wz * tIn.dx) / det;
+      if (!(t > 1 && t < 4 && sPar > 1 && sPar < 4)) return null;
+      return { x: tIn.pn.x + t * tIn.dx, z: tIn.pn.z + t * tIn.dz };
+    }
+    const loops = [];
+    for (let i0 = 0; i0 < nx; i0++) {
+      for (let k0 = 0; k0 < SP[i0].length; k0++) {
+        if (seen[i0][k0]) continue;
+        const loop = [];
+        let i = i0, k = k0, side = 1;
+        while (i >= 0 && !seen[i][k]) {
+          seen[i][k] = 1;
+          loop.push(pt(i, k));
+          const o = k * 4 + (side ? 2 : 0);
+          const i2 = link[i][o], k2 = link[i][o + 1];
+          if (i2 < 0) break;
+          if (i2 === i) {
+            const lo = SP[i][k] < SP[i][k2] ? k : k2;
+            const hi = lo === k ? k2 : k;
+            const corner = capCorner(i, lo, hi, side);
+            if (corner) loop.push(corner);
+          }
+          side = (link[i2][k2 * 4 + 2] === i && link[i2][k2 * 4 + 3] === k) ? 0 : 1;
+          i = i2; k = k2;
+        }
+        if (loop.length > 1) loops.push(loop);
+      }
+    }
+    // 鉛直牆踩階梯：跨欄且跳超過兩格的邊，在兩欄的中線插兩個點
+    const stepped = loops.map((L) => {
+      const out = [];
+      for (let i = 0; i < L.length; i++) {
+        const p = L[i], q = L[(i + 1) % L.length];
+        out.push(p);
+        if (Math.abs(q.x - p.x) > 1e-9 && Math.abs(q.z - p.z) > 2 * cellY) {
+          const xm = (p.x + q.x) / 2;
+          out.push({ x: xm, z: p.z }, { x: xm, z: q.z });
+        }
+      }
+      return out;
+    });
+    return { loops: stepped };
+  }
+
+  /**
    * 圓柱模式的核心：**這一格的射線 ∩ 刀具實體** → 離軸心的距離區間 [lo, hi]，沒交集回 null。
    *
    * 全部在機台座標算（相對迴轉中心）。刀是平行機台 Z 的旋轉體，
@@ -1276,6 +1456,6 @@
 
   NC.sim = {
     create, run, profileFor, selectSegments, heightAt, cellIndex, segLength,
-    spansOf, matchSpans, cylSection,
+    spansOf, matchSpans, cylSection, cylSectionY,
   };
 })(globalThis.NC = globalThis.NC || {});

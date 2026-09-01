@@ -821,6 +821,52 @@ test('cylSection：槽底的內角也要補回直角，牆不再懸空落地', a
   }
 });
 
+test('cylSectionY：真剖面——槽底在任何 Y 都是平的、槽外表面在外圓上', async () => {
+  // 剖面 Y 以前畫上下包絡（每欄外表面的最高/最低），偏離對稱面就開始失真。
+  // cylSectionY 做真平面剖切：槽底 z=14 跟剖的 Y 無關（|v| < 槽半寬之內），
+  // 槽外表面 z = √(R²−v²)——邊界用二分收斂，跟射線離散無關。
+  const out = await runCyl(slotProgram(), 20);
+  for (const v of [0, -2.5]) {
+    const sec = NC.sim.cylSectionY(out, v);
+    const pts = sec.loops.reduce((a, l) => a.concat(l), []);
+    const floor = pts.filter((p) => p.x > 15 && p.x < 35 && p.z > 13 && p.z < 15);
+    assert.ok(floor.length > 10, `Y=${v} 槽底應該有一整排點（實際 ${floor.length}）`);
+    for (const p of floor) near(p.z, 14, 1e-3);
+    const zTop = Math.sqrt(400 - v * v);
+    const top = pts.filter((p) => p.x > 47 && p.x < 60 && p.z > zTop - 1);
+    assert.ok(top.length > 5, `Y=${v} 槽外的表面要有點（實際 ${top.length}）`);
+    for (const p of top) near(p.z, zTop, 2e-3);
+  }
+});
+
+test('cylSectionY：偏離孔軸的剖面，孔還是直壁的弦寬，不是包絡的尖刺', async () => {
+  // Ø8.5 直孔（鑽頭）在 Y=2 的真剖面：弦半寬 √(4.25²−2²) = 3.75 → 孔佔 x∈[16.25, 23.75]，
+  // 孔底是鑽錐面 z = 10 + √(eX²+4)/tan59°（11.2~12.6）。上下包絡在這個 Y 只剩
+  // 「徑向射線看得到」的一小段，會把孔畫成往中心收的尖刺——這條測試釘住整個弦寬都開口。
+  const out = await runCyl([
+    'M6T6(SG-8.5)',
+    'G0G90G54X20.Y0.A0.G43H6Z50.M3S900',
+    'G98G81Z10.R25.F70M8',
+    'G80',
+    'G0Z150.',
+    'A90.',
+  ].join('\n'), 20);
+  const sec = NC.sim.cylSectionY(out, 2);
+  const pts = sec.loops.reduce((a, l) => a.concat(l), []);
+  let cols = 0;
+  for (let x = 16.5; x <= 23.5 + 1e-9; x += 0.5) {
+    if (pts.some((p) => Math.abs(p.x - x) < 0.26 && p.z > 10 && p.z < 14.5)) cols++;
+  }
+  assert.ok(cols >= 13, `孔的整個弦寬都要開口（實際 ${cols}/15 欄有孔底點）`);
+  // 孔壁鉛直：牆位置附近要有一段跨度 > 3 的鉛直邊（牆從錐肩 12.6 上到表面 19.9）
+  for (const sgn of [1, -1]) {
+    const wx = 20 + sgn * 3.75;
+    const zs = pts.filter((p) => Math.abs(p.x - wx) < 0.5).map((p) => p.z);
+    assert.ok(zs.length >= 2 && Math.max(...zs) - Math.min(...zs) > 3,
+      `x≈${wx.toFixed(2)} 的孔壁要是鉛直的一段（實際跨度 ${zs.length ? (Math.max(...zs) - Math.min(...zs)).toFixed(2) : 0}）`);
+  }
+});
+
 test('圓柱素材：沒切過的圓棒不佔 extra，height 自己就講完了', async () => {
   const out = await runCyl('M6T1(10MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1200\nG0A90.', 20);
   assert.equal(out.extra.size, 0);
