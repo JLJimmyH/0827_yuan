@@ -809,12 +809,16 @@ test('buildCylinderMesh：槽口的轉角要補回表面（跟剖面的 capCorne
   const m = NC.ui.view3d.buildCylinderMesh(out);
   const zc = Math.sqrt(20 * 20 - 25);
   for (const sgn of [1, -1]) {
-    let hit = false;
-    for (let i = 0; i < m.counts.vertices && !hit; i++) {
+    let hit = false, inner = false;
+    for (let i = 0; i < m.counts.vertices; i++) {
       const x = m.positions[i * 3], y = m.positions[i * 3 + 1], z = m.positions[i * 3 + 2];
-      hit = x > 15 && x < 35 && Math.abs(y - sgn * 5) < 0.15 && Math.abs(z - zc) < 0.2;
+      if (!(x > 15 && x < 35)) continue;
+      if (Math.abs(y - sgn * 5) < 0.15 && Math.abs(z - zc) < 0.2) hit = true;
+      // 槽底內角（牆 × 槽底）也要補：沒補的話牆在剖切下懸空 1.6mm 才斜著落地
+      if (Math.abs(y - sgn * 5) < 0.15 && Math.abs(z - 14) < 0.15) inner = true;
     }
     assert.ok(hit, `網格上應該有 (${sgn * 5}, ${zc.toFixed(2)}) 的槽口轉角點`);
+    assert.ok(inner, `網格上應該有 (${sgn * 5}, 14) 的槽底內角點`);
   }
 });
 

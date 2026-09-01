@@ -497,30 +497,53 @@
       return { y: cy + r * Math.sin(th), z: cz + r * Math.cos(th), r };
     };
     /**
-     * 封口邊的**轉角外插**。槽壁與表面的交角幾乎都落在兩條射線**之間**，
-     * 封口照射線畫的話，角落會被斜切掉一格（格距 0.5 時是一條 0.5 寬、
-     * 好幾 mm 深的斜口，放大看像被啃了一角）。用 k0 那個牆點在**另一側**的
-     * 鄰居抓牆的走向，外插回 k1 的半徑，補一個轉角點，缺口就閉起來了。
+     * 封口邊的**轉角補點**。兩個面的交角幾乎都落在兩條射線**之間**，
+     * 封口照射線畫的話，角落會被斜切掉（格距 0.5 時是一條窄而深的斜口：
+     * 槽口外角缺一塊、槽底內角則讓牆「懸空」一大截才落地，看起來底部歪掉）。
+     *
+     * 補法：封口兩端各抓一條「表面走向」（端點在封口**另一側**的鄰居 → 端點），
+     * 兩條走向的**交點**就是轉角——槽口外角（牆 × 外圓）與槽底內角（牆 × 槽底）
+     * 同一條式子都補得到。外側走向抓不到時退回舊解法（把內側走向外插回 k1 的
+     * 半徑圓，只有外角在外圓上時有效）。交點跑太遠（t ∉ (1,4)）代表走向不可靠，
+     * 一律退回原本的直線封口。
      * @returns {{y,z}|null}
      */
+    function tangentOf(i, k, side) {
+      const oo = k * 4 + (side ? 0 : 2);                    // 端點在封口另一側的鄰居
+      const i2 = link[i][oo], k2 = link[i][oo + 1];
+      if (i2 < 0 || i2 === i) return null;                  // 沒有走向可抓（孤立的封口）
+      const p = pt(i, k), pn = pt(i2, k2);
+      const dy = p.y - pn.y, dz = p.z - pn.z;
+      if (!(dy * dy + dz * dz > 1e-12)) return null;
+      return { pn, dy, dz };
+    }
     function capCorner(i, k0, k1, side) {
       const r1 = SP[i][k1];
       if (!(r1 - SP[i][k0] > sim.cellY)) return null;       // 缺口太淺，不值得補
-      const oo = k0 * 4 + (side ? 0 : 2);                   // k0 在封口另一側的鄰居
-      const i2 = link[i][oo], k2 = link[i][oo + 1];
-      if (i2 < 0 || i2 === i) return null;                  // 沒有走向可抓（孤立的封口）
-      const p0 = pt(i, k0), pn = pt(i2, k2);
-      const dy = p0.y - pn.y, dz = p0.z - pn.z;
-      // 解 |pn + t·d| = r1（取 t > 1 的那個根）
-      const a = dy * dy + dz * dz;
-      if (!(a > 1e-12)) return null;
-      const b = 2 * ((pn.y - cy) * dy + (pn.z - cz) * dz);
-      const c = (pn.y - cy) * (pn.y - cy) + (pn.z - cz) * (pn.z - cz) - r1 * r1;
+      const tIn = tangentOf(i, k0, side);
+      if (!tIn) return null;
+      const tOut = tangentOf(i, k1, side);
+      if (tOut) {
+        // 兩條走向的交點：pnI + t·dI = pnO + s·dO（Cramer）
+        const det = tIn.dy * tOut.dz - tIn.dz * tOut.dy;
+        if (Math.abs(det) > 1e-12) {
+          const wy = tOut.pn.y - tIn.pn.y, wz = tOut.pn.z - tIn.pn.z;
+          const t = (wy * tOut.dz - wz * tOut.dy) / det;
+          const s = (wy * tIn.dz - wz * tIn.dy) / det;
+          if (t > 1 && t < 4 && s > 1 && s < 4) {
+            return { y: tIn.pn.y + t * tIn.dy, z: tIn.pn.z + t * tIn.dz };
+          }
+        }
+      }
+      // 後備：內側走向外插回 k1 的半徑（解 |pn + t·d| = r1，取 t > 1 的根）
+      const a = tIn.dy * tIn.dy + tIn.dz * tIn.dz;
+      const b = 2 * ((tIn.pn.y - cy) * tIn.dy + (tIn.pn.z - cz) * tIn.dz);
+      const c = (tIn.pn.y - cy) * (tIn.pn.y - cy) + (tIn.pn.z - cz) * (tIn.pn.z - cz) - r1 * r1;
       const disc = b * b - 4 * a * c;
       if (disc <= 0) return null;
       const t = (-b + Math.sqrt(disc)) / (2 * a);
-      if (!(t > 1 && t < 4)) return null;                   // 走向不可靠就退回原本的直線封口
-      return { y: pn.y + t * dy, z: pn.z + t * dz };
+      if (!(t > 1 && t < 4)) return null;
+      return { y: tIn.pn.y + t * tIn.dy, z: tIn.pn.z + t * tIn.dz };
     }
     const loops = [];
     for (let i0 = 0; i0 < ny; i0++) {

@@ -712,15 +712,18 @@
       }
     }
     /**
-     * 封口外緣的**轉角外插**——跟剖面的 capCorner 同一招（CONTRACT §13.10）。
-     * 牆與外緣的交角幾乎都落在兩條射線之間，封口照射線畫會把角落斜切掉一格
-     * （格距 0.5、槽深 8 時是一條 0.5 寬、3.5 mm 深的斜口）。資料是對的，是畫法丟了轉角。
+     * 封口的**轉角補點**——跟剖面的 capCorner 同一招（CONTRACT §13.10）。
+     * 兩個面的交角幾乎都落在兩條射線之間，封口照射線畫會把角落斜切掉：
+     * 槽口外角（牆 × 外圓）缺一塊、槽底內角（牆 × 槽底）則讓牆懸空一大截才落地。
+     * 資料是對的，是畫法丟了轉角。
      *
-     * 走向從封口的**內側端點（牆點）**抓：查隔壁一列（欄）半徑最接近的**同型**端點
-     * （lo 對 lo、hi 對 hi——牆是同一個邊界延續過去的），外插回外緣半徑 r1。
-     * 轉角點是**插進** p0→p1 之間，不是移動 p1：p1 那條邊還要跟隔壁的表面條帶密合，
-     * 移走會沿著槽緣開出一條細縫。缺口太淺（≤ 一格）、抓不到走向、
-     * 或外插跑太遠（t ∉ (1,4)，走向不可靠）就回 null，維持原本的直線封口。
+     * 補法：封口兩端各抓一條「表面走向」——查隔壁一列（欄）半徑最接近的**同型**
+     * 端點（lo 對 lo、hi 對 hi，同一個邊界延續過去）→ 端點的直線；兩條走向的
+     * **交點**就是轉角，內角外角同一條式子。外側走向抓不到時退回舊解法
+     * （內側走向外插回 r1 的圓，只有外角在外圓上時有效）。
+     * 轉角點是**插進** p0→p1 之間，不是移動 p1：p1 那條邊還要跟隔壁的表面條帶密合。
+     * 缺口太淺（≤ 一格）、走向抓不到、或交點跑太遠（t ∉ (1,4)）就回 null，
+     * 維持原本的直線封口。
      */
     function wallNeighbor(ix2, iy2, r0, parity) {
       const sp = spansAt(ix2, iy2);
@@ -730,9 +733,8 @@
       }
       return best;   // -1 = 這一格沒有同型端點
     }
-    /** 周向封口的轉角：x 固定，在 (y,z) 平面解 |pn + t·d| = r1 的二次式（同 capCorner） */
-    function cornerTheta(ix2, iy2, r0, r1, parity) {
-      if (!(r1 - r0 > cellY)) return null;
+    /** 周向的表面走向：隔壁列的同型端點 → (ix2, iy2, r0)，(y,z) 平面（圓心座標） */
+    function tangentTheta(ix2, iy2, r0, parity) {
       let pn = null;
       for (const d of [-1, 1]) {
         const jy = ((iy2 + d) % ny + ny) % ny;
@@ -742,19 +744,39 @@
       if (!pn) return null;
       const py = pn.r * sn[pn.jy], pz = pn.r * cs[pn.jy];
       const dy = r0 * sn[iy2] - py, dz = r0 * cs[iy2] - pz;
-      const a = dy * dy + dz * dz;
-      if (!(a > 1e-12)) return null;
-      const b = 2 * (py * dy + pz * dz);
-      const c = py * py + pz * pz - r1 * r1;
+      if (!(dy * dy + dz * dz > 1e-12)) return null;
+      return { py, pz, dy, dz };
+    }
+    /** 周向封口的轉角：x 固定，在 (y,z) 平面求兩條走向的交點（同 capCorner） */
+    function cornerTheta(ix2, iy2, r0, r1, par0, par1) {
+      if (!(r1 - r0 > cellY)) return null;
+      const tIn = tangentTheta(ix2, iy2, r0, par0);
+      if (!tIn) return null;
+      const x = sim.origin.x + ix2 * cellX;
+      const tOut = tangentTheta(ix2, iy2, r1, par1);
+      if (tOut) {
+        const det = tIn.dy * tOut.dz - tIn.dz * tOut.dy;
+        if (Math.abs(det) > 1e-12) {
+          const wy = tOut.py - tIn.py, wz = tOut.pz - tIn.pz;
+          const t = (wy * tOut.dz - wz * tOut.dy) / det;
+          const s = (wy * tIn.dz - wz * tIn.dy) / det;
+          if (t > 1 && t < 4 && s > 1 && s < 4) {
+            return [x, cy + tIn.py + t * tIn.dy, cz + tIn.pz + t * tIn.dz];
+          }
+        }
+      }
+      // 後備：內側走向外插回 r1 的圓（解 |pn + t·d| = r1，取 t > 1 的根）
+      const a = tIn.dy * tIn.dy + tIn.dz * tIn.dz;
+      const b = 2 * (tIn.py * tIn.dy + tIn.pz * tIn.dz);
+      const c = tIn.py * tIn.py + tIn.pz * tIn.pz - r1 * r1;
       const disc = b * b - 4 * a * c;
       if (disc <= 0) return null;
       const t = (-b + Math.sqrt(disc)) / (2 * a);
       if (!(t > 1 && t < 4)) return null;
-      return [sim.origin.x + ix2 * cellX, cy + py + t * dy, cz + pz + t * dz];
+      return [x, cy + tIn.py + t * tIn.dy, cz + tIn.pz + t * tIn.dz];
     }
-    /** 軸向封口的轉角：θ 固定，在 (x, r) 平面直線外插到 r1 */
-    function cornerX(ix2, iy2, r0, r1, parity) {
-      if (!(r1 - r0 > cellX)) return null;
+    /** 軸向的表面走向：隔壁欄的同型端點 → (ix2, iy2, r0)，(x欄, r) 平面 */
+    function tangentX(ix2, iy2, r0, parity) {
       let pn = null;
       for (const d of [-1, 1]) {
         const jx = ix2 + d;
@@ -762,11 +784,32 @@
         const r = wallNeighbor(jx, iy2, r0, parity);
         if (r >= 0 && (!pn || Math.abs(r - r0) < Math.abs(pn.r - r0))) pn = { r, jx };
       }
-      if (!pn || Math.abs(r0 - pn.r) < 1e-9) return null;
-      const t = (r1 - pn.r) / (r0 - pn.r);
+      if (!pn) return null;
+      return { px: pn.jx, pr: pn.r, dx: ix2 - pn.jx, dr: r0 - pn.r };
+    }
+    /** 軸向封口的轉角：θ 固定，在 (x, r) 平面求兩條走向的交點 */
+    function cornerX(ix2, iy2, r0, r1, par0, par1) {
+      if (!(r1 - r0 > cellX)) return null;
+      const tIn = tangentX(ix2, iy2, r0, par0);
+      if (!tIn) return null;
+      const tOut = tangentX(ix2, iy2, r1, par1);
+      if (tOut) {
+        const det = tIn.dx * tOut.dr - tIn.dr * tOut.dx;
+        if (Math.abs(det) > 1e-12) {
+          const wx = tOut.px - tIn.px, wr = tOut.pr - tIn.pr;
+          const t = (wx * tOut.dr - wr * tOut.dx) / det;
+          const s = (wx * tIn.dr - wr * tIn.dx) / det;
+          if (t > 1 && t < 4 && s > 1 && s < 4) {
+            const rc = tIn.pr + t * tIn.dr;
+            return [sim.origin.x + (tIn.px + t * tIn.dx) * cellX, cy + rc * sn[iy2], cz + rc * cs[iy2]];
+          }
+        }
+      }
+      // 後備：內側走向直線外插到 r1
+      if (Math.abs(tIn.dr) < 1e-9) return null;
+      const t = (r1 - tIn.pr) / tIn.dr;
       if (!(t > 1 && t < 4)) return null;
-      const x = sim.origin.x + (pn.jx + t * (ix2 - pn.jx)) * cellX;
-      return [x, cy + r1 * sn[iy2], cz + r1 * cs[iy2]];
+      return [sim.origin.x + (tIn.px + t * tIn.dx) * cellX, cy + r1 * sn[iy2], cz + r1 * cs[iy2]];
     }
 
     /** 一整列的材料區間 */
@@ -844,9 +887,9 @@
           const s = ((e % 2) === 0) ? 1 : -1;
           const want = [0, s * cs[iy], -s * sn[iy]];
           const p0 = ptOf(Ea, ix, iy, e), p1 = ptOf(Ea, ix, iy, e1);
-          const c0 = cornerTheta(ix, iy, A[e], A[e1], e % 2);
+          const c0 = cornerTheta(ix, iy, A[e], A[e1], e % 2, e1 % 2);
           if (f0 >= 0 && f1 >= 0 && T.ca[ix + 1][f0] === f1) {
-            const c1 = cornerTheta(ix + 1, iy, Ea[ix + 1][f0], Ea[ix + 1][f1], e % 2);
+            const c1 = cornerTheta(ix + 1, iy, Ea[ix + 1][f0], Ea[ix + 1][f1], e % 2, e1 % 2);
             const pts = [p0];
             if (c0) pts.push(c0);
             pts.push(p1, ptOf(Ea, ix + 1, iy, f1));
@@ -870,9 +913,9 @@
           const s = ((e % 2) === 0) ? -1 : 1;
           const want = [0, s * cs[iyb], -s * sn[iyb]];
           const p0 = ptOf(Eb, ix, iyb, e), p1 = ptOf(Eb, ix, iyb, e1);
-          const c0 = cornerTheta(ix, iyb, Eb[ix][e], Eb[ix][e1], e % 2);
+          const c0 = cornerTheta(ix, iyb, Eb[ix][e], Eb[ix][e1], e % 2, e1 % 2);
           if (f0 >= 0 && f1 >= 0 && T.cb[ix + 1][f0] === f1) {
-            const c1 = cornerTheta(ix + 1, iyb, Eb[ix + 1][f0], Eb[ix + 1][f1], e % 2);
+            const c1 = cornerTheta(ix + 1, iyb, Eb[ix + 1][f0], Eb[ix + 1][f1], e % 2, e1 % 2);
             const pts = [p0];
             if (c0) pts.push(c0);
             pts.push(p1, ptOf(Eb, ix + 1, iyb, f1));
@@ -893,9 +936,9 @@
           const d0 = T.la[ix][e], d1 = T.la[ix][e1];
           const s = ((e % 2) === 0) ? 1 : -1;
           const p0 = ptOf(Ea, ix, iy, e), p1 = ptOf(Ea, ix, iy, e1);
-          const c0 = cornerX(ix, iy, A[e], A[e1], e % 2);
+          const c0 = cornerX(ix, iy, A[e], A[e1], e % 2, e1 % 2);
           if (d0 >= 0 && d1 >= 0 && Xb.cf[ix][d0] === d1) {
-            const c1 = cornerX(ix, iyb, Eb[ix][d0], Eb[ix][d1], e % 2);
+            const c1 = cornerX(ix, iyb, Eb[ix][d0], Eb[ix][d1], e % 2, e1 % 2);
             const pts = [p0];
             if (c0) pts.push(c0);
             pts.push(p1, ptOf(Eb, ix, iyb, d1));
@@ -916,9 +959,9 @@
           const d0 = T.la[ix + 1][e], d1 = T.la[ix + 1][e1];
           const s = ((e % 2) === 0) ? 1 : -1;
           const p0 = ptOf(Ea, ix + 1, iy, e), p1 = ptOf(Ea, ix + 1, iy, e1);
-          const c0 = cornerX(ix + 1, iy, Ea[ix + 1][e], Ea[ix + 1][e1], e % 2);
+          const c0 = cornerX(ix + 1, iy, Ea[ix + 1][e], Ea[ix + 1][e1], e % 2, e1 % 2);
           if (d0 >= 0 && d1 >= 0 && Xb.cb[ix][d0] === d1) {
-            const c1 = cornerX(ix + 1, iyb, Eb[ix + 1][d0], Eb[ix + 1][d1], e % 2);
+            const c1 = cornerX(ix + 1, iyb, Eb[ix + 1][d0], Eb[ix + 1][d1], e % 2, e1 % 2);
             const pts = [p0];
             if (c0) pts.push(c0);
             pts.push(p1, ptOf(Eb, ix + 1, iyb, d1));

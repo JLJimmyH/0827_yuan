@@ -808,6 +808,19 @@ test('cylSection：槽口的轉角要補回表面，不會被斜切掉一格', a
   }
 });
 
+test('cylSection：槽底的內角也要補回直角，牆不再懸空落地', async () => {
+  // 槽壁（|y|=5）與槽底（z=14）的交角也落在兩條射線之間：封口照射線畫的話，
+  // 牆會懸空一大截、斜著才碰到底（demo-4axis 尺寸下 1.6mm，就是「底部有點歪」）。
+  // 轉角改成「兩條表面走向的交點」之後，內角外角同一條式子，輪廓上要有直角點。
+  const out = await runCyl(slotProgram(), 20);
+  const sec = NC.sim.cylSection(out, 25);
+  for (const sgn of [1, -1]) {
+    const hit = sec.loops.reduce((a, l) => a.concat(l), []).some(
+      (p) => Math.abs(p.y - sgn * 5) < 0.1 && Math.abs(p.z - 14) < 0.1);
+    assert.ok(hit, `輪廓上應該有 (${sgn * 5}, 14) 的槽底內角點`);
+  }
+});
+
 test('圓柱素材：沒切過的圓棒不佔 extra，height 自己就講完了', async () => {
   const out = await runCyl('M6T1(10MM)\nG0G90G54X10.Y0.A0.G43H1Z50.M3S1200\nG0A90.', 20);
   assert.equal(out.extra.size, 0);
