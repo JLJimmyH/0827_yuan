@@ -814,6 +814,45 @@ test('圓柱素材：沒切過的圓棒不佔 extra，height 自己就講完了'
   assert.deepEqual(NC.sim.spansOf(out, 0), [0, 20]);
 });
 
+test('圓柱素材：偏離中心線的鑽孔（Y≠0）不會把空洞上方的外殼削掉', async () => {
+  // check-4axis 的地雷：X30 Y10 鑽到 Z0（rules 本來就會警告，但模擬要照實切）。
+  // 鑽體是 |y−10|≤3 的鉛直柱：θ 超過表面開口角（~26°）之後，射線穿過柱身是
+  // **內部空洞**，上方的外殼要留著。這種下鑽的展開影像是曲線（θ 一路掃、r 一路縮），
+  // 取樣點太疏時刀位會沿一條沒走過的假曲線內插，把外殼整片削掉（densifyForUnroll 釘住）。
+  const out = await runCyl([
+    'M6T6(SG-6.)',
+    'G0G90G54X30.Y10.A0.G43H6Z50.M3S900',
+    'G98G81Z0.R30.F70M8',
+    'G80',
+    'G0Z150.',
+    'A90.',                    // 遠處分度：讓程式進圓柱模式，本身不切削
+  ].join('\n'), 30);
+  const ix = Math.round((31 - out.origin.x) / out.cellX);
+  const iy = Math.round(35 * Math.PI / 180 * 30 / out.cellY);
+  const th = (out.origin.y + iy * out.cellY) / 30;
+  const sp = NC.sim.spansOf(out, iy * out.nx + ix);
+  assert.equal(sp.length, 4, `θ≈35° 應該是「材料–空洞–材料」，實際 ${JSON.stringify([...sp])}`);
+  near(sp[1], 7.17 / Math.sin(th), 0.3);     // 空洞內緣 = 鑽體側面（X=31 的弦半寬 2.83）
+  near(sp[2], 12.83 / Math.sin(th), 0.3);    // 空洞外緣 = 鑽體另一側
+  near(sp[3], 30, 1e-6);                     // 外殼一路留到表面
+});
+
+test('圓柱素材：偏心的深鑽不會被誤判成穿過軸心、挖到對面', async () => {
+  // Y10 的鑽孔就算鑽到 Z-5，鑽體 |y−10|≤3 也永遠碰不到 y < 0 那一側。
+  // 取樣太疏時展開角從 18° 跳到 117°（≥90°）會被 unrollPath 當成「穿過軸心、
+  // 半徑變號」，對面被挖出假孔；加密之後相鄰取樣的角差都很小，不會再誤判。
+  const out = await runCyl([
+    'M6T6(SG-6.)',
+    'G0G90G54X30.Y10.A0.G43H6Z50.M3S900',
+    'G98G81Z-5.R30.F70M8',
+    'G80',
+    'G0Z150.',
+    'A90.',
+  ].join('\n'), 30);
+  const k = Math.PI / 180 * 30;
+  for (const d of [190, 198, 206]) near(NC.sim.heightAt(out, 30, d * k), 30, 1e-6);
+});
+
 test('estimateRadius：優先用真正垂直鑽的孔，不被偏在側邊的刀撐大', () => {
   // 兩刀垂直鑽（Y0，R 點 Z25）＋ 兩刀偏在側邊 21.474（起點離軸心 √(25²+21.474²) ≈ 33）
   const res = full([

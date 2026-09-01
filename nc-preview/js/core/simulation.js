@@ -699,25 +699,72 @@
   }
 
   /**
+   * 3D 直線在展開座標可能是**曲線**——偏離中心線的下鑽最典型：刀尖直直往下走，
+   * 展開角 θ 卻從表面的角度一路掃向 90°、r 一路縮。forEachCylStep 拿取樣點之間的
+   * 展開座標**線性內插**當一步步的刀位，點太疏的話刀就沿著一條實際沒走過的假曲線
+   * 切過去，把空洞上方的外殼整片削掉（check-4axis 的偏心鑽），碰撞檢查也跟著失準。
+   * 所以展開影像會彎的段先在 3D 弦上加密：遞迴比較「展開線性內插的中點」與
+   * 「真實 3D 中點」，偏差超過半格才細分，收斂就停（旋轉段 r 不變，一步就收斂）。
+   * 幾乎通過軸心的弦（離軸心 < 半格）不加密——那是 unrollPath「角度不變、半徑變號」
+   * 表示法的地盤，而且徑向鑽孔是最常見的段，加密會把它的單步快路徑拖慢幾百倍。
+   */
+  function densifyForUnroll(pw, ts, sim) {
+    const sub = Math.max(sim.cell / 2, 1e-6);
+    const cy = (sim.center && sim.center.y) || 0, cz = (sim.center && sim.center.z) || 0;
+    const pts = [], outT = [];
+    function refine(p0, t0, p1, t1, depth) {
+      if (depth <= 0) return;
+      const y0 = p0.y - cy, z0 = p0.z - cz, y1 = p1.y - cy, z1 = p1.z - cz;
+      const r0 = Math.hypot(y0, z0), r1 = Math.hypot(y1, z1);
+      if (r0 < 1e-9 || r1 < 1e-9) return;
+      // 展開線性內插的中點：角度走一半、半徑取平均
+      const dth = Math.atan2(y1 * z0 - z1 * y0, y0 * y1 + z0 * z1);
+      const c = Math.cos(dth / 2), s = Math.sin(dth / 2);
+      const uy = y0 / r0, uz = z0 / r0;
+      const rm = (r0 + r1) / 2;
+      const my = (p0.y + p1.y) / 2, mz = (p0.z + p1.z) / 2;
+      const dev = Math.hypot((my - cy) - rm * (uy * c + uz * s), (mz - cz) - rm * (uz * c - uy * s));
+      if (dev <= sub / 2) return;
+      const m = { x: (p0.x + p1.x) / 2, y: my, z: mz };
+      const tm = (t0 + t1) / 2;
+      refine(p0, t0, m, tm, depth - 1);
+      pts.push(m); outT.push(tm);
+      refine(m, tm, p1, t1, depth - 1);
+    }
+    for (let i = 0; i < pw.length; i++) {
+      if (i > 0) {
+        const p0 = pw[i - 1], p1 = pw[i];
+        const y0 = p0.y - cy, z0 = p0.z - cz, y1 = p1.y - cy, z1 = p1.z - cz;
+        const chord = Math.hypot(y1 - y0, z1 - z0);
+        if (chord > 1e-9 && Math.abs(y0 * z1 - z0 * y1) / chord >= sub) {
+          refine(p0, ts[i - 1], p1, ts[i], 9);
+        }
+      }
+      pts.push(pw[i]); outT.push(ts[i]);
+    }
+    return { pts, ts: outT };
+  }
+
+  /**
    * 圓柱模式：把一段（機台座標）映射成展開座標的折線 [{x, s, r, a}]。
    *   機台 (x,y,z) + A 角度 → 繞軸心反轉 A → (x, θ, r) → (x, s = θ·R, r)
-   * A 在轉的段映射後是曲線，rotary.samples 已經依角度細分過。
+   * A 在轉的段映射後是曲線，rotary.samples 已經依角度細分過；
+   * 直線段的展開影像也可能是曲線，densifyForUnroll 再補一層加密。
    */
   function unrollPoints(sim, seg) {
     const RG = NC.geometry && NC.geometry.rotary;
     if (!RG || typeof RG.samples !== 'function' || typeof RG.unrollPath !== 'function') return [];
-    const pw = RG.samples(seg, { center: sim.center, tol: sim.cell / 2 });
+    const pw0 = RG.samples(seg, { center: sim.center, tol: sim.cell / 2 });
+    const t0 = pw0.map((_, i) => (pw0.length > 1 ? i / (pw0.length - 1) : 1));
+    const { pts: pw, ts } = densifyForUnroll(pw0, t0, sim);
     const k = Math.PI / 180 * sim.radius;
     // unrollPath 已經處理跨 ±180 與穿過軸心（r 變號），這裡只換算成弧長。
-    // 每個點也帶上當下的 A：刀軸方向要靠它才算得出來（rotarySamples 是等分內插 aFrom→a，照同一個比例還原）。
+    // 每個點也帶上當下的 A：刀軸方向要靠它才算得出來（rotarySamples 是等分內插
+    // aFrom→a，照原始取樣的參數比例還原，加密插進來的點用內插的參數）。
     const up = RG.unrollPath(pw, sim.center);
     const a1 = Number(seg.a) || 0;
     const a0 = seg.aFrom === undefined ? a1 : (Number(seg.aFrom) || 0);
-    const n = up.length;
-    return up.map((u, i) => ({
-      x: u.x, s: u.theta * k, r: u.r,
-      a: n > 1 ? a0 + (a1 - a0) * (i / (n - 1)) : a1,
-    }));
+    return up.map((u, i) => ({ x: u.x, s: u.theta * k, r: u.r, a: a0 + (a1 - a0) * ts[i] }));
   }
 
   /**
