@@ -1056,7 +1056,7 @@
         it.estimatedStock ? h('span', {
           class: 'nc-badge nc-badge-est',
           title: '這一則是拿「推估素材」判出來的（素材尺寸是用切削範圍猜的，不是真的毛胚）。'
-            + '到「素材與設定」填入真實尺寸後會重算。',
+            + '到 Project 的「素材」子頁填入真實尺寸後會重算。',
         }, '推估素材') : null,
         it.scenario ? h('span', { class: `nc-badge nc-badge-scn nc-scn-${it.scenario}`, title: `只在「${SCENARIO_LABEL[it.scenario] || it.scenario}」情境發生` }, SCENARIO_SHORT[it.scenario] || it.scenario) : null,
         h('span', { class: 'nc-diag-rule' }, it.ruleId),

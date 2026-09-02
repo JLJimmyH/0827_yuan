@@ -131,9 +131,11 @@
 .nc-diag.nc-sev-warning { border-left-color: var(--nc-warning); }
 .nc-diag.nc-sev-info { border-left-color: var(--nc-info); }
 .nc-diag.nc-sev-needsInput { border-left-color: #e6c500; }
-.nc-diag-head { display: flex; align-items: baseline; gap: 6px; padding: 4px 6px; }
+/* 列放不下時，後面的徽章（×N、推估素材、skip、規則號）折到下一行；訊息本身保底 12em，
+ * 不然手機上會被擠成一個字一行（flex:1 的 min-width 是 min-content，中文每個字都能斷） */
+.nc-diag-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; padding: 4px 6px; }
 .nc-diag-line { font-family: var(--nc-mono); color: var(--nc-accent); min-width: 3.5em; }
-.nc-diag-msg { flex: 1; white-space: normal; }
+.nc-diag-msg { flex: 1 1 14em; min-width: 12em; white-space: normal; }
 .nc-diag-rule { font-family: var(--nc-mono); color: var(--nc-muted); font-size: 11px; }
 .nc-diag-count { font-family: var(--nc-mono); font-size: 11px; font-weight: 600; color: var(--nc-muted); background: var(--nc-bg-alt); border: 1px solid var(--nc-border); border-radius: 9px; padding: 0 6px; white-space: nowrap; }
 .nc-diag.nc-sev-error .nc-diag-count { color: var(--nc-error); border-color: var(--nc-error); background: var(--nc-error-bg); }
