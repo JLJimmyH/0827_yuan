@@ -68,6 +68,20 @@
     if (!(nx > 0 && ny > 0)) throw new Error('NC.sim.create：素材尺寸不合法');
     const origin = { x: stock.min.x, y: stock.min.y };
     const height = new Float32Array(nx * ny).fill(stock.max.z);
+    // 立圓柱素材：圓外根本沒有料。高度圖仍是方格，把圓外的格子直接設到底
+    // （＝材料已不存在），碰撞與殘料才不會把外切方框的四個角當成實料。
+    if (stock.shape === 'cylZ') {
+      const r = Math.min(stock.max.x - stock.min.x, stock.max.y - stock.min.y) / 2;
+      const cx = (stock.min.x + stock.max.x) / 2;
+      const cy = (stock.min.y + stock.max.y) / 2;
+      for (let iy = 0; iy < ny; iy++) {
+        const dy = origin.y + iy * cell - cy;
+        for (let ix = 0; ix < nx; ix++) {
+          const dx = origin.x + ix * cell - cx;
+          if (dx * dx + dy * dy > r * r + 1e-9) height[iy * nx + ix] = stock.min.z;
+        }
+      }
+    }
     const mask = new Uint8Array(nx * ny);
     let topZ = stock.max.z;
     const fixtures = Array.isArray(stock.fixtures) ? stock.fixtures : [];
@@ -291,7 +305,7 @@
 
   /** 平面高度圖的線段蓋章（膠囊）。圓柱素材走 scanCyl，不進這裡。 */
   function cutLine(sim, ax, ay, bx, by, za, zb, prof, acc) {
-    const { cellX, cellY, nx, origin, height, mask } = sim;
+    const { cellX, cellY, nx, origin, height, mask, floorZ } = sim;
     const r = prof.r - XY_TOL, r2 = r * r;
     const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, L = Math.sqrt(L2);
     const constZ = (za === zb) || L < XY_TOL;
@@ -323,6 +337,9 @@
           const s = zb < za ? Math.min(1, t + w) : Math.max(0, t - w);
           h = za + (zb - za) * s;
         }
+        // 鑽穿素材底＝這格沒料了，跟 cutArc 一樣停在 floorZ——
+        // 低於底的值會讓剖面把孔底畫成掛在素材下面的料
+        if (h < floorZ) h = floorZ;
         const idx = iy * nx + ix;
         const old = height[idx];
         if (h < old - 1e-7) {

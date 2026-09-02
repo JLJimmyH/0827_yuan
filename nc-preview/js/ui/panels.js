@@ -9,7 +9,8 @@
  *   diagnostics(container, {items, onJump, onFix?, filter?})     onJump(line, item)
  *   modal(container, state, extra?)                              純顯示
  *   ops(container, {ops, onJump, time?, toolTable?, selectedIndex?})  onJump(line, op)
- *   stock(container, {stock, onChange})                          onChange(newStock | null)  null = 回到推估
+ *   stock(container, {stock, rotaryUsed?, onChange})             onChange(stockWithSpec | null)  null = 回到推估
+ *   stockSummary(container, {stock, onOpen})                     摘要卡（分頁用；完整編輯在設定頁）
  *   settings(container, {settings, scenario, cell, onChange})    onChange({settings, scenario, cell})
  */
 (function (NC) {
@@ -49,6 +50,8 @@
   const SCENARIO_SHORT = { off: 'skip 關', on: 'skip 開', multiIgnored: '多斜線' };
   const MULTISLASH_LABEL = { asSingle: '視同單斜線', ignoreBlock: '整節忽略', alarm: '視為錯誤（警報）' };
   const CELL_OPTIONS = [0.1, 0.25, 0.5, 1];
+  const STOCK_SHAPE_LABEL = { box: '長方體', cylZ: '立圓柱', cylX: '躺圓柱' };
+  const STOCK_Z_LABEL = { 1: '頂面', 0.5: '半高', 0: '底面' };
 
   // ---------------------------------------------------------------------------
   // 純邏輯（不碰 DOM）
@@ -590,9 +593,54 @@
     return 'ok';
   }
 
+  /**
+   * 工件原點在素材上的位置 → 現場說法（摘要卡與九宮格 tooltip 用）。
+   * 俯視方向：+Y = 上、−X = 左。anchor 不是 0／0.5／1 的（外部資料才會）一律「自訂」。
+   */
+  function stockAnchorText(spec) {
+    if (!spec || !spec.anchor) return '—';
+    const a = spec.anchor;
+    const zText = STOCK_Z_LABEL[a.z] || '自訂高度';
+    if (spec.shape === 'cylZ') return `軸心（${zText}）`;
+    if (spec.shape === 'cylX') {
+      const xText = { 0: '左端面', 0.5: '中間', 1: '右端面' }[a.x] || '自訂';
+      return `${xText}・軸心`;
+    }
+    const xy = { 0: 0, 0.5: 1, 1: 2 };
+    if (!(a.x in xy) || !(a.y in xy)) return `自訂（${zText}）`;
+    const NAME = [
+      ['左下角', '下邊中點', '右下角'],   // y = 0
+      ['左邊中點', '中心', '右邊中點'],   // y = 0.5
+      ['左上角', '上邊中點', '右上角'],   // y = 1
+    ];
+    return `${NAME[xy[a.y]][xy[a.x]]}（${zText}）`;
+  }
+
+  /** 素材一句話摘要：「長方體 100×60×20 mm・原點在上邊中點（頂面）」。 */
+  function stockSummaryText(stock) {
+    if (!stock) return '—';
+    if (stock.kind === 'cylinder' && !stock.spec) {
+      return `圓棒 Ø${fmt(stock.radius * 2, 1)} × 長 ${fmt(stock.xMax - stock.xMin, 1)} mm（推估）`;
+    }
+    const spec = stock.spec;
+    if (!spec) {
+      const size = `${fmt(stock.max.x - stock.min.x, 1)}×${fmt(stock.max.y - stock.min.y, 1)}×${fmt(stock.max.z - stock.min.z, 1)}`;
+      return `${size} mm（${stock.source === 'estimated' ? '推估' : '手動'}）`;
+    }
+    const s = spec.size;
+    const size = spec.shape === 'box'
+      ? `${fmt(s.x, 3)}×${fmt(s.y, 3)}×${fmt(s.z, 3)} mm`
+      : (spec.shape === 'cylZ' ? `Ø${fmt(s.x, 3)} × 高 ${fmt(s.z, 3)} mm` : `Ø${fmt(s.y, 3)} × 長 ${fmt(s.x, 3)} mm`);
+    const off = ['x', 'y', 'z'].some((a) => spec.pos[a] !== 0)
+      ? `，偏移 (${fmt(spec.pos.x, 3)}, ${fmt(spec.pos.y, 3)}, ${fmt(spec.pos.z, 3)})` : '';
+    return `${STOCK_SHAPE_LABEL[spec.shape]} ${size}・原點在${stockAnchorText(spec)}${off}`;
+  }
+
   panels.logic = {
     dListByTool, ensureOffsets, toolUsesDefault, countDefaultTools, setToolField, setOffsetField,
     filterDiagnostics, countBySeverity, formatTime, rangeText, listText, toNumber, fmt, clampInt,
+    stockAnchorText, stockSummaryText, STOCK_SHAPE_LABEL,
+    stockPreviewTransform, stockDragHit, stockDragApply, tfPx, tfPy, tfWx, tfWy,
     normalizeMagazine, defaultMagazine, magazineStatus, ringPositions, wrapPot,
     withBOM, csvFileName, looksLikeToolCSV, mergeCSVTable, describeImport, importStatusKind,
     csvFieldError, csvUnparsedCells, csvRows, groupUnparsed, CSV_FIELD_LABEL, CSV_NUMERIC_COLUMNS,
@@ -1226,14 +1274,510 @@
   // ---------------------------------------------------------------------------
   // 素材與夾具
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // 素材預覽的座標轉換與拖曳邏輯（純函式，Node 可測）。
+  // mode 'top' = 俯視（X–Y）、'front' = 正視（X–Z）；圖的上方 = +Y／+Z。
+  // ---------------------------------------------------------------------------
+  function stockPreviewTransform(stock, W, H, mode) {
+    const ax = 'x';
+    const ay = mode === 'front' ? 'z' : 'y';
+    // 視野 = 素材 ∪ 原點，再留邊
+    let lo0 = Math.min(stock.min[ax], 0), hi0 = Math.max(stock.max[ax], 0);
+    let lo1 = Math.min(stock.min[ay], 0), hi1 = Math.max(stock.max[ay], 0);
+    const span0 = Math.max(hi0 - lo0, 1e-6), span1 = Math.max(hi1 - lo1, 1e-6);
+    const pad = Math.max(span0, span1) * 0.14;
+    lo0 -= pad; hi0 += pad; lo1 -= pad; hi1 += pad;
+    const scale = Math.min(W / (hi0 - lo0), H / (hi1 - lo1));
+    return {
+      ax, ay, W, H, lo0, lo1, scale,
+      ox: (W - (hi0 - lo0) * scale) / 2,
+      oy: (H - (hi1 - lo1) * scale) / 2,
+    };
+  }
+  function tfPx(tf, v) { return tf.ox + (v - tf.lo0) * tf.scale; }
+  function tfPy(tf, v) { return tf.H - tf.oy - (v - tf.lo1) * tf.scale; }
+  function tfWx(tf, px) { return tf.lo0 + (px - tf.ox) / tf.scale; }
+  function tfWy(tf, py) { return tf.lo1 + (tf.H - tf.oy - py) / tf.scale; }
+
+  /**
+   * 預覽圖上抓到什麼：⊕（原點）優先，其次素材的邊（立圓柱俯視是圓周）。
+   * 命中半徑放寬到手指等級——設定主要靠拖，抓不到就等於沒這功能。
+   * @returns {{kind:'origin'}|{kind:'radius'}|{kind:'edge', which:string}|null} which = 'minX'|'maxX'|'minY'|…
+   */
+  function stockDragHit(tf, stock, cx, cy) {
+    if (Math.hypot(cx - tfPx(tf, 0), cy - tfPy(tf, 0)) <= 16) return { kind: 'origin' };
+    const shape = stock.shape || (stock.kind === 'cylinder' ? 'cylX' : 'box');
+    const TOL = 10;
+    if (tf.ay === 'y' && shape === 'cylZ') {
+      const ccx = tfPx(tf, (stock.min.x + stock.max.x) / 2);
+      const ccy = tfPy(tf, (stock.min.y + stock.max.y) / 2);
+      const r = (stock.max.x - stock.min.x) / 2 * tf.scale;
+      if (Math.abs(Math.hypot(cx - ccx, cy - ccy) - r) <= TOL) return { kind: 'radius' };
+      return null;
+    }
+    const x0 = tfPx(tf, stock.min[tf.ax]), x1 = tfPx(tf, stock.max[tf.ax]);
+    const y0 = tfPy(tf, stock.max[tf.ay]), y1 = tfPy(tf, stock.min[tf.ay]);   // 螢幕上 y0 < y1
+    const cap = (a) => a.toUpperCase();
+    const inX = cx >= x0 - TOL && cx <= x1 + TOL;
+    const inY = cy >= y0 - TOL && cy <= y1 + TOL;
+    if (inY && Math.abs(cx - x0) <= TOL) return { kind: 'edge', which: 'min' + cap(tf.ax) };
+    if (inY && Math.abs(cx - x1) <= TOL) return { kind: 'edge', which: 'max' + cap(tf.ax) };
+    if (inX && Math.abs(cy - y0) <= TOL) return { kind: 'edge', which: 'max' + cap(tf.ay) };
+    if (inX && Math.abs(cy - y1) <= TOL) return { kind: 'edge', which: 'min' + cap(tf.ay) };
+    return null;
+  }
+
+  /**
+   * 把拖曳位置套回 spec（回傳新 spec，不改原件）。(wx, wy) = 游標的工件座標。
+   * - origin：把原點放到素材上的那個位置。靠近 0／0.5／1 比例（±6%）就磁吸成錨點、
+   *   殘量歸零——拖個大概交給磁吸，精確值用下面的數字欄微調，這就是「拖曳＋數字微調」。
+   * - edge：拖哪條邊就只長那一邊（對邊與原點都不動），尺寸吸 0.5 mm 格。
+   * - radius（立圓柱俯視的圓周）：新直徑 = 游標到軸心距離 × 2，吸 0.5 mm。
+   */
+  function stockDragApply(spec, tf, hit, wx, wy) {
+    const s = U.deepClone(spec);
+    const w = {}; w[tf.ax] = wx; w[tf.ay] = wy;
+    if (hit.kind === 'origin') {
+      // 圓柱垂直軸面上的錨鎖在軸心（normalizeSpec 會強制），這些軸只吸 0.5、殘量全進 pos，
+      // 不然 apply 選了 0 錨、normalize 又拉回 0.5，素材會跳到別的地方
+      const locked = s.shape === 'cylZ' ? { x: 1, y: 1 } : (s.shape === 'cylX' ? { y: 1, z: 1 } : {});
+      for (const a of [tf.ax, tf.ay]) {
+        const size = s.size[a];
+        const min = s.pos[a] - s.anchor[a] * size;
+        let f = Math.min(1, Math.max(0, (w[a] - min) / size));
+        for (const g of (locked[a] ? [0.5] : [0, 0.5, 1])) if (Math.abs(f - g) < 0.06) { f = g; break; }
+        const anchor = locked[a] ? 0.5 : (f < 0.25 ? 0 : (f > 0.75 ? 1 : 0.5));
+        s.anchor[a] = anchor;
+        s.pos[a] = U.round((anchor - f) * size);
+      }
+    } else if (hit.kind === 'radius') {
+      const r = Math.hypot(wx - s.pos.x, wy - s.pos.y);
+      const d = Math.max(0.5, Math.round(r * 2 * 2) / 2);
+      s.size.x = d; s.size.y = d;
+    } else {
+      const a = hit.which.slice(3).toLowerCase();
+      const isMin = hit.which.indexOf('min') === 0;
+      const size = s.size[a], anchor = s.anchor[a];
+      const min = s.pos[a] - anchor * size, max = min + size;
+      let ns = isMin ? (max - w[a]) : (w[a] - min);
+      ns = Math.max(0.5, Math.round(ns * 2) / 2);
+      s.pos[a] = U.round(isMin ? (max - (1 - anchor) * ns) : (min + anchor * ns));
+      s.size[a] = ns;
+    }
+    return s;
+  }
+
+  /**
+   * 素材預覽小圖：這張圖是主要的輸入介面——拖 ⊕ 移原點（磁吸九宮格）、
+   * 拖邊改尺寸；也是偏移方向的防呆，「+5 是素材往右還是原點往右」看圖就知道。
+   * opts.tf 給定時用它（拖曳中凍結視野，素材不會跟著跳）；opts.snapDots 畫磁吸點。
+   * Node 假 DOM 沒有 canvas context，直接略過。
+   */
+  function drawStockPreview(canvas, stock, mode, opts) {
+    if (!canvas || typeof canvas.getContext !== 'function') return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!stock || !stock.min || !stock.max) return;
+    const tf = (opts && opts.tf) || stockPreviewTransform(stock, W, H, mode);
+    const ax = tf.ax, ay = tf.ay;
+    const px = (v) => tfPx(tf, v);
+    const py = (v) => tfPy(tf, v);
+
+    const shape = stock.shape || (stock.kind === 'cylinder' ? 'cylX' : 'box');
+    const cx = (stock.min.x + stock.max.x) / 2;
+    const cy = (stock.min.y + stock.max.y) / 2;
+    const cz = (stock.min.z + stock.max.z) / 2;
+
+    // 素材外形
+    const cylTop = mode === 'top' && shape === 'cylZ';
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#5b6472';
+    ctx.fillStyle = 'rgba(43,108,176,0.08)';
+    ctx.beginPath();
+    if (cylTop) {
+      ctx.ellipse(px(cx), py(cy), (stock.max.x - stock.min.x) / 2 * tf.scale, (stock.max.y - stock.min.y) / 2 * tf.scale, 0, 0, Math.PI * 2);
+    } else {
+      ctx.rect(px(stock.min[ax]), py(stock.max[ay]), (stock.max[ax] - stock.min[ax]) * tf.scale, (stock.max[ay] - stock.min[ay]) * tf.scale);
+    }
+    ctx.fill();
+    ctx.stroke();
+    // 可拖的把手記號（CAD 風格小方塊）：矩形四邊中點、圓在右側圓周——沒有記號沒人知道邊可以拖。
+    // 拖 ⊕ 期間不畫（此刻拖的不是邊，而且把手會和磁吸點疊在同一批位置）
+    if (!(opts && opts.snapDots)) {
+      const handle = (hx, hy) => {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#3f4854';
+        ctx.lineWidth = 1.6;
+        ctx.fillRect(hx - 5, hy - 5, 10, 10);
+        ctx.strokeRect(hx - 5, hy - 5, 10, 10);
+      };
+      if (cylTop) {
+        handle(px(cx) + (stock.max.x - stock.min.x) / 2 * tf.scale, py(cy));
+      } else {
+        const mx = (px(stock.min[ax]) + px(stock.max[ax])) / 2;
+        const my = (py(stock.min[ay]) + py(stock.max[ay])) / 2;
+        handle(px(stock.min[ax]), my);
+        handle(px(stock.max[ax]), my);
+        handle(mx, py(stock.min[ay]));
+        handle(mx, py(stock.max[ay]));
+      }
+    }
+    // 躺圓柱在正視圖補一條軸心虛線（軸心＝迴轉中心，剖面與展開圖都以它為基準）
+    if (shape === 'cylX' && mode === 'front') {
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#5b6472';
+      ctx.beginPath();
+      ctx.moveTo(px(stock.min.x), py(cz));
+      ctx.lineTo(px(stock.max.x), py(cz));
+      ctx.stroke();
+      ctx.restore();
+    }
+    // 夾具（俯視）
+    if (mode === 'top') {
+      ctx.fillStyle = 'rgba(178,106,0,0.18)';
+      for (const f of stock.fixtures || []) {
+        if (!f || !f.min || !f.max) continue;
+        ctx.fillRect(px(f.min.x), py(f.max.y), (f.max.x - f.min.x) * tf.scale, (f.max.y - f.min.y) * tf.scale);
+      }
+    }
+    // 拖 ⊕ 時把磁吸點畫出來（素材上的九個格點；圓柱只有軸向三點有意義）
+    if (opts && opts.snapDots && !cylTop) {
+      ctx.fillStyle = 'rgba(198,40,40,0.35)';
+      for (const gx of [0, 0.5, 1]) {
+        for (const gy of [0, 0.5, 1]) {
+          ctx.beginPath();
+          ctx.arc(px(stock.min[ax] + gx * (stock.max[ax] - stock.min[ax])),
+            py(stock.min[ay] + gy * (stock.max[ay] - stock.min[ay])), 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    // 工件原點 ⊕（畫最後，蓋在外形上）。
+    // opts.originW 給定時 ⊕ 改畫在那裡——拖 ⊕ 期間素材固定、原點跟著手指在素材上移動
+    // （拖的是「原點在素材的哪裡」，素材本身不能看起來被拖著跑），放開 commit 後
+    // 才回到「原點固定在 (0,0)」的正規呈現。
+    const o0 = (opts && opts.originW) ? opts.originW[ax] : 0;
+    const o1 = (opts && opts.originW) ? opts.originW[ay] : 0;
+    const r = 7;
+    ctx.strokeStyle = '#c62828';
+    ctx.lineWidth = opts && opts.dragging ? 2.4 : 1.6;
+    ctx.beginPath();
+    ctx.arc(px(o0), py(o1), r, 0, Math.PI * 2);
+    ctx.moveTo(px(o0) - r * 1.8, py(o1)); ctx.lineTo(px(o0) + r * 1.8, py(o1));
+    ctx.moveTo(px(o0), py(o1) - r * 1.8); ctx.lineTo(px(o0), py(o1) + r * 1.8);
+    ctx.stroke();
+    // 軸向標籤與尺寸
+    ctx.fillStyle = '#6b7480';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(mode === 'front' ? 'X–Z（正視）' : 'X–Y（俯視）', 6, 13);
+    ctx.textAlign = 'center';
+    // 錯開邊中點——那裡站著拖曳把手
+    ctx.fillText(fmt(stock.max[ax] - stock.min[ax], 3), (px(stock.min[ax]) + px(stock.max[ax])) / 2 + 30, Math.min(H - 4, py(stock.min[ay]) + 13));
+    ctx.save();
+    ctx.translate(Math.max(10, px(stock.min[ax]) - 5), (py(stock.min[ay]) + py(stock.max[ay])) / 2 + 30);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(fmt(stock.max[ay] - stock.min[ay], 3), 0, 0);
+    ctx.restore();
+    ctx.textAlign = 'start';
+  }
+
+  /**
+   * 可旋轉的 3D 檢視：素材半透明面＋線框、工件原點（⊕ 與 XYZ 三色軸），
+   * 加「原點在素材空間哪裡」的定位虛線——垂直落線到頂面＋頂面十字，
+   * 沒有這組線的話 ⊕ 浮在圖上，看不出它在盒子裡的深淺與前後。
+   * 只能旋轉不能拖點：一個游標點在投影下定不出三維深度，拖點留在俯視／正視。
+   *
+   * view = {yaw, elev}（弧度；elev 90° = 正俯視、0° = 水平正視）。
+   * 正交投影、以素材對角球定縮放——旋轉時不重新 fit，畫面不會忽大忽小。
+   */
+  function drawStock3D(canvas, stock, opts) {
+    if (!canvas || typeof canvas.getContext !== 'function') return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!stock || !stock.min || !stock.max) return;
+    const o = (opts && opts.originW) || { x: 0, y: 0, z: 0 };
+    const view = (opts && opts.view) || { yaw: -0.65, elev: 0.95 };
+    const shape = stock.shape || (stock.kind === 'cylinder' ? 'cylX' : 'box');
+    const mn = stock.min, mx = stock.max;
+    const sizeMax = Math.max(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+    const axisLen = sizeMax * 0.3;
+    const C = { x: (mn.x + mx.x) / 2, y: (mn.y + mx.y) / 2, z: (mn.z + mx.z) / 2 };
+    const cy = Math.cos(view.yaw), sy = Math.sin(view.yaw);
+    const ce = Math.cos(view.elev), se = Math.sin(view.elev);
+    const diag = Math.hypot(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z) / 2;
+    const scale = Math.min(W, H) / (2 * (diag + axisLen) * 1.02);
+    /** 工件座標 → [螢幕 x, 螢幕 y, 深度（越大越遠）] */
+    const P = (x, y, z) => {
+      const dx = x - C.x, dy = y - C.y, dz = z - C.z;
+      const x1 = dx * cy - dy * sy;
+      const y1 = dx * sy + dy * cy;
+      return [W / 2 + x1 * scale, H / 2 - (y1 * se + dz * ce) * scale, y1 * ce - dz * se];
+    };
+    const poly = (list, close) => {
+      ctx.beginPath();
+      list.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      if (close) ctx.closePath();
+    };
+    /** 螢幕空間 signed area（頂點自外側看為逆時針 → 面朝觀察者時 > 0） */
+    const area2 = (pts) => {
+      let a = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[(i + 1) % pts.length];
+        a += p[0] * q[1] - q[0] * p[1];
+      }
+      return -a;   // 螢幕 y 向下，抵銷翻轉
+    };
+
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#5b6472';
+    if (shape === 'box') {
+      // 六個面（頂點順序：自外側看逆時針），背面剔除、由遠到近畫
+      const F = (fill, pts) => ({ fill, pts: pts.map((p) => P(p[0], p[1], p[2])) });
+      const faces = [
+        F('rgba(43,108,176,0.08)', [[mn.x, mn.y, mx.z], [mx.x, mn.y, mx.z], [mx.x, mx.y, mx.z], [mn.x, mx.y, mx.z]]),   // 頂
+        F('rgba(43,108,176,0.08)', [[mn.x, mn.y, mn.z], [mn.x, mx.y, mn.z], [mx.x, mx.y, mn.z], [mx.x, mn.y, mn.z]]),   // 底
+        F('rgba(43,108,176,0.16)', [[mn.x, mn.y, mn.z], [mx.x, mn.y, mn.z], [mx.x, mn.y, mx.z], [mn.x, mn.y, mx.z]]),   // 前 −Y
+        F('rgba(43,108,176,0.16)', [[mx.x, mx.y, mn.z], [mn.x, mx.y, mn.z], [mn.x, mx.y, mx.z], [mx.x, mx.y, mx.z]]),   // 後 +Y
+        F('rgba(43,108,176,0.24)', [[mn.x, mx.y, mn.z], [mn.x, mn.y, mn.z], [mn.x, mn.y, mx.z], [mn.x, mx.y, mx.z]]),   // 左 −X
+        F('rgba(43,108,176,0.24)', [[mx.x, mn.y, mn.z], [mx.x, mx.y, mn.z], [mx.x, mx.y, mx.z], [mx.x, mn.y, mx.z]]),   // 右 +X
+      ];
+      const visible = faces.filter((f) => area2(f.pts) > 0);
+      visible.sort((a, b) => {
+        const da = a.pts.reduce((s2, p) => s2 + p[2], 0);
+        const db = b.pts.reduce((s2, p) => s2 + p[2], 0);
+        return db - da;   // 遠的先畫
+      });
+      for (const f of visible) {
+        poly(f.pts, true);
+        ctx.fillStyle = f.fill;
+        ctx.fill();
+        ctx.stroke();
+      }
+    } else {
+      // 圓柱：兩端圓 + 8 條母線的線框（旋轉下輪廓線位置會變，線框最不會騙人）
+      const ring = (mk) => {
+        const out = [];
+        for (let i = 0; i <= 24; i++) {
+          const t = (i / 24) * Math.PI * 2;
+          out.push(mk(Math.cos(t), Math.sin(t)));
+        }
+        return out;
+      };
+      ctx.fillStyle = 'rgba(43,108,176,0.10)';
+      if (shape === 'cylZ') {
+        const ccx = C.x, ccy = C.y, r = (mx.x - mn.x) / 2;
+        poly(ring((a, b) => P(ccx + r * a, ccy + r * b, mx.z)), true); ctx.fill(); ctx.stroke();
+        poly(ring((a, b) => P(ccx + r * a, ccy + r * b, mn.z)), true); ctx.stroke();
+        for (let i = 0; i < 8; i++) {
+          const t = (i / 8) * Math.PI * 2;
+          poly([P(ccx + r * Math.cos(t), ccy + r * Math.sin(t), mn.z), P(ccx + r * Math.cos(t), ccy + r * Math.sin(t), mx.z)]);
+          ctx.stroke();
+        }
+      } else {
+        const ccy = C.y, ccz = C.z, r = (mx.y - mn.y) / 2;
+        poly(ring((a, b) => P(mx.x, ccy + r * a, ccz + r * b)), true); ctx.fill(); ctx.stroke();
+        poly(ring((a, b) => P(mn.x, ccy + r * a, ccz + r * b)), true); ctx.stroke();
+        for (let i = 0; i < 8; i++) {
+          const t = (i / 8) * Math.PI * 2;
+          const y = ccy + r * Math.cos(t), z = ccz + r * Math.sin(t);
+          poly([P(mn.x, y, z), P(mx.x, y, z)]);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // 原點的空間定位（CAD 式虛線）：頂面十字標出 XY、垂直落線標出 Z 深度
+    ctx.save();
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = 'rgba(198,40,40,0.6)';
+    poly([P(mn.x, o.y, mx.z), P(mx.x, o.y, mx.z)]); ctx.stroke();
+    poly([P(o.x, mn.y, mx.z), P(o.x, mx.y, mx.z)]); ctx.stroke();
+    if (Math.abs(o.z - mx.z) > 1e-6) {
+      poly([P(o.x, o.y, o.z), P(o.x, o.y, mx.z)]); ctx.stroke();
+      const t = P(o.x, o.y, mx.z);
+      ctx.fillStyle = 'rgba(198,40,40,0.6)';
+      ctx.beginPath();
+      ctx.arc(t[0], t[1], 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // 工件原點：三軸短線（顏色同 3D 視圖慣例：X 紅、Y 綠、Z 藍）+ ⊕
+    const axes = [
+      ['X', '#c62828', [o.x + axisLen, o.y, o.z]],
+      ['Y', '#2e7d32', [o.x, o.y + axisLen, o.z]],
+      ['Z', '#1565c0', [o.x, o.y, o.z + axisLen]],
+    ];
+    const base = P(o.x, o.y, o.z);
+    ctx.lineWidth = 2;
+    ctx.font = '11px sans-serif';
+    for (const [label, color, end] of axes) {
+      const e = P(end[0], end[1], end[2]);
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      poly([base, e]); ctx.stroke();
+      ctx.fillText(label, e[0] + 3, e[1] - 3);
+    }
+    ctx.strokeStyle = '#c62828';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(base[0], base[1], 6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#6b7480';
+    ctx.fillText('3D・拖曳旋轉', 6, 13);
+  }
+
+  /**
+   * 素材編輯器：形狀＋尺寸＋原點位置（拖曳為主、數字微調為輔）＋夾具＋即時預覽。
+   * 這裡輸入的是 spec（尺寸與原點位置），min/max 由 NC.analysis.stockFromSpec 導出——
+   * 現場拿到的是「長寬高＋原點在哪」，不是包絡盒；87.654 這種尺寸的一半不該讓人每次手算。
+   *
+   *   stock(container, {stock, rotaryUsed?, onChange})
+   *     onChange(stockWithSpec | null)   null = 回到程式推估
+   */
   panels.stock = function stock(container, opts) {
-    const state = { opts: Object.assign({}, opts), stock: null };
+    const A = NC.analysis || {};
+    const state = { opts: Object.assign({}, opts), stock: null, spec: null, fixtures: [], source: 'estimated' };
     const root = h('div', { class: 'nc-panel nc-panel-stock' });
     mount(container, root);
 
-    function commit(asUser) {
-      if (asUser) state.stock.source = 'user';
-      call(state.opts.onChange, U.deepClone(state.stock));
+    function fallbackSpec() {
+      return { shape: 'box', size: { x: 100, y: 100, z: 20 }, anchor: { x: 0.5, y: 0.5, z: 1 }, pos: { x: 0, y: 0, z: 0 } };
+    }
+    function builtStock() {
+      const s = typeof A.stockFromSpec === 'function' ? A.stockFromSpec(state.spec, state.fixtures) : null;
+      return s || U.deepClone(state.stock);
+    }
+    function commit() {
+      state.source = 'user';
+      call(state.opts.onChange, builtStock());
+      render();
+    }
+    function setSpec(fn) { fn(state.spec); commit(); }
+
+    // ---- 預覽拖曳：⊕ 移原點（磁吸九宮格）、邊改尺寸 ----
+    // 拖曳中不 commit（commit 會整片重建表單，pointer capture 就斷了），
+    // 只重畫兩張圖與換算文字；放開才 commit 一次。
+    const cvs = { iso: null, top: null, front: null };
+    let drag = null;   // { mode, tf, hit, spec0 }
+    const view3d = { yaw: -0.65, elev: 0.95 };   // 3D 檢視角度（不持久化，重開回預設）
+    function rangeTextOf(s) {
+      return `換算範圍：X ${fmt(s.min.x)} ～ ${fmt(s.max.x)}、Y ${fmt(s.min.y)} ～ ${fmt(s.max.y)}、Z ${fmt(s.min.z)} ～ ${fmt(s.max.z)}`;
+    }
+    function redrawPreviews() {
+      const cur = builtStock();
+      // 拖 ⊕ 期間畫面以「素材」為參考系：外形照拖曳起點的 spec 畫（一動不動），
+      // 移動的是 ⊕——算出新原點落在素材的比例位置，映回起點素材上
+      const dragOrigin = !!(drag && drag.hit.kind === 'origin');
+      let shown = cur, originW = null;
+      if (dragOrigin) {
+        const base = (typeof A.stockFromSpec === 'function' && A.stockFromSpec(drag.spec0, state.fixtures)) || cur;
+        originW = {};
+        for (const a of 'xyz') {
+          const f = (0 - cur.min[a]) / (cur.max[a] - cur.min[a]);
+          originW[a] = base.min[a] + f * (base.max[a] - base.min[a]);
+        }
+        shown = base;
+      }
+      for (const m of ['top', 'front']) {
+        if (!cvs[m]) continue;
+        drawStockPreview(cvs[m], shown, m, {
+          tf: (drag && drag.mode === m) ? drag.tf : null,   // 被拖的那張凍結視野
+          snapDots: dragOrigin,
+          dragging: !!(drag && drag.mode === m),
+          originW,
+        });
+      }
+      if (cvs.iso) drawStock3D(cvs.iso, shown, { originW, view: view3d });
+      const rangeEl = root.querySelector && root.querySelector('.nc-stock-range');
+      if (rangeEl) rangeEl.textContent = rangeTextOf(cur);
+    }
+    function canvasPoint(cv, ev) {
+      const rect = cv.getBoundingClientRect();
+      return {
+        x: (ev.clientX - rect.left) * (cv.width / rect.width),
+        y: (ev.clientY - rect.top) * (cv.height / rect.height),
+      };
+    }
+    function attachDrag(cv, mode) {
+      if (typeof cv.getContext !== 'function' || typeof cv.setPointerCapture !== 'function') return;   // Node 假 DOM
+      cv.addEventListener('pointerdown', (ev) => {
+        const s = builtStock();
+        const tf = stockPreviewTransform(s, cv.width, cv.height, mode);
+        const p = canvasPoint(cv, ev);
+        const hit = stockDragHit(tf, s, p.x, p.y);
+        if (!hit) return;
+        drag = { mode, tf, hit, spec0: U.deepClone(state.spec) };
+        cv.setPointerCapture(ev.pointerId);
+        ev.preventDefault();
+        redrawPreviews();
+      });
+      cv.addEventListener('pointermove', (ev) => {
+        if (drag && drag.mode === mode) {
+          const p = canvasPoint(cv, ev);
+          state.spec = stockDragApply(drag.spec0, drag.tf, drag.hit, tfWx(drag.tf, p.x), tfWy(drag.tf, p.y));
+          redrawPreviews();
+          return;
+        }
+        // 沒在拖：游標提示抓得到什麼
+        const s = builtStock();
+        const tf = stockPreviewTransform(s, cv.width, cv.height, mode);
+        const p = canvasPoint(cv, ev);
+        const hit = stockDragHit(tf, s, p.x, p.y);
+        cv.style.cursor = !hit ? 'default'
+          : (hit.kind === 'origin' ? 'move'
+            : (hit.kind === 'radius' ? 'nwse-resize'
+              : (hit.which.slice(3).toLowerCase() === tf.ax ? 'ew-resize' : 'ns-resize')));
+      });
+      const finish = (ev, cancelled) => {
+        if (!drag || drag.mode !== mode) return;
+        if (cancelled) state.spec = drag.spec0;
+        drag = null;
+        if (cancelled) redrawPreviews(); else commit();
+      };
+      cv.addEventListener('pointerup', (ev) => finish(ev, false));
+      cv.addEventListener('pointercancel', (ev) => finish(ev, true));
+    }
+    /** 3D 檢視的軌道旋轉：橫拖轉方位、直拖調俯仰。只轉視角，不動任何設定值。 */
+    function attachOrbit(cv) {
+      if (typeof cv.getContext !== 'function' || typeof cv.setPointerCapture !== 'function') return;   // Node 假 DOM
+      cv.style.cursor = 'grab';
+      let orb = null;
+      cv.addEventListener('pointerdown', (ev) => {
+        orb = { x: ev.clientX, y: ev.clientY };
+        cv.setPointerCapture(ev.pointerId);
+        cv.style.cursor = 'grabbing';
+        ev.preventDefault();
+      });
+      cv.addEventListener('pointermove', (ev) => {
+        if (!orb) return;
+        view3d.yaw += (ev.clientX - orb.x) * 0.01;
+        view3d.elev = Math.min(1.5, Math.max(0.12, view3d.elev + (ev.clientY - orb.y) * 0.008));
+        orb = { x: ev.clientX, y: ev.clientY };
+        redrawPreviews();
+      });
+      const end = () => { orb = null; cv.style.cursor = 'grab'; };
+      cv.addEventListener('pointerup', end);
+      cv.addEventListener('pointercancel', end);
+    }
+
+    function sizeRow(label, axis, extraTitle) {
+      return row(label, numberInput(state.spec.size[axis], (n) => {
+        if (n == null || !(n > 0)) { render(); return; }
+        setSpec((sp) => { sp.size[axis] = n; });
+      }, { attrs: { step: '1', min: '0' }, title: extraTitle || '', dataset: { field: `size.${axis}` } }), ' mm');
+    }
+    function posRow(label, axis, title) {
+      return row(label, numberInput(state.spec.pos[axis], (n) => {
+        setSpec((sp) => { sp.pos[axis] = n == null ? 0 : n; });
+      }, { attrs: { step: '0.5' }, title: title || '', dataset: { field: `pos.${axis}` } }), ' mm');
     }
     function vecRows(obj, onEdit, prefix) {
       // obj = {min, max}；回傳 X/Y/Z 三列，每列 min/max 兩個輸入
@@ -1245,50 +1789,175 @@
           numberInput(obj.max[axis], (n) => { if (n == null) return; obj.max[axis] = n; onEdit(); }, { attrs: { step: '1' }, title: `${axis.toUpperCase()} 最大`, dataset: { field: `${prefix}max.${axis}` } }),
           h('span', { class: 'nc-muted nc-size', dataset: { axis } }, ` （${fmt(obj.max[axis] - obj.min[axis])}）`))));
     }
+
     function render() {
       clear(root);
-      const s = state.stock;
-      const isUser = s.source === 'user';
+      const sp = state.spec;
+      const isUser = state.source === 'user';
+      const rotary = !!state.opts.rotaryUsed;
+      const preview = builtStock();
+
       root.appendChild(h('div', { class: 'nc-stock-head' },
-        h('span', { class: 'nc-badge ' + (isUser ? 'nc-badge-user' : 'nc-badge-est'), dataset: { source: s.source } }, isUser ? '手動指定' : '由程式推估'),
-        h('span', { class: 'nc-muted' }, ` 尺寸 ${fmt(s.max.x - s.min.x)} × ${fmt(s.max.y - s.min.y)} × ${fmt(s.max.z - s.min.z)} mm`),
+        h('span', { class: 'nc-badge ' + (isUser ? 'nc-badge-user' : 'nc-badge-est'), dataset: { source: isUser ? 'user' : 'estimated' } }, isUser ? '手動指定' : '由程式推估'),
+        h('span', { class: 'nc-muted nc-stock-brief' }, ' ' + stockSummaryText(preview)),
         isUser ? h('button', { type: 'button', class: 'nc-btn nc-btn-small nc-btn-reset', title: '丟掉手動值，改用程式推估', onclick: () => call(state.opts.onChange, null) }, '回到推估') : null));
       if (!isUser) {
         root.appendChild(h('div', { class: 'nc-muted nc-stock-note' },
-          '這是用「程式切到哪裡」往外擴一個刀半徑猜出來的，不是真的毛胚尺寸；'
-          + '工件外圍那一圈料實際上可能不存在。填入真實尺寸後，碰撞與下刀判定會全部重算。'));
+          '下面的欄位已帶入程式推估的反算值（用切削範圍猜的，不是真的毛胚）。'
+          + '把尺寸改成實際毛胚、選好原點位置，改任何一格就轉為手動；碰撞與下刀判定會全部重算。'));
       }
-      root.appendChild(h('div', { class: 'nc-stock-box' },
-        h('div', { class: 'nc-sub-title' }, '素材範圍（工件座標）'),
-        vecRows(s, () => { commit(true); render(); }, '')));
+
+      const form = h('div', { class: 'nc-stock-form' });
+      // ---- 形狀（永遠三顆都能挑——工具的用法是「先挑素材試，再寫程式」，不鎖人）----
+      form.appendChild(h('div', { class: 'nc-sub-title' }, '形狀'));
+      form.appendChild(h('div', { class: 'nc-shape-seg', attrs: { role: 'group', 'aria-label': '素材形狀' } },
+        ['box', 'cylZ', 'cylX'].map((k) => h('button', {
+          type: 'button',
+          class: 'nc-shape-btn' + (sp.shape === k ? ' is-on' : ''),
+          dataset: { shape: k },
+          title: { box: '長方體毛胚', cylZ: '站立的圓柱（軸向 Z）', cylX: '躺著的圓柱（軸向 X，第四軸圓棒）' }[k],
+          onclick: () => setSpec((s) => {
+            if (s.shape === k) return;
+            // 換形狀時把直徑接到對的軸：box→cylZ 拿 X、box→cylX 拿 Y，反向照舊
+            if (k === 'cylZ' && s.shape !== 'cylZ') s.size.y = s.size.x;
+            if (k === 'cylX' && s.shape !== 'cylX') s.size.z = s.size.y;
+            s.shape = k;
+          }),
+        }, h('span', { class: 'nc-shape-icon nc-shape-icon-' + k }), STOCK_SHAPE_LABEL[k]))));
+      if (rotary && sp.shape === 'cylX') {
+        form.appendChild(h('div', { class: 'nc-muted' }, '這支程式使用第四軸：圓棒的直徑與軸心會和第四軸設定互相同步。'));
+      } else if (rotary) {
+        form.appendChild(h('div', { class: 'nc-muted nc-stock-warn' },
+          '這支程式轉了第四軸——只有「躺圓柱」能正確模擬圓棒切削，其他形狀僅供比對外形，成品與碰撞判定會不準。'));
+      } else if (sp.shape === 'cylX') {
+        form.appendChild(h('div', { class: 'nc-muted' }, '此程式沒有轉第四軸：躺圓柱會以外框包絡盒模擬（角落的空料視為實料）。'));
+      }
+
+      // ---- 尺寸 ----
+      form.appendChild(h('div', { class: 'nc-sub-title' }, '尺寸'));
+      if (sp.shape === 'box') {
+        form.appendChild(sizeRow('長（X）', 'x'));
+        form.appendChild(sizeRow('寬（Y）', 'y'));
+        form.appendChild(sizeRow('高（Z）', 'z'));
+      } else if (sp.shape === 'cylZ') {
+        form.appendChild(sizeRow('直徑', 'x'));
+        form.appendChild(sizeRow('高（Z）', 'z'));
+      } else {
+        form.appendChild(sizeRow('直徑', 'y', rotary ? '會同步到第四軸設定的「工件直徑」' : ''));
+        form.appendChild(sizeRow('長（X）', 'x'));
+      }
+
+      // ---- 原點位置 ----
+      // 「原點放素材的哪裡」直接在預覽圖上拖 ⊕（會磁吸角／邊中點／中心），表單只留數字微調
+      const posTitle = '拖預覽圖的 ⊕ 決定原點大概放哪（會吸附素材的角／邊／中心），'
+        + '吸附點以外的殘量在這裡微調；改這裡＝素材整體平移。';
+      form.appendChild(h('div', { class: 'nc-sub-title' }, `原點位置：${stockAnchorText(sp)}・微調（通常 0, 0, 0）`));
+      form.appendChild(posRow('X', 'x', posTitle));
+      form.appendChild(posRow(sp.shape === 'cylX' ? 'Y（軸心）' : 'Y', 'y', posTitle));
+      form.appendChild(posRow(sp.shape === 'cylX' ? 'Z（軸心）' : 'Z', 'z', posTitle));
+      form.appendChild(h('div', { class: 'nc-muted nc-stock-range' }, rangeTextOf(preview)));
+
+      // ---- 夾具 ----
       const fx = h('div', { class: 'nc-fixtures' }, h('div', { class: 'nc-sub-title' }, '夾具／不可切區域'));
-      if (!s.fixtures.length) fx.appendChild(h('div', { class: 'nc-muted' }, '（無）'));
-      s.fixtures.forEach((f, i) => {
-        const nameInput = h('input', { type: 'text', class: 'nc-text', value: f.name || '', placeholder: `夾具 ${i + 1}`, onchange: () => { f.name = nameInput.value; commit(true); } });
+      if (!state.fixtures.length) fx.appendChild(h('div', { class: 'nc-muted' }, '（無）'));
+      state.fixtures.forEach((f, i) => {
+        const nameInput = h('input', { type: 'text', class: 'nc-text', value: f.name || '', placeholder: `夾具 ${i + 1}`, onchange: () => { f.name = nameInput.value; commit(); } });
         fx.appendChild(h('div', { class: 'nc-fixture', dataset: { index: i } },
           h('div', { class: 'nc-fixture-head' }, nameInput,
-            h('button', { type: 'button', class: 'nc-btn nc-btn-small nc-btn-danger', title: '刪除此夾具', onclick: () => { s.fixtures.splice(i, 1); commit(true); render(); } }, '刪除')),
-          vecRows(f, () => { commit(true); render(); }, `fixture${i}.`)));
+            h('button', { type: 'button', class: 'nc-btn nc-btn-small nc-btn-danger', title: '刪除此夾具', onclick: () => { state.fixtures.splice(i, 1); commit(); } }, '刪除')),
+          vecRows(f, () => commit(), `fixture${i}.`)));
       });
       fx.appendChild(h('button', {
         type: 'button', class: 'nc-btn nc-btn-small nc-btn-add',
         onclick: () => {
-          const n = s.fixtures.length + 1;
-          s.fixtures.push({ name: `夾具 ${n}`, min: { x: s.min.x, y: s.min.y, z: s.min.z }, max: { x: s.min.x + 20, y: s.min.y + 20, z: s.max.z } });
-          commit(true); render();
+          const n = state.fixtures.length + 1;
+          const s = preview;
+          state.fixtures.push({ name: `夾具 ${n}`, min: { x: s.min.x, y: s.min.y, z: s.min.z }, max: { x: s.min.x + 20, y: s.min.y + 20, z: s.max.z } });
+          commit();
         },
       }, '＋ 新增夾具'));
-      root.appendChild(fx);
+      form.appendChild(fx);
+
+      // ---- 預覽 ----
+      // 兩種互動模式分成兩個明確區塊：可「調整」的圖（拖 ⊕、拖邊）歸一組放前面，
+      // 3D 是「檢視」（只能轉視角）放後面、標題點明只能旋轉——混在同一疊裡
+      // 長得又一樣的話，看到俯視能拖點，誰都會以為 3D 也能。
+      cvs.top = h('canvas', { class: 'nc-stock-cv', attrs: { width: 440, height: 280 } });
+      cvs.front = h('canvas', { class: 'nc-stock-cv', attrs: { width: 440, height: 200 } });
+      cvs.iso = h('canvas', { class: 'nc-stock-cv nc-stock-cv-iso', attrs: { width: 440, height: 260 } });
+      const side = h('div', { class: 'nc-stock-preview' },
+        h('div', { class: 'nc-sub-title' }, '調整——直接拖：⊕ 移原點（會吸附九點）、拖邊改尺寸'),
+        cvs.top, cvs.front,
+        h('div', { class: 'nc-sub-title' }, '3D 檢視——拖曳旋轉視角（虛線＝原點的定位）'),
+        cvs.iso);
+
+      root.appendChild(h('div', { class: 'nc-stock-cols' }, form, side));
+      attachDrag(cvs.top, 'top');
+      attachDrag(cvs.front, 'front');
+      attachOrbit(cvs.iso);
+      redrawPreviews();
     }
+
     function update(next) {
       if (next) Object.assign(state.opts, next);
-      const src = state.opts.stock || { min: { x: 0, y: 0, z: -10 }, max: { x: 100, y: 100, z: 0 }, source: 'estimated', fixtures: [] };
-      state.stock = U.deepClone(src);
-      state.stock.fixtures = state.stock.fixtures || [];
+      const src = state.opts.stock || null;
+      state.stock = src ? U.deepClone(src) : { min: { x: -50, y: -50, z: -10 }, max: { x: 50, y: 50, z: 0 }, source: 'estimated', fixtures: [] };
+      state.fixtures = Array.isArray(state.stock.fixtures) ? state.stock.fixtures : [];
+      state.source = state.stock.source === 'user' ? 'user' : 'estimated';
+      state.spec = state.stock.spec ? U.deepClone(state.stock.spec)
+        : ((typeof A.specFromStock === 'function' && A.specFromStock(state.stock)) || fallbackSpec());
       render();
     }
     update();
-    return { el: root, update, getStock: () => U.deepClone(state.stock) };
+    return { el: root, update, getStock: () => builtStock() };
+  };
+
+  /**
+   * 素材摘要卡（放在「素材與設定」分頁）：一句話摘要＋小預覽圖＋開啟設定頁。
+   * 完整的編輯欄位在全螢幕設定頁裡——設定是「開新程式時調一次」的東西，
+   * 塞在 1/4 高的分頁裡欄位放不下，現場也真的以為「素材設定都不能動」過。
+   *
+   *   stockSummary(container, {stock, onOpen})
+   */
+  panels.stockSummary = function stockSummary(container, opts) {
+    const state = { opts: Object.assign({}, opts), stock: null };
+    const root = h('div', { class: 'nc-panel nc-panel-stocksum' });
+    mount(container, root);
+    function render() {
+      clear(root);
+      const s = state.stock;
+      if (!s) {
+        root.appendChild(h('div', { class: 'nc-muted' },
+          '還沒有素材。可以先把素材設好、再開始寫程式——素材會跟著這支程式存起來。'));
+        root.appendChild(h('div', null, h('button', {
+          type: 'button', class: 'nc-btn nc-btn-open-setup',
+          onclick: () => call(state.opts.onOpen),
+        }, '開啟素材與設定頁…')));
+        return;
+      }
+      const isUser = s.source === 'user';
+      root.appendChild(h('div', { class: 'nc-stock-head' },
+        h('span', { class: 'nc-badge ' + (isUser ? 'nc-badge-user' : 'nc-badge-est'), dataset: { source: s.source } }, isUser ? '手動指定' : '由程式推估'),
+        h('span', { class: 'nc-muted nc-stock-brief' }, ' ' + stockSummaryText(s))));
+      if (!isUser) {
+        root.appendChild(h('div', { class: 'nc-muted nc-stock-note' },
+          '推估素材是用切削範圍猜的，不是真的毛胚；相關判定都會標註。到設定頁填入實際尺寸最準。'));
+      }
+      const cv = h('canvas', { class: 'nc-stock-cv nc-stock-cv-sum', attrs: { width: 360, height: 220 } });
+      root.appendChild(cv);
+      root.appendChild(h('div', null, h('button', {
+        type: 'button', class: 'nc-btn nc-btn-open-setup',
+        onclick: () => call(state.opts.onOpen),
+      }, '開啟素材與設定頁…')));
+      drawStockPreview(cv, s, 'top');
+    }
+    function update(next) {
+      if (next) Object.assign(state.opts, next);
+      state.stock = state.opts.stock ? U.deepClone(state.opts.stock) : null;
+      render();
+    }
+    update();
+    return { el: root, update };
   };
 
   // ---------------------------------------------------------------------------

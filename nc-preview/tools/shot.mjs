@@ -23,13 +23,16 @@ const CANDIDATES = [
 const exe = CANDIDATES.find((p) => fs.existsSync(p));
 if (!exe) { console.error('找不到 Chrome/Edge'); process.exit(1); }
 
+// 視窗大小可用環境變數蓋掉（手機版驗證：NCSHOT_W=390 NCSHOT_H=844）
+const W = Number(process.env.NCSHOT_W) || 1680;
+const H = Number(process.env.NCSHOT_H) || 1050;
 const PORT = 9333 + (process.pid % 200);
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ncshot-'));
 const child = spawn(exe, [
   '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
   '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--hide-scrollbars',
   '--allow-file-access-from-files', '--force-device-scale-factor=1',
-  '--window-size=1680,1050', 'about:blank',
+  `--window-size=${W},${H}`, 'about:blank',
 ], { stdio: 'ignore' });
 
 let nextId = 1;
@@ -99,7 +102,7 @@ for (const spec of specs) {
   await rpc(ws, 'Runtime.enable', {}, sessionId);
   await rpc(ws, 'Log.enable', {}, sessionId);
   await rpc(ws, 'Page.enable', {}, sessionId);
-  await rpc(ws, 'Emulation.setDeviceMetricsOverride', { width: 1680, height: 1050, deviceScaleFactor: 1, mobile: false }, sessionId);
+  await rpc(ws, 'Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: W <= 800 }, sessionId);
 
   const hash = '#sample=' + encodeURIComponent(spec.id) + (spec.extra ? '&' + spec.extra : '');
   const url = pathToFileURL(path.join(ROOT, 'index.html')).href + hash;

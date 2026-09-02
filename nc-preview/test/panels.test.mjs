@@ -519,39 +519,212 @@ test('ops：欄位、時間、跳轉、選取', () => {
 // ---------------------------------------------------------------------------
 // 素材
 // ---------------------------------------------------------------------------
-test('stock：min/max、來源、夾具新增刪除、回到推估', () => {
+test('stock：推估反算預填、改尺寸轉手動、pos 微調（錨點只由拖曳設定）', () => {
   const c = container();
   const changes = [];
   P.stock(c, { stock: sampleStock(), onChange: (s) => changes.push(s) });
+  // 推估 → 反算 spec 預填欄位（130×60×15、原點中心）
   assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'estimated');
-  assert.equal(q(c, '.nc-badge[data-source]').textContent, '由程式推估');
   assert.equal(qa(c, '.nc-btn-reset').length, 0);
-  assert.equal(q(c, 'input[data-field="min.x"]').value, '-65');
-  assert.equal(q(c, 'input[data-field="max.z"]').value, '0');
-  setValue(q(c, 'input[data-field="min.x"]'), -70);
+  assert.equal(q(c, 'input[data-field="size.x"]').value, '130');
+  assert.equal(q(c, 'input[data-field="size.z"]').value, '15');
+  // 錨點沒有獨立的表單控制項（拖預覽的 ⊕ 才是入口），標題顯示現在的位置
+  assert.equal(qa(c, 'select[data-field="anchor.z"]').length, 0);
+  assert.match(c.textContent, /原點位置：中心（頂面）/);
+  // 改尺寸 → 轉手動，min/max 由 spec 重算
+  setValue(q(c, 'input[data-field="size.x"]'), 100);
   assert.equal(changes.length, 1);
-  assert.equal(changes[0].min.x, -70);
   assert.equal(changes[0].source, 'user');
+  assert.equal(changes[0].spec.size.x, 100);
+  assert.deepEqual(changes[0].min, { x: -50, y: -30, z: -15 });
+  assert.deepEqual(changes[0].max, { x: 50, y: 30, z: 0 });
   assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'user');
-  assert.equal(q(c, 'input[data-field="min.x"]').value, '-70');
-  // 新增夾具
-  fire(q(c, '.nc-btn-add'), 'click');
-  assert.equal(changes[1].fixtures.length, 1);
-  assert.equal(changes[1].fixtures[0].name, '夾具 1');
-  assert.equal(changes[1].fixtures[0].max.z, 0);
-  assert.equal(qa(c, '.nc-fixture').length, 1);
-  setValue(q(c, 'input[data-field="fixture0.max.z"]'), 5);
-  assert.equal(changes[2].fixtures[0].max.z, 5);
-  const nameInput = q(q(c, '.nc-fixture'), 'input[type="text"]');
-  setValue(nameInput, '虎鉗左');
-  assert.equal(changes[3].fixtures[0].name, '虎鉗左');
-  // 刪除
-  fire(q(c, '.nc-fixture .nc-btn-danger'), 'click');
-  assert.equal(changes[4].fixtures.length, 0);
-  assert.equal(qa(c, '.nc-fixture').length, 0);
+  // pos 微調 = 素材整體平移
+  setValue(q(c, 'input[data-field="pos.x"]'), 2);
+  assert.deepEqual(changes[1].min, { x: -48, y: -30, z: -15 });
+  assert.deepEqual(changes[1].max, { x: 52, y: 30, z: 0 });
   // 回到推估 → onChange(null)
   fire(q(c, '.nc-btn-reset'), 'click');
-  assert.equal(changes[5], null);
+  assert.equal(changes[2], null);
+});
+
+test('stock：形狀切立圓柱＝直徑接手 X、XY 錨鎖軸心', () => {
+  const c = container();
+  const changes = [];
+  P.stock(c, { stock: sampleStock(), onChange: (s) => changes.push(s) });
+  fire(q(c, '.nc-shape-btn[data-shape="cylZ"]'), 'click');
+  const s = changes[0];
+  assert.equal(s.spec.shape, 'cylZ');
+  assert.equal(s.shape, 'cylZ');
+  assert.equal(s.spec.size.y, 130);            // 直徑 = 原本的 X
+  assert.deepEqual(s.min, { x: -65, y: -65, z: -15 });
+  assert.deepEqual(s.max, { x: 65, y: 65, z: 0 });
+  assert.match(c.textContent, /原點位置：軸心（頂面）/);
+});
+
+test('stock：夾具新增、編輯、刪除', () => {
+  const c = container();
+  const changes = [];
+  P.stock(c, { stock: sampleStock(), onChange: (s) => changes.push(s) });
+  fire(q(c, '.nc-btn-add'), 'click');
+  assert.equal(changes[0].fixtures.length, 1);
+  assert.equal(changes[0].fixtures[0].name, '夾具 1');
+  assert.equal(changes[0].fixtures[0].max.z, 0);
+  assert.equal(qa(c, '.nc-fixture').length, 1);
+  setValue(q(c, 'input[data-field="fixture0.max.z"]'), 5);
+  assert.equal(changes[1].fixtures[0].max.z, 5);
+  const nameInput = q(q(c, '.nc-fixture'), 'input[type="text"]');
+  setValue(nameInput, '虎鉗左');
+  assert.equal(changes[2].fixtures[0].name, '虎鉗左');
+  fire(q(c, '.nc-fixture .nc-btn-danger'), 'click');
+  assert.equal(changes[3].fixtures.length, 0);
+  assert.equal(qa(c, '.nc-fixture').length, 0);
+});
+
+test('stock：四軸程式預設躺圓柱但不鎖，換形狀有警示', () => {
+  const c = container();
+  const changes = [];
+  const cyl = {
+    kind: 'cylinder', radius: 20, center: { y: 0, z: 0 },
+    xMin: 0, xMax: 80, source: 'estimated', fixtures: [],
+    min: { x: 0, y: -20, z: -20 }, max: { x: 80, y: 20, z: 20 },
+  };
+  const hnd = P.stock(c, { stock: cyl, rotaryUsed: true, onChange: (s) => changes.push(s) });
+  // 三顆形狀鈕都在（工具的用法是先挑素材試，不鎖人），預設 cylX
+  assert.equal(qa(c, '.nc-shape-btn').length, 3);
+  assert.ok(q(c, '.nc-shape-btn[data-shape="cylX"]').classList.contains('is-on'));
+  assert.equal(qa(c, '.nc-stock-warn').length, 0);
+  assert.equal(q(c, 'input[data-field="size.y"]').value, '40');   // 直徑
+  assert.equal(hnd.getStock().spec.anchor.x, 0);                  // 原點在左端面（反算）
+  assert.match(c.textContent, /原點位置：左端面・軸心/);
+  setValue(q(c, 'input[data-field="size.y"]'), 50);
+  assert.equal(changes[0].spec.size.y, 50);
+  assert.equal(changes[0].spec.shape, 'cylX');
+  assert.deepEqual(changes[0].min, { x: 0, y: -25, z: -25 });
+  // 換成長方體：允許，但要有「四軸下模擬會不準」的警示
+  fire(q(c, '.nc-shape-btn[data-shape="box"]'), 'click');
+  assert.equal(changes[1].spec.shape, 'box');
+  assert.equal(qa(c, '.nc-stock-warn').length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// 預覽拖曳（純邏輯：transform 往返、命中、套用）
+// ---------------------------------------------------------------------------
+function dragStock() {
+  return NC.analysis.stockFromSpec({
+    shape: 'box', size: { x: 100, y: 60, z: 20 },
+    anchor: { x: 0.5, y: 0.5, z: 1 }, pos: { x: 0, y: 0, z: 0 },
+  });
+}
+
+test('drag：transform 螢幕↔工件座標往返', () => {
+  const tf = L.stockPreviewTransform(dragStock(), 440, 300, 'top');
+  assert.equal(tf.ax, 'x');
+  assert.equal(tf.ay, 'y');
+  for (const v of [-50, 0, 12.34, 50]) {
+    assert.ok(Math.abs(L.tfWx(tf, L.tfPx(tf, v)) - v) < 1e-9);
+    assert.ok(Math.abs(L.tfWy(tf, L.tfPy(tf, v)) - v) < 1e-9);
+  }
+  const front = L.stockPreviewTransform(dragStock(), 440, 220, 'front');
+  assert.equal(front.ay, 'z');
+});
+
+test('drag：命中 ⊕、四條邊、空白、立圓柱圓周', () => {
+  const s = dragStock();
+  const tf = L.stockPreviewTransform(s, 440, 300, 'top');
+  assert.deepEqual(L.stockDragHit(tf, s, L.tfPx(tf, 0), L.tfPy(tf, 0)), { kind: 'origin' });
+  assert.deepEqual(L.stockDragHit(tf, s, L.tfPx(tf, 50), L.tfPy(tf, 10)), { kind: 'edge', which: 'maxX' });
+  assert.deepEqual(L.stockDragHit(tf, s, L.tfPx(tf, -50), L.tfPy(tf, 10)), { kind: 'edge', which: 'minX' });
+  assert.deepEqual(L.stockDragHit(tf, s, L.tfPx(tf, 30), L.tfPy(tf, 30)), { kind: 'edge', which: 'maxY' });
+  assert.deepEqual(L.stockDragHit(tf, s, L.tfPx(tf, 30), L.tfPy(tf, -30)), { kind: 'edge', which: 'minY' });
+  assert.equal(L.stockDragHit(tf, s, 3, 3), null);
+  const cyl = NC.analysis.stockFromSpec({ shape: 'cylZ', size: { x: 40, y: 40, z: 20 }, anchor: { x: 0.5, y: 0.5, z: 1 } });
+  const tfc = L.stockPreviewTransform(cyl, 440, 300, 'top');
+  assert.deepEqual(L.stockDragHit(tfc, cyl, L.tfPx(tfc, 20), L.tfPy(tfc, 0)), { kind: 'radius' });
+  assert.equal(L.stockDragHit(tfc, cyl, L.tfPx(tfc, 19), L.tfPy(tfc, 19)), null);  // 圓外的「角」不是東西
+});
+
+test('drag：拖 ⊕ 到角落磁吸九點、拖到中途殘量進 pos', () => {
+  const s = dragStock();
+  const tf = L.stockPreviewTransform(s, 440, 300, 'top');
+  // 差一點點到左上角（f = 0.02／0.97）→ 磁吸成 (0,1)、pos 歸零
+  const snapped = L.stockDragApply(s.spec, tf, { kind: 'origin' }, -48, 28.2);
+  assert.equal(snapped.anchor.x, 0);
+  assert.equal(snapped.anchor.y, 1);
+  assert.equal(snapped.pos.x, 0);
+  assert.equal(snapped.pos.y, 0);
+  // 拖到 f=0.6：不吸，最近錨 0.5、殘量 -10 進 pos
+  const free = L.stockDragApply(s.spec, tf, { kind: 'origin' }, 10, 0);
+  assert.equal(free.anchor.x, 0.5);
+  assert.equal(free.pos.x, -10);
+  assert.equal(free.pos.y, 0);
+});
+
+test('drag：拖邊只長那一邊，對邊與原點不動', () => {
+  const s = dragStock();
+  const tf = L.stockPreviewTransform(s, 440, 300, 'top');
+  const grow = L.stockDragApply(s.spec, tf, { kind: 'edge', which: 'maxX' }, 70, 0);
+  assert.equal(grow.size.x, 120);
+  assert.equal(grow.pos.x, 10);
+  let st = NC.analysis.stockFromSpec(grow);
+  assert.equal(st.min.x, -50);   // 對邊固定
+  assert.equal(st.max.x, 70);
+  const shrink = L.stockDragApply(s.spec, tf, { kind: 'edge', which: 'minX' }, -40, 0);
+  assert.equal(shrink.size.x, 90);
+  st = NC.analysis.stockFromSpec(shrink);
+  assert.equal(st.min.x, -40);
+  assert.equal(st.max.x, 50);    // 對邊固定
+  // 尺寸吸 0.5 mm 格
+  const snap = L.stockDragApply(s.spec, tf, { kind: 'edge', which: 'maxX' }, 70.3, 0);
+  assert.equal(snap.size.x, 120.5);
+});
+
+test('drag：立圓柱拖圓周改直徑、拖 ⊕ 錨鎖軸心殘量進 pos', () => {
+  const cyl = NC.analysis.stockFromSpec({ shape: 'cylZ', size: { x: 40, y: 40, z: 20 }, anchor: { x: 0.5, y: 0.5, z: 1 } });
+  const tf = L.stockPreviewTransform(cyl, 440, 300, 'top');
+  const bigger = L.stockDragApply(cyl.spec, tf, { kind: 'radius' }, 25, 0);
+  assert.equal(bigger.size.x, 50);
+  assert.equal(bigger.size.y, 50);
+  const moved = L.stockDragApply(cyl.spec, tf, { kind: 'origin' }, 10, 0);
+  assert.equal(moved.anchor.x, 0.5);   // 鎖軸心
+  assert.equal(moved.pos.x, -10);      // 原點在軸心右 10 → 軸心在 −10
+});
+
+test('stockSummary：摘要文字、推估警語、開啟設定頁', () => {
+  const c = container();
+  let opened = 0;
+  const hnd = P.stockSummary(c, { stock: null, onOpen: () => { opened++; } });
+  // 沒有素材（可能連程式都還沒有）也要給入口——先設素材再寫程式是正常流程
+  assert.match(c.textContent, /先把素材設好/);
+  fire(q(c, '.nc-btn-open-setup'), 'click');
+  assert.equal(opened, 1);
+  const user = NC.analysis.stockFromSpec({
+    shape: 'box', size: { x: 100, y: 60, z: 20 }, anchor: { x: 0.5, y: 1, z: 1 }, pos: { x: 0, y: 0, z: 0 },
+  });
+  hnd.update({ stock: user });
+  assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'user');
+  assert.match(q(c, '.nc-stock-brief').textContent, /長方體 100×60×20 mm・原點在上邊中點（頂面）/);
+  assert.equal(qa(c, '.nc-stock-note').length, 0);
+  fire(q(c, '.nc-btn-open-setup'), 'click');
+  assert.equal(opened, 2);
+  // 推估 → 有警語
+  hnd.update({ stock: sampleStock() });
+  assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'estimated');
+  assert.equal(qa(c, '.nc-stock-note').length, 1);
+});
+
+test('logic.stockAnchorText / stockSummaryText：現場說法', () => {
+  const at = (shape, anchor) => L.stockAnchorText({ shape, anchor });
+  assert.equal(at('box', { x: 0.5, y: 0.5, z: 1 }), '中心（頂面）');
+  assert.equal(at('box', { x: 0, y: 1, z: 1 }), '左上角（頂面）');
+  assert.equal(at('box', { x: 0.5, y: 1, z: 0.5 }), '上邊中點（半高）');
+  assert.equal(at('box', { x: 1, y: 0, z: 0 }), '右下角（底面）');
+  assert.equal(at('cylZ', { x: 0.5, y: 0.5, z: 1 }), '軸心（頂面）');
+  assert.equal(at('cylX', { x: 0, y: 0.5, z: 0.5 }), '左端面・軸心');
+  const withOff = NC.analysis.stockFromSpec({
+    shape: 'box', size: { x: 50, y: 40, z: 10 }, anchor: { x: 0, y: 1, z: 1 }, pos: { x: 2, y: 0, z: 0 },
+  });
+  assert.match(L.stockSummaryText(withOff), /左上角（頂面），偏移 \(2, 0, 0\)/);
 });
 
 // ---------------------------------------------------------------------------

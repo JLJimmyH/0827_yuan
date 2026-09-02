@@ -27,6 +27,9 @@
   // 第四軸的裝夾參數（迴轉中心、工件直徑）**跟著程式走**，不是機台設定：
   // 現場說「Z 高度不一定，會依案子調整」，放進機台設定的話換一支程式就帶著上一支的值。
   const ROTARY_KEY = 'ncPreview.rotary.v1';
+  // 素材（spec＋夾具）也跟著程式走。只存 spec，min/max 每次由 spec 重算——
+  // 存包絡盒的話改天改了換算規則，舊資料就跟新規則對不起來。
+  const STOCK_KEY = 'ncPreview.stock.v1';
 
   /** 數字顯示（panels.logic.fmt 修掉了 NC.util.fmt 的去尾 0 問題，優先用它）。 */
   const fmt = (NC.ui.panels && NC.ui.panels.logic && NC.ui.panels.logic.fmt)
@@ -253,6 +256,8 @@
       toolFilter: $('toolFilter'),
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
+      stockSummaryHost: $('stockSummaryHost'),
+      setupOverlay: $('setupOverlay'), setupSub: $('setupSub'), btnSetupClose: $('btnSetupClose'),
       diagBadge: $('diagBadge'), dropOverlay: $('dropOverlay'),
       mnavDiagBadge: $('mnavDiagBadge'),
       viewTools: $('viewTools'), btnBarMore: $('btnBarMore'), btnViewMore: $('btnViewMore'),
@@ -266,11 +271,12 @@
       scenario: 'off',
       cell: 0.5,
       userTable: null,   // 使用者編輯過的刀具表（會存 localStorage）
-      stock: null,       // null = 用推估
+      stock: null,       // null = 用推估；手動值帶 spec，跟著程式存 localStorage（STOCK_KEY）
       result: null,
       hiddenTools: new Set(),
       tableSaved: true,   // 刀具表最後一次寫入 localStorage 是否成功
       machineSaved: true, // 刀庫設定最後一次寫入 localStorage 是否成功
+      stockSaved: true,   // 素材最後一次寫入 localStorage 是否成功
       lineInfo: [],
       execByLine: [],
       selectedLine: 0,
@@ -324,6 +330,36 @@
       all[state.programKey] = state.rotary;
       store.set(ROTARY_KEY, JSON.stringify(all));
     }
+    /** 這支程式存過的素材（沒有、或存的資料壞掉就 null＝用推估） */
+    function loadStock(key) {
+      if (!key || !NC.analysis || typeof NC.analysis.stockFromSpec !== 'function') return null;
+      try {
+        const all = JSON.parse(store.get(STOCK_KEY) || '{}');
+        const o = all && all[key];
+        if (!o || !o.spec) return null;
+        return NC.analysis.stockFromSpec(o.spec, o.fixtures);
+      } catch (e) { return null; }
+    }
+    function persistStock() {
+      if (!state.programKey) return;
+      let all = {};
+      try { all = JSON.parse(store.get(STOCK_KEY) || '{}') || {}; } catch (e) { all = {}; }
+      if (state.stock && state.stock.spec) {
+        all[state.programKey] = { spec: state.stock.spec, fixtures: state.stock.fixtures || [] };
+      } else {
+        delete all[state.programKey];   // 回到推估＝把存過的手動素材一起忘掉
+      }
+      state.stockSaved = store.set(STOCK_KEY, JSON.stringify(all)) !== false;
+    }
+    /** 素材搬家（O 號出現、key 換名）時清掉舊 key 的記錄，免得下次空白編輯器又冒出來 */
+    function removeStoredStock(key) {
+      if (!key) return;
+      let all = {};
+      try { all = JSON.parse(store.get(STOCK_KEY) || '{}') || {}; } catch (e) { all = {}; }
+      if (!(key in all)) return;
+      delete all[key];
+      store.set(STOCK_KEY, JSON.stringify(all));
+    }
     /**
      * 這支程式目前生效的第四軸參數。
      *
@@ -338,6 +374,20 @@
     function effectiveRotary() {
       if (state.rotary) return state.rotary;
       return { center: { y: 0, z: 0 }, radius: 0 };
+    }
+
+    /**
+     * 素材頁選了躺圓柱（＝第四軸圓棒）時，直徑與軸心同步進第四軸設定。
+     * 直徑在「素材」與「第四軸」兩處都看得到，不同步的話現場一定只改其中一邊，
+     * 然後對著兩個不一樣的數字猜哪個才算數。
+     */
+    function syncRotaryFromStock(s) {
+      if (!s || !s.spec || s.spec.shape !== 'cylX' || !rotaryUsedNow()) return;
+      state.rotary = {
+        center: { y: s.spec.pos.y, z: s.spec.pos.z },
+        radius: s.spec.size.y / 2,
+      };
+      persistRotary();
     }
 
     function persistSettings() {
@@ -388,13 +438,19 @@
     /** 對所有已建立的視圖做同一件事（3D 沒建就只做 2D） */
     function eachView(fn) { fn(view); if (view3d) fn(view3d); }
 
-    let toolsPanel = null, diagPanel = null, modalPanel = null, opsPanel = null, stockPanel = null, settingsPanel = null, magPanel = null;
+    let toolsPanel = null, diagPanel = null, modalPanel = null, opsPanel = null, stockPanel = null, settingsPanel = null, magPanel = null, stockSummaryPanel = null;
 
     modalPanel = P.modal(el.modalHost, null, null);
     stockPanel = P.stock(el.stockHost, {
       stock: { min: { x: -50, y: -50, z: -10 }, max: { x: 50, y: 50, z: 0 }, source: 'estimated', fixtures: [] },
-      onChange: (s) => { state.stock = s; refresh(); },
+      onChange: (s) => {
+        state.stock = s;
+        persistStock();
+        syncRotaryFromStock(s);
+        refresh();
+      },
     });
+    stockSummaryPanel = P.stockSummary(el.stockSummaryHost, { stock: null, onOpen: () => openSetup() });
     settingsPanel = P.settings(el.settingsHost, {
       settings: state.settings, scenario: state.scenario, cell: state.cell,
       onChange: (o) => {
@@ -404,6 +460,17 @@
           state.rotary = U.deepClone(o.settings.rotary);
           delete state.settings.rotary;
           persistRotary();
+          // 素材頁的躺圓柱與第四軸設定講的是同一顆圓棒。素材 spec 會蓋過 rotary 的直徑
+          //（analyze 以 spec 優先），所以這邊改了就要寫回 spec，不然設定等於沒改。
+          if (state.stock && state.stock.spec && state.stock.spec.shape === 'cylX'
+              && NC.analysis && typeof NC.analysis.stockFromSpec === 'function') {
+            const sp = U.deepClone(state.stock.spec);
+            if (state.rotary.radius > 0) { sp.size.y = state.rotary.radius * 2; sp.size.z = sp.size.y; }
+            sp.pos.y = (state.rotary.center && state.rotary.center.y) || 0;
+            sp.pos.z = (state.rotary.center && state.rotary.center.z) || 0;
+            state.stock = NC.analysis.stockFromSpec(sp, state.stock.fixtures) || state.stock;
+            persistStock();
+          }
         }
         state.scenario = o.scenario;
         state.cell = o.cell;
@@ -539,11 +606,14 @@
         setProgress(null);
         renderCounts([]);
         editor.setDiagnostics([]);
-        view.setData({ segments: [], sim: null, stock: null, toolTable: null, scenario: state.scenario });
+        // 「先挑素材、再寫程式」的流程：還沒有程式時，手動設的素材照樣要能在視圖與面板看到
+        view.setData({ segments: [], sim: null, stock: state.stock || null, toolTable: null, scenario: state.scenario });
         toolsPanel.update({ table: { programKey: '', tools: [], offsets: [], updatedAt: '' }, ops: [] });
         magPanel.update({ toolTable: { programKey: '', tools: [], offsets: [], updatedAt: '' }, usedTools: [] });
         diagPanel.update({ items: [] });
         opsPanel.update({ ops: [], toolTable: null, time: null });
+        stockPanel.update({ stock: state.stock || null, rotaryUsed: false });
+        stockSummaryPanel.update({ stock: state.stock || null });
         modalPanel.update(null, null);
         renderToolFilter({ tools: [] }, []);
         show(el.defaultBanner, false);
@@ -614,7 +684,8 @@
       const key = state.programKey === name ? '' : ' · ' + state.programKey;
       // 存不進去要講出來，不然使用者填了一整天的刀具表／刀庫，關掉分頁就沒了
       const saveNote = (state.tableSaved === false ? ' · 刀具表無法存入瀏覽器' : '')
-        + (state.machineSaved === false ? ' · 刀庫設定無法存入瀏覽器' : '');
+        + (state.machineSaved === false ? ' · 刀庫設定無法存入瀏覽器' : '')
+        + (state.stockSaved === false ? ' · 素材無法存入瀏覽器' : '');
       return `${name}${on} · ${n} 行${key}${saveNote}`;
     }
 
@@ -628,8 +699,20 @@
       const key = programKeyOf(res.tok, state.fileName);
       let keyChanged = false;
       if (key !== state.programKey) {
+        const prevKey = state.programKey;
         state.programKey = key;
         state.rotary = loadRotary(key);
+        const savedStock = loadStock(key);
+        if (savedStock) {
+          state.stock = savedStock;
+        } else if (state.stock && state.stock.spec) {
+          // 先設素材、後寫程式：打字打到 O 號出現時 key 才會變，
+          // 剛設好的素材要跟著搬到新 key，不能被「新 key 沒存過」洗成 null
+          removeStoredStock(prevKey);
+          persistStock();
+        } else {
+          state.stock = null;
+        }
         const saved = NC.tools.load(key);
         // saved 是 null 時一定要把舊程式的手填刀具表清掉，否則 O1004 的 Ø49.5
         // 會跟著跑到 O0999，而且下次存檔會把這份錯的資料存進新的 key。
@@ -681,7 +764,8 @@
       toolsPanel.update({ table: res.toolTable, ops: run.ops });
       diagPanel.update({ items: res.diagnostics });
       opsPanel.update({ ops: run.ops, toolTable: res.toolTable, time: sr.sim ? sr.sim.time : null });
-      stockPanel.update({ stock: res.stock });
+      stockPanel.update({ stock: res.stock, rotaryUsed: !!rotaryOptOf(run) });
+      stockSummaryPanel.update({ stock: res.stock });
       settingsPanel.update({
         settings: Object.assign({}, state.settings, { rotary: effectiveRotary() }),
         scenario: state.scenario, cell: state.cell, rotaryUsed: !!rotaryOptOf(run),
@@ -1156,6 +1240,7 @@
       try { tok = NC.tokenize(state.text); } catch (e) { tok = null; }
       state.programKey = programKeyOf(tok, state.fileName);
       state.rotary = loadRotary(state.programKey);
+      state.stock = loadStock(state.programKey);
       state.userTable = NC.tools.load(state.programKey) || null;
 
       el.fileLabel.textContent = (state.fileName || state.programKey) + (note ? ' · ' + note : '');
@@ -1415,8 +1500,18 @@
       bar.addEventListener('pointercancel', stop);
       bar.addEventListener('dblclick', () => { setRatio(0.5); persistSettings(); if (view3d) view3d.resize(); });
     })();
-    // 手機版點頂列橫幅時分頁藏在「資料」頁裡，要一併切過去
-    el.stockBanner.addEventListener('click', () => { selectTab('stock'); if (isMobileLayout()) selectMobileView('data'); });
+    // ---- 全螢幕設定頁（素材與設定） ----
+    function openSetup() {
+      el.setupSub.textContent = state.fileName || (state.text ? state.programKey : '（尚未載入程式）');
+      show(el.setupOverlay, true);
+    }
+    function closeSetup() { show(el.setupOverlay, false); }
+    el.btnSetupClose.addEventListener('click', closeSetup);
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !el.setupOverlay.classList.contains('nc-hidden')) closeSetup();
+    });
+    // 頂列的「素材為推估」橫幅直接開設定頁——這是現場填素材的主要入口
+    el.stockBanner.addEventListener('click', () => openSetup());
     el.rotaryBanner.addEventListener('click', () => { selectTab('diag'); if (isMobileLayout()) selectMobileView('data'); });
     el.rngSnapshot.addEventListener('input', () => {
       const v = Number(el.rngSnapshot.value);
@@ -1564,6 +1659,8 @@
       if (p.mode) setViewMode(p.mode); else applyViewLayout({ fit3d: true });
       // 手機版分頁藏在「資料」頁裡；分享的網址帶了 tab 參數就直接切過去，不然選了也看不到
       if (p.tab && selectTab(p.tab) && isMobileLayout()) selectMobileView('data');
+      // #setup=1：直接開設定頁（截圖與「把素材填一填」的分享連結用）
+      if (p.setup !== undefined && p.setup !== '' && p.setup !== '0') openSetup();
       if (p.section !== undefined && p.section !== '' && Number.isFinite(Number(p.section)) && sectionMode()) {
         sectionTouched = true;
         const v = Number(p.section);

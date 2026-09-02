@@ -163,8 +163,7 @@
         <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabDiag" data-panel="diag"></div>
         <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabOps" data-panel="ops"></div>
         <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabStock" data-panel="stock">
-          <div id="stockHost"></div>
-          <div id="settingsHost"></div>
+          <div id="stockSummaryHost"></div>
         </div>
         <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabMag" data-panel="mag">
           <div id="magHost"></div>
@@ -180,6 +179,28 @@
     <button type="button" class="app-mnav__btn is-on" data-mview="view">視圖</button>
     <button type="button" class="app-mnav__btn" data-mview="data">資料 <span class="app-tab__badge nc-hidden" id="mnavDiagBadge"></span></button>
   </nav>
+
+  <!-- ==================== 全螢幕設定頁（素材與設定） ====================
+       設定是「開新程式時調一次，之後不動」的東西：平常不佔畫面，要調時給全螢幕
+       好好填。素材編輯器（形狀／尺寸／原點九宮格／預覽）與機台設定都在這一頁。 -->
+  <div class="app-setup nc-hidden" id="setupOverlay" role="dialog" aria-modal="true" aria-label="素材與設定">
+    <div class="app-setup__head">
+      <span class="app-setup__title">素材與設定</span>
+      <span class="app-setup__sub" id="setupSub"></span>
+      <span class="app-setup__spacer"></span>
+      <button type="button" class="nc-btn nc-btn-primary" id="btnSetupClose" title="關閉設定頁（改動即時生效，不需要另外儲存）">完成</button>
+    </div>
+    <div class="app-setup__body">
+      <section class="app-setup__col app-setup__col--stock">
+        <div class="app-setup__grouptitle">素材</div>
+        <div id="stockHost"></div>
+      </section>
+      <section class="app-setup__col app-setup__col--settings">
+        <div class="app-setup__grouptitle">機台與模擬</div>
+        <div id="settingsHost"></div>
+      </section>
+    </div>
+  </div>
 
   <!-- 整頁拖放提示 -->
   <div class="app-drop" id="dropOverlay" aria-hidden="true"><div class="app-drop__box">放開以載入<br>NC 程式，或刀具表 CSV</div></div>

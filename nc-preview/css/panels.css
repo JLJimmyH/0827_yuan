@@ -71,6 +71,8 @@
 .nc-num:focus, .nc-text:focus, .nc-select:focus { outline: 2px solid #9cc0e8; outline-offset: 0; }
 .nc-check { display: inline-flex; align-items: center; gap: 2px; margin-right: 8px; cursor: pointer; }
 .nc-btn { font: inherit; padding: 3px 8px; border: 1px solid var(--nc-border); border-radius: 3px; background: #fff; color: var(--nc-text); cursor: pointer; }
+.nc-btn-primary { background: var(--nc-accent, #2b6cb0); border-color: var(--nc-accent, #2b6cb0); color: #fff; font-weight: 600; }
+.nc-btn-primary:hover { filter: brightness(1.08); }
 .nc-btn:hover { background: var(--nc-bg-alt); }
 .nc-btn-small { padding: 1px 6px; font-size: 12px; }
 .nc-btn-danger { color: var(--nc-error); border-color: #e7a5a5; }
@@ -176,6 +178,37 @@
 /* 診斷摺疊列的「推估素材」徽章：比 severity 淡，只是提醒判定依據 */
 .nc-diag-head .nc-badge-est { font-size: 10px; opacity: 0.85; flex: none; }
 .nc-stock-note { margin: 4px 0 8px; line-height: 1.5; }
+
+/* ---- 素材編輯器（設定頁）：左表單、右預覽；窄畫面時上下堆疊（見 app.css 的設定頁） ---- */
+.nc-stock-cols { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+.nc-stock-form { flex: 1 1 300px; min-width: 260px; max-width: 430px; }
+.nc-stock-preview { flex: 1 1 280px; min-width: 240px; max-width: 470px; position: sticky; top: 0; }
+/* touch-action：預覽是拖曳輸入介面，手機上拖 ⊕ 不能變成捲頁 */
+.nc-stock-cv { display: block; width: 100%; max-width: 440px; margin: 4px 0 8px; border: 1px solid var(--nc-border); border-radius: 4px; background: #fff; touch-action: none; }
+/* 3D 是「檢視」不是「調整」：淡灰底把它和白底的可拖圖區隔開 */
+.nc-stock-cv-iso { background: #f4f6f9; }
+.nc-stock-warn { color: var(--nc-warning, #b26a00); }
+.nc-stock-brief { overflow: hidden; text-overflow: ellipsis; }
+.nc-stock-range { margin: 4px 0 8px; font-family: var(--nc-mono); font-size: 12px; }
+
+/* 形狀選擇：三顆帶小圖示的按鈕 */
+.nc-shape-seg { display: flex; gap: 6px; margin: 4px 0 8px; }
+.nc-shape-btn {
+  font: inherit; display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 7px 12px 5px; border: 1px solid var(--nc-border); border-radius: 4px;
+  background: var(--nc-bg); color: var(--nc-text); cursor: pointer; min-width: 72px;
+}
+.nc-shape-btn:hover { background: var(--nc-bg-alt); }
+.nc-shape-btn.is-on { border-color: var(--nc-accent); background: var(--nc-selected, #e8f1fb); color: var(--nc-accent); font-weight: 600; }
+.nc-shape-icon { display: inline-block; width: 30px; height: 22px; border: 2px solid currentColor; opacity: 0.75; }
+.nc-shape-icon-box { border-radius: 2px; }
+.nc-shape-icon-cylZ { width: 16px; height: 24px; border-radius: 50% / 22%; }
+.nc-shape-icon-cylX { width: 30px; height: 15px; border-radius: 22% / 50%; }
+
+/* 摘要卡（分頁裡） */
+.nc-panel-stocksum { padding: 6px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.nc-stock-cv-sum { max-width: 300px; }
+.nc-btn-open-setup { font-weight: 600; padding: 6px 14px; }
 
 
 /* ==================== 刀具表 CSV 匯入／匯出 ==================== */

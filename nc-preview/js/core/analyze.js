@@ -141,7 +141,80 @@
     return merged;
   }
 
+  // ---------------------------------------------------------------------------
+  // 素材規格（spec）：使用者輸入的「形狀＋尺寸＋原點位置」，min/max 由它導出。
+  //
+  // spec = { shape:'box'|'cylZ'|'cylX', size:{x,y,z}, anchor:{x,y,z}, pos:{x,y,z} }
+  //   size   — box：X×Y×Z；cylZ：x=y=直徑、z=高；cylX：y=z=直徑、x=長
+  //   anchor — 工件原點（對刀點）錨在素材的比例位置：0 = min 端、0.5 = 中、1 = max 端。
+  //            現場為了座標好算會把原點設在素材的邊或角（87.654 的一半沒人想每次算），
+  //            所以「原點在素材的哪裡」是輸入的一部分，不能假設素材永遠置中。
+  //   pos    — 錨點在工件座標的座標，預設 (0,0,0)。現場慣例「素材長寬高＋中心偏離多少」
+  //            就是 anchor 全 0.5、pos 填偏移。
+  //   min = pos − anchor·size；max = min + size
+  // ---------------------------------------------------------------------------
+  const STOCK_SHAPES = { box: 1, cylZ: 1, cylX: 1 };
+
+  function normalizeSpec(spec) {
+    if (!spec || !STOCK_SHAPES[spec.shape] || !spec.size) return null;
+    const pick = (v, fb) => (Number.isFinite(Number(v)) ? Number(v) : fb);
+    const s = { shape: spec.shape, size: {}, anchor: {}, pos: {} };
+    for (const a of 'xyz') {
+      s.size[a] = pick(spec.size[a], 0);
+      s.anchor[a] = Math.min(1, Math.max(0, pick(spec.anchor && spec.anchor[a], 0.5)));
+      s.pos[a] = pick(spec.pos && spec.pos[a], 0);
+    }
+    // 圓柱：直徑兩軸恆相等、垂直軸面上的錨點固定在軸心
+    if (s.shape === 'cylZ') { s.size.y = s.size.x; s.anchor.x = 0.5; s.anchor.y = 0.5; }
+    if (s.shape === 'cylX') { s.size.z = s.size.y; s.anchor.y = 0.5; s.anchor.z = 0.5; }
+    for (const a of 'xyz') if (!(s.size[a] > 0)) return null;
+    return s;
+  }
+
+  /** spec → 正準 stock（min/max 一律重算）。spec 不合法回 null。 */
+  function stockFromSpec(spec, fixtures) {
+    const s = normalizeSpec(spec);
+    if (!s) return null;
+    const min = {}, max = {};
+    for (const a of 'xyz') {
+      min[a] = U.round(s.pos[a] - s.anchor[a] * s.size[a]);
+      max[a] = U.round(min[a] + s.size[a]);
+    }
+    return { spec: s, shape: s.shape, min, max, source: 'user', fixtures: Array.isArray(fixtures) ? fixtures : [] };
+  }
+
+  /**
+   * 由包絡盒反算 spec（「帶入程式推估值」用）：每軸挑 0／0.5／1 中最接近
+   * 工件原點實際位置的錨點，剩下的殘量進 pos——這樣現場只要把猜出來的
+   * 87.6 改成他知道的毛胚整數，不用自己算原點在素材的哪裡。
+   */
+  function specFromStock(stock) {
+    if (!stock || !stock.min || !stock.max) return null;
+    const cyl = stock.kind === 'cylinder';
+    const spec = { shape: cyl ? 'cylX' : (stock.shape === 'cylZ' ? 'cylZ' : 'box'), size: {}, anchor: {}, pos: {} };
+    for (const a of 'xyz') {
+      const lo = Number(stock.min[a]), hi = Number(stock.max[a]);
+      if (!(hi > lo)) return null;
+      const f = (0 - lo) / (hi - lo);
+      const anchor = f < 0.25 ? 0 : (f > 0.75 ? 1 : 0.5);
+      spec.size[a] = U.round(hi - lo);
+      spec.anchor[a] = anchor;
+      spec.pos[a] = U.round(lo + anchor * (hi - lo));
+    }
+    if (cyl) {
+      spec.size.y = spec.size.z = U.round(stock.radius * 2);
+      spec.pos.y = stock.center ? Number(stock.center.y) || 0 : 0;
+      spec.pos.z = stock.center ? Number(stock.center.z) || 0 : 0;
+    }
+    return normalizeSpec(spec);
+  }
+
   function normalizeStock(stock) {
+    // spec 是正準：有 spec 就由它重算 min/max，改尺寸不會殘留舊包絡
+    if (stock && stock.spec) {
+      const fromSpec = stockFromSpec(stock.spec, stock.fixtures);
+      if (fromSpec) return fromSpec;
+    }
     const s = Object.assign({}, stock);
     s.min = U.clone3(stock.min);
     s.max = U.clone3(stock.max);
@@ -166,14 +239,23 @@
     const off = scenarios.off;
     const rot = off && off.run && off.run.rotary;
     if (!rot || !rot.used || !rot.rotateLines.length) return null;
+    // 使用者在素材頁明確挑了別的形狀就尊重他——工具的用法是「先挑素材試」，
+    // 不硬蓋成圓棒（UI 有註明非圓棒下四軸模擬會不準）
+    if (req.stock && req.stock.spec && req.stock.spec.shape !== 'cylX') return null;
     const RG = NC.geometry && NC.geometry.rotary;
     if (!RG || typeof RG.estimateRadius !== 'function') return null;
     const cfg = (req.settings && req.settings.rotary) || {};
-    const center = {
-      y: (cfg.center && Number(cfg.center.y)) || 0,
-      z: (cfg.center && Number(cfg.center.z)) || 0,
-    };
-    let radius = Number(cfg.radius) || 0;
+    // 素材頁選了「躺著的圓柱」的話，直徑／長度／位置以它為準
+    //（app 會把直徑與軸心同步進 settings.rotary，但直接呼叫 API 時 spec 要自己就夠用）
+    const spec = (req.stock && req.stock.spec && req.stock.spec.shape === 'cylX')
+      ? normalizeSpec(req.stock.spec) : null;
+    const center = spec
+      ? { y: spec.pos.y, z: spec.pos.z }
+      : {
+        y: (cfg.center && Number(cfg.center.y)) || 0,
+        z: (cfg.center && Number(cfg.center.z)) || 0,
+      };
+    let radius = (spec && spec.size.y / 2) || Number(cfg.radius) || 0;
     let source = 'user';
     if (!(radius > 0)) {
       const segs = [];
@@ -186,32 +268,41 @@
       radius = est.radius;
       source = 'estimated';
     }
-    let x0 = Infinity, x1 = -Infinity;
-    for (const sc of order) {
-      const g = scenarios[sc] && scenarios[sc].geometry;
-      for (const seg of (g && g.segments) || []) {
-        if (!seg || seg.refReturn || seg.kind === 'rapid') continue;
-        x0 = Math.min(x0, seg.from.x, seg.to.x);
-        x1 = Math.max(x1, seg.from.x, seg.to.x);
+    let xMin, xMax;
+    if (spec) {
+      xMin = U.round(spec.pos.x - spec.anchor.x * spec.size.x);
+      xMax = U.round(xMin + spec.size.x);
+    } else {
+      let x0 = Infinity, x1 = -Infinity;
+      for (const sc of order) {
+        const g = scenarios[sc] && scenarios[sc].geometry;
+        for (const seg of (g && g.segments) || []) {
+          if (!seg || seg.refReturn || seg.kind === 'rapid') continue;
+          x0 = Math.min(x0, seg.from.x, seg.to.x);
+          x1 = Math.max(x1, seg.from.x, seg.to.x);
+        }
       }
+      if (!Number.isFinite(x0)) return null;
+      const pad = Math.max(5, (x1 - x0) * 0.15);
+      xMin = x0 - pad;
+      xMax = x1 + pad;
     }
-    if (!Number.isFinite(x0)) return null;
-    const pad = Math.max(5, (x1 - x0) * 0.15);
     return {
-      kind: 'cylinder', radius, center,
-      xMin: x0 - pad, xMax: x1 + pad,
+      kind: 'cylinder', shape: 'cylX', radius, center,
+      xMin, xMax,
       source,
+      spec: spec || undefined,
       // 讓依賴 min/max 的下游（bounds、素材面板、R20/R33…）仍然拿得到一個包絡盒
-      min: { x: x0 - pad, y: center.y - radius, z: center.z - radius },
-      max: { x: x1 + pad, y: center.y + radius, z: center.z + radius },
-      fixtures: [],
+      min: { x: xMin, y: center.y - radius, z: center.z - radius },
+      max: { x: xMax, y: center.y + radius, z: center.z + radius },
+      fixtures: (req.stock && Array.isArray(req.stock.fixtures)) ? req.stock.fixtures : [],
     };
   }
 
   function resolveStock(req, scenarios, order, toolTable) {
     const cyl = cylinderStock(req, scenarios, order);
     if (cyl) return cyl;
-    if (req.stock && req.stock.min && req.stock.max) return normalizeStock(req.stock);
+    if (req.stock && (req.stock.spec || (req.stock.min && req.stock.max))) return normalizeStock(req.stock);
     if (!NC.tools || typeof NC.tools.estimateStock !== 'function') return fallbackStock();
     const runs = order.map((sc) => scenarios[sc] && scenarios[sc].run).filter(Boolean);
     const geos = order.map((sc) => scenarios[sc] && scenarios[sc].geometry).filter(Boolean);
@@ -742,6 +833,7 @@
   NC.analysis = {
     defaultRequest, normalizeRequest, mergeDiagnostics, sortDiagnostics, dedupeDiagnostics: dedupe,
     finalizeDiagnostics, softenEstimatedStock, softenSafeRefReturn,
+    normalizeSpec, stockFromSpec, specFromStock,
     isAbortError, abortError, SEVERITY_RANK,
   };
 })(globalThis.NC = globalThis.NC || {});

@@ -141,7 +141,7 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 
 ## 5. `simulation.js` — `NC.sim`
 
-- `create(stock, cell) → Sim`：`nx = ceil((max.x-min.x)/cell)+1`，格網是**節點式**：格 (ix,iy) 的中心 = `origin + (ix·cell, iy·cell)`，`origin = stock.min`（見整合決議 19）。height 初始 = stock.max.z；fixtures 也寫進 height（當作不可切的材料，高度 = fixture max.z，並記錄 mask）。
+- `create(stock, cell) → Sim`：`nx = ceil((max.x-min.x)/cell)+1`，格網是**節點式**：格 (ix,iy) 的中心 = `origin + (ix·cell, iy·cell)`，`origin = stock.min`（見整合決議 19）。height 初始 = stock.max.z；fixtures 也寫進 height（當作不可切的材料，高度 = fixture max.z，並記錄 mask）。`stock.shape === 'cylZ'`（立圓柱素材，見 §14）時，圓外的格子初始高度直接設為 `stock.min.z`（＝沒有料），外切方框的四個角才不會被當成實料誤報碰撞；fixtures 照樣往上蓋。
 - `run(sim, scenarioResult, toolTable, settings, opts) → Promise<SimResult>`：`opts = {fromOpIndex?, onProgress?(0..1), yieldEveryMs?=16}`。以 `await new Promise(r=>setTimeout(r,0))` 分批讓出。依 Segment 順序：對 rapid 段先做碰撞檢查（足跡下任一格高度 > 段的最低 Z + 0.01 → R27 error 事件，附 line、pos；refReturn 段跳過），再不改材料；feed/arc/drill 段：沿段依 cell/2 取樣，每個取樣點蓋章足跡（min）。足跡：endmill/facemill/reamer 圓盤；drill 錐尖（角度）；chamfer 倒錐；tap 不改材料；unknown 圓盤。使用 compensated 段（若同 line 有）。
 - 每個 op 結束存 snapshot（Float32Array 複本；為省記憶體只存 `ops.length` 份，若 > 25 個 op 則只存每個 op 的最後）。`fromOpIndex` 時從對應 snapshot 開始。
 - 切削量事件：feed 段若「移除體積 / 段長」對應的平均切深 × 刀徑 > 門檻（全刃寬 × > 1.5×刀徑深）→ R28 warning「重切削」；G1 向下段在材料內且 feed > plungeFeedMax → R28 warning；G0 向下終點低於該處高度 → R27 error。
@@ -159,13 +159,15 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 
 順序：tokenize → 對每個 scenario interpret + buildSegments → inferTools + mergeUserTable + defaultOffsets → estimateStock（request.stock 為 null 時）→ rules.run（無 sim）→ 若 sim.enabled：對 `off` 與 `on` 各跑 sim（`onStage('sim', scenario, progress)`）→ rules 再跑一次 phase 'sim'/'cross'（加入 sim 事件）→ 合併去重（同 ruleId+line+scenario+message 只留一個）、依 severity(error>warning>needsInput>info) 再 line 排序。另提供 `NC.analyzeSync(request)`（不含 sim）。
 
+素材的解析順序（`resolveStock`）：四軸（A 真的轉過）→ 圓棒（`cylinderStock`，`request.stock.spec.shape === 'cylX'` 時直徑／長度／位置以 spec 為準）；否則 `request.stock` 有 `spec` 或 `min/max` → `normalizeStock`（**spec 為正準**，有 spec 就由它重算 min/max）；否則 `estimateStock`。spec 的語意見 §14；換算函式 `NC.analysis.stockFromSpec(spec, fixtures?)`、反算 `NC.analysis.specFromStock(stock)`、正規化 `NC.analysis.normalizeSpec(spec)` 都對外，UI 與測試共用同一份。
+
 ## 8. UI（`js/ui/*.js`）
 
 - `editor.js` — `NC.ui.createEditor(container) → Editor`：textarea + 左側 gutter（行號、錯誤標記）+ 右側行旁資訊欄（每行執行後 `G0/G1 · G90/91 · G41 D · F · Z`，由 app 提供 `lineInfo(line) → string`）；`setText(text)`, `getText()`, `onChange(cb)`（300 ms debounce）, `setDiagnostics(diags)`, `setLineInfo(fn)`, `highlightLine(n)`, `scrollToLine(n)`, `onCursorLine(cb)`, `getSelectionLines() → [a,b]`, `replaceLines(a,b,text)`。捲動同步：gutter/info 欄用同一個 scrollTop。折疊功能本版不做。
 - `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY'|'unroll')`, `setSection(v)`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。第四軸的三張圖（俯視／剖面 X／剖面 Y）改畫在工件座標上，見 §13.7。
-- `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, onChange})`、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
-- `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）與設定；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌四支程式文字，由整合者用腳本產生）。
-- `index.html` — 版面：頂列工具列；左 45% 編輯器（上）+ 模態面板（下）；右 55% 視圖（上，含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選）+ 分頁面板（刀具表 / 錯誤清單 / 作業摘要 / 素材與設定）。視圖區本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
+- `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, rotaryUsed?, onChange})`（素材**編輯器**：形狀／尺寸／原點九宮格／基準點座標／夾具／即時預覽，onChange 給的是帶 spec 的 stock，null = 回到推估；掛在設定頁）、`stockSummary(container, {stock, onOpen})`（分頁裡的摘要卡：一句話摘要＋小預覽＋開啟設定頁）、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
+- `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）、設定、素材（`ncPreview.stock.v1`，key = programKey，只存 `{spec, fixtures}`——min/max 每次由 spec 重算，存包絡盒的話改天換算規則改了，舊資料就對不上）；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌四支程式文字，由整合者用腳本產生）。
+- `index.html` — 版面：頂列工具列；左 45% 編輯器（上）+ 模態面板（下）；右 55% 視圖（上，含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選）+ 分頁面板（刀具表 / 錯誤清單 / 作業摘要 / 素材與設定 / 刀庫）。「素材與設定」分頁只放**摘要卡**；完整的素材編輯器與機台設定在**全螢幕設定頁**（`#setupOverlay`，見 §14.2）：頂列推估橫幅、摘要卡的按鈕、URL hash `setup=1` 都會開它，Esc 或「完成」關閉。視圖區本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
 - 不依賴任何外部資源（無 CDN、無 Google Fonts）。
 
 ### 8.1 視圖區：左 2D／右 3D 並排
@@ -676,3 +678,73 @@ r=14/cosθ）拉出 ~Δθ·tanθ 的偏差，內插後槽底回到準確的 z=14
    沿路挖掉一整片扇形——Ø60 的料鑽一個 Ø6 的孔，表面卻開了半圈。
    `unrollPath` 對 `r < 1e-9` 的點一律沿用前一點的角度。
    `rotary.test.mjs` 有一條釘住「表面只該開一條孔口」。
+
+## 14. 素材規格（spec）與全螢幕設定頁（2026-09-02）
+
+需求出處：現場（Yuan）確認素材輸入必須是「形狀＋長寬高＋原點在素材的哪裡」，
+不是包絡盒——為了小數點好算，工件原點（G54）常被刻意設在素材的邊或角
+（尺寸 87.654 的一半沒人想每次手算；一軸難算放那軸的邊、兩軸都難算放角落），
+Yuan 提供的實際程式原點就在素材最左邊。素材形狀正常只會遇到三種：
+長方體、站立的圓柱、躺著的圓柱（＝第四軸圓棒）。
+
+### 14.1 spec 語意（core，`analyze.js`）
+
+```
+spec = { shape: 'box'|'cylZ'|'cylX', size: {x,y,z}, anchor: {x,y,z}, pos: {x,y,z} }
+  size   — box：X×Y×Z；cylZ：x=y=直徑、z=高；cylX：y=z=直徑、x=長
+  anchor — 工件原點錨在素材的比例位置（0 = min 端、0.5 = 中、1 = max 端）
+           圓柱垂直軸面上的錨固定 0.5（軸心）；normalizeSpec 會強制
+  pos    — 錨點在工件座標的座標，預設 (0,0,0)
+  min = pos − anchor·size；max = min + size
+```
+
+- **spec 是正準**：`request.stock` 帶 spec 時 min/max 一律重算，舊包絡不殘留。
+- 導出的 stock 帶 `shape` 頂層欄位（'box'|'cylZ'|'cylX'），sim 與視圖不用挖 spec。
+- `specFromStock`（帶入推估值用）每軸挑 0／0.5／1 中最接近原點實際位置的錨，
+  殘量進 pos——現場只要把猜出來的尺寸改成毛胚整數，不用自己算原點在素材哪裡。
+- 四軸下 `cylinderStock` 優先；spec.shape === 'cylX' 時直徑／X 範圍／軸心以 spec 為準
+  （app 會把直徑與軸心同步進 settings.rotary，兩邊講的是同一顆圓棒）。
+- 非四軸選 cylX：以包絡盒模擬（已知限制，UI 有註明）；cylZ 有圓外遮罩（§5）。
+- 驗收：`test/stock-spec.test.mjs`（換算 golden、反算 round-trip、四軸 spec、cylZ 遮罩）。
+
+### 14.2 設定頁 UI 決策
+
+工具的定位（2026-09-02 使用者確認）：**不只檢查現成程式，還要能用來寫程式**——
+先挑素材、拖一拖調到像、再開始寫程式邊看邊改。所以：設定以**拖曳為主、數字欄微調為輔**、
+形狀永遠可挑、沒有程式也能先設素材。
+
+- 素材編輯器＝設定頁的主角：形狀三鈕 → 尺寸 → 原點位置微調 → 夾具，
+  右側即時預覽分**兩個互動區塊**（互動模式不同的元件不能長得一樣混在一疊——
+  看到俯視能拖點，誰都會以為 3D 也能）：
+  「調整——直接拖」＝俯視＋正視（白底、可拖 ⊕ 與邊）；
+  「3D 檢視——拖曳旋轉視角」＝可旋轉 3D 殿後（淡灰底、cursor grab、只轉視角）。
+  3D 用 canvas 2D 手寫正交投影（`drawStock3D`，yaw/elev 軌道旋轉、背面剔除、
+  以素材對角球定縮放所以旋轉不會忽大忽小），畫半透明面＋線框、⊕ 與 XYZ 三色軸，
+  以及**原點的空間定位虛線**（頂面十字標 XY、垂直落線標 Z 深度）——
+  沒有這組線 ⊕ 會浮在圖上，看不出它在素材空間的哪裡。
+  3D 不能拖點：一個游標點在投影下定不出三維深度。
+  **錨點沒有表單控制項**——「原點放素材的哪裡」唯一入口就是拖預覽的 ⊕
+  （第一版做過九宮格＋Z 基準下拉，現場拍板：直接動點就好，整區移除；
+  「原點位置」小標會顯示目前吸在哪，例如「左上角（頂面）」）。
+  **預覽是偏移方向的防呆**：「+5 是素材往右還是原點往右」不用背，改了立刻看得到。
+- **預覽可直接拖**（`logic.stockPreviewTransform` / `stockDragHit` / `stockDragApply`，純函式可測）：
+  拖 ⊕ 移原點（比例 ±6% 內磁吸素材上的九個格點、殘量進 pos；拖曳中畫出磁吸點、藏起邊把手）、
+  拖邊改尺寸（CAD 式邊中點把手；只長那一邊、對邊與原點不動、吸 0.5 mm 格）、
+  立圓柱俯視拖圓周改直徑。**拖 ⊕ 期間以素材為參考系**：素材固定不動、⊕ 跟著手指
+  在素材上移動（第一版把 ⊕ 釘在工件 (0,0)、素材跟著 spec 重畫，看起來像在拖素材
+  而不是調原點——現場一試就講出來了），放開 commit 後回到「⊕ 在 (0,0)」的正規呈現；
+  fit 視野＝素材∪原點，所以放開後畫面布局幾乎不跳。拖曳中視野凍結、不 commit
+  （commit 會重建表單、pointer capture 就斷），放開才 commit 一次。
+  canvas 設 `touch-action:none`，手機拖 ⊕ 不會變成捲頁。
+- **形狀永遠三顆都能挑**：四軸程式預設 cylX 但不鎖；挑了別的形狀 core 尊重
+  （`cylinderStock` 讓位給 spec），UI 掛琥珀警語「非圓棒下四軸模擬會不準」。
+- **磁吸到錨點時把該面的 pos 歸零**：吸上格點是在宣告「原點就在這裡」；
+  推估反算殘留的零點幾偏移繼續黏著的話，吸了左上角 X 卻不從 0 起跳
+  （headless 驗證時真的踩到，才加的規則）。
+- 推估狀態下欄位直接預填反算值，改任何一格轉手動；「回到推估」丟掉手動值
+  並把 localStorage 裡這支程式的素材一起刪掉。
+- **先設素材、後寫程式**：編輯器清空時素材照樣顯示在視圖與面板、照樣可設；
+  打字打到 O 號出現（programKey 變名）時，手動素材搬到新 key、舊 key 清掉——
+  不能被「新 key 沒存過」洗成 null。
+- 素材跟著程式存（`ncPreview.stock.v1`，key = programKey），持久化層級同第四軸
+  裝夾參數（§13.8）：換程式先清、依 programKey 讀回。
