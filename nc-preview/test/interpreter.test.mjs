@@ -274,6 +274,28 @@ test('圓弧：G3 小弧圓心在左側；R<0 大弧在另一側；I/J 指定', 
   assert.equal(byRule(p.run, 'R23').length, 0);
 });
 
+test('整圓：G2/G3 模式下只寫 I/J（沒有 X/Y/Z）→ 終點＝起點的圓弧；只寫 R → R23 error', () => {
+  // CAM 銑孔的標準寫法：切入圓弧之後「J-8.」單獨一節繞一整圈，再切出。
+  // 以前這種節因為沒有 X/Y/Z 被當成「沒有移動」整節消失：路徑、材料、估時全部少掉一個圓。
+  const p = prog('G0X10.Y-7.Z0.\nG1F100\nG3X10.Y0.R7.\nJ-8.\nG2J-4.F150\nX6.Y-2.R7.\nG3R5.');
+  const full = p.at(4).actions[0];
+  assert.ok(full && full.kind === 'arc', 'J-only 節應產生圓弧動作');
+  near(full.from.x, 10); near(full.from.y, 0);
+  near(full.to.x, full.from.x); near(full.to.y, full.from.y);       // 終點＝起點
+  near(full.center.x, 10); near(full.center.y, -8);
+  near(full.r, 8);
+  assert.equal(full.cw, false);
+  const g2 = p.at(5).actions[0];                                     // G2 也一樣；同節帶 F 沒差
+  assert.equal(g2.kind, 'arc'); assert.equal(g2.cw, true); near(g2.r, 4);
+  near(g2.feed, 150);
+  const next = p.at(6).actions[0];                                   // 整圓之後位置不變，下一節從同一點接下去
+  near(next.from.x, 10); near(next.from.y, 0);
+  // 只寫 R：起終點重合、圓弧無法定義 → R23 error（以前也是整節無聲消失）
+  const r23 = byRule(p.run, 'R23', 'error');
+  assert.equal(r23.length, 1); assert.equal(r23[0].line, 7 + 2);
+  assert.equal(byRule(p.run, 'R23', 'warning').length, 0);
+});
+
 test('R23：弦長 > 2|R| → error 並退化成直線；起終點重合用 R → error；無 I/J/R → error', () => {
   const p = prog('G0X0.Y0.Z0.\nG1F100\nG2X30.Y0.R10.\nG0X0.Y0.\nG2X0.Y0.R5.\nG0X0.Y0.\nG2X5.Y5.');
   assert.equal(p.at(3).actions[0].kind, 'linear');

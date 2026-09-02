@@ -618,6 +618,9 @@
 
     // ---- 移動 ----
     const hasCoord = has('X') || has('Y') || has('Z');
+    // G2/G3 模式下只寫 I/J（沒有 X/Y/Z）：終點＝起點，是整圓——CAM 銑孔最常見的寫法（例如 J-8.103）。
+    // 只寫 R 也放行，讓 makeArc 發 R23（起終點重合用 R 無法定義圓弧）而不是整節無聲消失。
+    const arcOnly = !hasCoord && arcHere && (has('I') || has('J') || has('R'));
     const hasRot = has(ROT_AXIS);
     // G65／G66 的 A 是巨集引數 #1，不是第四軸——blocksMotion 的節不算
     if (hasRot && !blocksMotion) ctx.sawRotWord = true;
@@ -688,7 +691,7 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
         for (const h of holes) actions.push(h);
         motionAction = holes.length ? holes[holes.length - 1] : null;
       }
-    } else if (hasCoord) {
+    } else if (hasCoord || arcOnly) {
       motionAction = doMotion(b, ctx, last, has, val, forcedMotion);
       if (motionAction) actions.push(motionAction);
     } else if (hasRot) {

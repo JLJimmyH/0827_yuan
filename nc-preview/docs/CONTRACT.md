@@ -49,7 +49,7 @@ G 碼群組（同節同群組兩個以上 → R03 warning，後者有效）：01
 2. `M6`：`toolInSpindle = 同節 T（若有）否則 toolStaged`；產生 `toolchange` 動作；新作業（Operation）從此節開始；`lengthCompActive=false`。同節 T 不再算預選。
 3. `T`（非 M6 節）→ `toolStaged`。
 4. 座標字 → 目標點：G90 用絕對；G91 加到目前位置；未指定的軸保持。**只有在有座標字或循環節時才產生移動**。
-5. 群組 01 動作：`G0 → rapid`（多軸 → `nonLinear=true`）；`G1 → linear`（feed = state.feed；feed 為 null → R08 error 但仍產生動作）；`G2/G3 → arc`：圓心由 `I/J`（增量、相對起點）或 `R`（半徑；弦長 > 2|R| → R23 error 並退化成直線；`R<0` = 大弧）算出；起終點重合且用 R → error。只支援 G17 平面（其他平面 → R02 error）。
+5. 群組 01 動作：`G0 → rapid`（多軸 → `nonLinear=true`）；`G1 → linear`（feed = state.feed；feed 為 null → R08 error 但仍產生動作）；`G2/G3 → arc`：圓心由 `I/J`（增量、相對起點）或 `R`（半徑；弦長 > 2|R| → R23 error 並退化成直線；`R<0` = 大弧）算出；起終點重合且用 R → error。**G2/G3 模式下省略 X/Y/Z 但有 I/J 的節是整圓**（終點＝起點、繞 360°，CAM 銑孔的標準寫法 `J-8.`），一樣產生 arc；只寫 R 沒有終點 → R23 error（不可無聲略過）。只支援 G17 平面（其他平面 → R02 error）。
 6. `,C` / `,R`：附在本節動作的 `corner`；本節非 G1/G2/G3 → R22 warning「被忽略」；下一節檢查交給 geometry。
 7. `G41/G42`：啟動節 `compStart=true`；`G40` 節 `compEnd=true`。啟動或取消發生在 G2/G3 節 → R09 error（PS0034）；D=0 或 > maxOffsets → R09 error（PS0030）。
 8. `G43 H`：`lengthComp='G43', h`, `lengthCompActive=true`；同節無 Z → R16 warning。新刀第一次 Z 向下（to.z < from.z 且 to.z < initialZ）前未 G43 → R16 error。
