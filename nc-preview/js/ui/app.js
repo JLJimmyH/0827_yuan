@@ -8,6 +8,8 @@
  *   3. 選取同步：編輯器游標行 ↔ 視圖 ↔ 診斷 ↔ 作業
  *   4. 刀具表／設定存 localStorage（file:// 下可能失敗，全部 try/catch）
  *   5. 刀具表 CSV 匯出／匯入（拿給現場用 Excel 填），刀庫設定（機台層級，key = ncPreview.machine）
+ *   6. 版面：左欄 Project 子頁（程式／素材／刀具表／刀庫／機台，整欄全高）＝在這裡「改」；
+ *      右欄下方的狀態條（總覽／游標行／作業摘要／錯誤清單＋Project 徽章）＝在這裡「看」。兩條分隔線可拖。
  *
  * 對 analyze.js / rules.js 尚未載入的情況要容錯：
  *   NC.analyzeSync / NC.analyze 不存在時，本檔自己串 tokenize → interpret → buildSegments（→ sim）。
@@ -238,7 +240,6 @@
       app: $('app'),
       btnOpen: $('btnOpen'), fileInput: $('fileInput'), selSample: $('selSample'),
       btnSave: $('btnSave'), btnCopy: $('btnCopy'), selScenario: $('selScenario'),
-      defaultBanner: $('defaultBanner'),
       statusText: $('statusText'), statusCounts: $('statusCounts'),
       progressWrap: $('progressWrap'), progressBar: $('progressBar'),
       fileLabel: $('fileLabel'), editorHost: $('editorHost'),
@@ -248,7 +249,7 @@
       viewSplit: $('viewSplit'), viewSplitBar: $('viewSplitBar'),
       chkSplit: $('chkSplit'), chkClip: $('chkClip'), lblSplit: $('lblSplit'), lblClip: $('lblClip'),
       btnClipFlip: $('btnClipFlip'),
-      btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), stockBanner: $('stockBanner'), rotaryBanner: $('rotaryBanner'),
+      btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), rotaryBanner: $('rotaryBanner'),
       btnModeUnroll: $('btnModeUnroll'), chkRotary: $('chkRotary'), lblRotary: $('lblRotary'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
       rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'),
@@ -256,8 +257,8 @@
       toolFilter: $('toolFilter'),
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
-      stockSummaryHost: $('stockSummaryHost'),
-      setupOverlay: $('setupOverlay'), setupSub: $('setupSub'), btnSetupClose: $('btnSetupClose'),
+      tabOverview: $('tabOverview'), projectChips: $('projectChips'), miniModal: $('miniModal'),
+      appMain: $('appMain'), appRight: $('appRight'), colSplit: $('colSplit'), rowSplit: $('rowSplit'),
       diagBadge: $('diagBadge'), dropOverlay: $('dropOverlay'),
       mnavDiagBadge: $('mnavDiagBadge'),
       viewTools: $('viewTools'), btnBarMore: $('btnBarMore'), btnViewMore: $('btnViewMore'),
@@ -283,8 +284,9 @@
       simCache: {},        // 上一輪完整分析的 SimResult（依情境），編輯途中沿用免得成品圖整片消失
       simStale: false,     // 目前畫面上的 heightmap 是不是上一輪的（HUD 會標「更新中」）
       rotary: null,        // 第四軸裝夾參數（跟著程式走，見 ROTARY_KEY）；null = 用推估值
-      // 視圖版面偏好（機台層級，跟著 SETTINGS_KEY 一起存）。ratio = 並排時左邊 2D 佔的比例。
-      viewPref: { split: true, clip: true, clipFlip: false, ratio: 0.5 },
+      // 視圖版面偏好（機台層級，跟著 SETTINGS_KEY 一起存）。ratio = 並排時左邊 2D 佔的比例；
+      // leftRatio = 左欄 Project 佔的寬度比例、statusRatio = 下方狀態條佔的高度比例。
+      viewPref: { split: true, clip: true, clipFlip: false, ratio: 0.5, leftRatio: 0.5, statusRatio: 0.3 },
     };
 
     /** 手機版（窄螢幕）判定。800px 這個門檻和 app.css 的 @media 是同一份，要一起改。 */
@@ -307,6 +309,8 @@
           if ('clip' in v) state.viewPref.clip = !!v.clip;
           if ('clipFlip' in v) state.viewPref.clipFlip = !!v.clipFlip;
           if (v.ratio > 0.15 && v.ratio < 0.85) state.viewPref.ratio = Number(v.ratio);
+          if (v.leftRatio > 0.25 && v.leftRatio < 0.8) state.viewPref.leftRatio = Number(v.leftRatio);
+          if (v.statusRatio > 0.1 && v.statusRatio < 0.7) state.viewPref.statusRatio = Number(v.statusRatio);
         }
       } catch (e) { /* 壞掉就用預設 */ }
     })();
@@ -438,7 +442,8 @@
     /** 對所有已建立的視圖做同一件事（3D 沒建就只做 2D） */
     function eachView(fn) { fn(view); if (view3d) fn(view3d); }
 
-    let toolsPanel = null, diagPanel = null, modalPanel = null, opsPanel = null, stockPanel = null, settingsPanel = null, magPanel = null, stockSummaryPanel = null;
+    let toolsPanel = null, diagPanel = null, modalPanel = null, opsPanel = null, stockPanel = null, settingsPanel = null, magPanel = null;
+    let overviewPanel = null, chipsPanel = null;
 
     modalPanel = P.modal(el.modalHost, null, null);
     stockPanel = P.stock(el.stockHost, {
@@ -450,7 +455,9 @@
         refresh();
       },
     });
-    stockSummaryPanel = P.stockSummary(el.stockSummaryHost, { stock: null, onOpen: () => openSetup() });
+    // 狀態條的「總覽」與分頁列右端的徽章是同一份資料（buildOverviewRows），點了都跳到對應的 Project 子頁
+    overviewPanel = P.overview(el.tabOverview, { rows: [], onOpen: (key) => openProjectPage(key) });
+    chipsPanel = P.overview(el.projectChips, { rows: [], compact: true, onOpen: (key) => openProjectPage(key) });
     settingsPanel = P.settings(el.settingsHost, {
       settings: state.settings, scenario: state.scenario, cell: state.cell,
       onChange: (o) => {
@@ -613,10 +620,11 @@
         diagPanel.update({ items: [] });
         opsPanel.update({ ops: [], toolTable: null, time: null });
         stockPanel.update({ stock: state.stock || null, rotaryUsed: false });
-        stockSummaryPanel.update({ stock: state.stock || null });
         modalPanel.update(null, null);
+        renderMiniModal(0, null);
+        renderOverview(null, null, false);
         renderToolFilter({ tools: [] }, []);
-        show(el.defaultBanner, false);
+        show(el.rotaryBanner, false);
         el.rngSnapshot.disabled = true;
         el.snapVal.textContent = '尚未模擬';
         return;
@@ -765,7 +773,6 @@
       diagPanel.update({ items: res.diagnostics });
       opsPanel.update({ ops: run.ops, toolTable: res.toolTable, time: sr.sim ? sr.sim.time : null });
       stockPanel.update({ stock: res.stock, rotaryUsed: !!rotaryOptOf(run) });
-      stockSummaryPanel.update({ stock: res.stock });
       settingsPanel.update({
         settings: Object.assign({}, state.settings, { rotary: effectiveRotary() }),
         scenario: state.scenario, cell: state.cell, rotaryUsed: !!rotaryOptOf(run),
@@ -777,8 +784,7 @@
       });
 
       renderCounts(res.diagnostics, !hasSim);
-      renderDefaultBanner(res.toolTable, run.ops);
-      renderStockBanner(res.stock, res.diagnostics);
+      renderOverview(res, run, hasSim);
       renderRotaryBanner(run);
       showModalFor(state.selectedLine || editor.getCursorLine());
 
@@ -911,41 +917,145 @@
       state.execByLine = exec;
     }
 
-    function renderDefaultBanner(table, ops) {
-      let n = 0;
+    /** 刀具表裡有幾把刀還在用預設值（型式／直徑／D 補正是猜的） */
+    function countDefaultTools(table, ops) {
       const L = P.logic;
       try {
         const t = U.deepClone(table);
         const dMap = L.dListByTool(t, ops);
         L.ensureOffsets(t, dMap);
-        n = L.countDefaultTools(t, dMap);
-      } catch (e) { n = 0; }
-      show(el.defaultBanner, n > 0);
-      el.defaultBanner.textContent = n > 0 ? `${n} 把刀使用預設值，成品圖可能不準` : '';
-      el.defaultBanner.title = n > 0 ? '到「刀具表」分頁把型式、直徑、D 補正值填成實際值，模擬結果才會準。' : '';
+        return L.countDefaultTools(t, dMap);
+      } catch (e) { return 0; }
     }
 
+    function stockSizeText(stock) {
+      if (!stock) return '';
+      if (stock.kind === 'cylinder') return `Ø${fmt(stock.radius * 2, 1)} × 長 ${fmt(stock.xMax - stock.xMin, 1)} mm`;
+      return `${fmt(stock.max.x - stock.min.x, 1)}×${fmt(stock.max.y - stock.min.y, 1)}×${fmt(stock.max.z - stock.min.z, 1)} mm`;
+    }
+
+    const SCENARIO_SHORT = { off: '關', on: '開', multiIgnored: '只跳多斜線' };
+
     /**
-     * 素材是推估的時候，頂列要有一條橫幅講清楚——因為推估素材造成的誤判
-     * 比「刀具用預設值」多得多（樣本 B 94 筆 warning 有 90 筆來自推估素材）。
+     * 狀態條「總覽」的五列（程式／素材／刀具／刀庫／機台），徽章用同一份（去掉程式那列）。
+     * 每列一句話講「現在是什麼狀態」，點了跳到左欄對應的子頁去改——設定在左上改、在下面看。
+     *
+     * 素材推估與刀具用預設值以前是頂列的兩條橫幅，現在住在這裡：
+     * 推估素材造成的誤判比「刀具用預設值」多得多（樣本 B 94 筆 warning 有 90 筆來自推估素材），
+     * 所以素材那列在推估時一定是琥珀色，而且寫明有幾筆判定是依它算的。
      */
-    function renderStockBanner(stock, diags) {
-      const est = !!(stock && stock.source === 'estimated');
-      const n = est ? diags.filter((d) => d.estimatedStock).length : 0;
-      show(el.stockBanner, est);
-      if (!est) return;
-      let size;
-      if (stock.kind === 'cylinder') {
-        size = `Ø${fmt(stock.radius * 2, 1)} × 長 ${fmt(stock.xMax - stock.xMin, 1)}`;
-      } else {
-        size = `${fmt(stock.max.x - stock.min.x, 1)}×${fmt(stock.max.y - stock.min.y, 1)}×${fmt(stock.max.z - stock.min.z, 1)} mm`;
+    function buildOverviewRows(res, run, hasSim) {
+      const rows = [];
+      const L = P.logic;
+      if (!res) {
+        // 還沒有程式：素材照樣可以先設（先挑素材、再寫程式是正常流程）
+        const s = state.stock;
+        rows.push({ key: 'program', label: '程式', level: 'muted', text: '尚未載入程式。按「開檔…」、選範例，或直接開始寫', short: '未載入', go: '編輯 ›' });
+        rows.push(s
+          ? { key: 'stock', label: '素材', level: 'ok', text: '手動指定 ' + L.stockSummaryText(s), short: '手動' }
+          : { key: 'stock', label: '素材', level: 'muted', text: '尚未設定。可以先把素材設好、再開始寫程式，素材會跟著這支程式存', short: '未設' });
+        return rows;
       }
-      el.stockBanner.textContent = `素材為程式推估（${size}）${n > 0 ? `，${n} 筆判定依此` : ''}`;
-      el.stockBanner.title = stock.kind === 'cylinder'
-        ? '第四軸的圓棒素材：直徑是「取切削段離軸心最遠的距離」推估出來的，不是量出來的。\n'
-          + '點一下到「素材與設定」→ 第四軸，把實際直徑填進去，成品圖與切深就會準。'
-        : '推估素材是「用切削範圍往外擴一個刀半徑」猜出來的，不是真的毛胚。'
-          + '點一下到「素材與設定」填入真實尺寸，這些判定會重算。';
+      const sr = res.scenarios[state.scenario] || res.scenarios.off;
+      const ops = (run && run.ops) || [];
+      const diags = res.diagnostics || [];
+
+      // 程式
+      {
+        const secs = sr && sr.sim && sr.sim.time ? sr.sim.time.total : 0;
+        const parts = [`${res.tok.blocks.length} 行`, `${ops.length} 個作業`];
+        if (secs > 0) parts.push('估時 ' + fmtDuration(secs));
+        else if (!hasSim) parts.push('模擬中…');
+        const name = (state.fileName || state.programKey) + (res.tok.programName ? `（${res.tok.programName}）` : '');
+        rows.push({ key: 'program', label: '程式', level: 'ok', text: `${name} · ${parts.join(' · ')}`, short: `${res.tok.blocks.length} 行`, go: '編輯 ›' });
+      }
+
+      // 素材
+      {
+        const st = res.stock;
+        const est = !!(st && st.source === 'estimated');
+        const k = est ? diags.filter((d) => d.estimatedStock).length : 0;
+        if (!st) {
+          rows.push({ key: 'stock', label: '素材', level: 'muted', text: '尚未設定', short: '未設' });
+        } else if (est) {
+          rows.push({
+            key: 'stock', label: '素材', level: 'warn',
+            text: `由程式推估 ${stockSizeText(st)}${k > 0 ? `，${k} 筆判定依此` : ''}`, short: '推估',
+            detail: st.kind === 'cylinder'
+              ? '第四軸圓棒的直徑是「取切削段離軸心最遠的距離」猜的，不是量出來的；填實際直徑，成品圖與切深才會準。'
+              : '推估素材是「用切削範圍往外擴一個刀半徑」猜的，不是真的毛胚；填入真實尺寸，這些判定會重算。',
+          });
+        } else {
+          rows.push({ key: 'stock', label: '素材', level: 'ok', text: '手動指定 ' + L.stockSummaryText(st), short: '手動' });
+        }
+      }
+
+      // 刀具
+      {
+        const tools = (res.toolTable && res.toolTable.tools) || [];
+        const nDef = countDefaultTools(res.toolTable, ops);
+        if (!tools.length) {
+          rows.push({ key: 'tools', label: '刀具', level: 'muted', text: '沒有換刀（程式裡沒有 M6）', short: '無' });
+        } else if (nDef > 0) {
+          rows.push({
+            key: 'tools', label: '刀具', level: 'warn',
+            text: `${tools.length} 把，${nDef} 把使用預設值，成品圖可能不準`, short: `${nDef} 把預設`,
+            detail: '把型式、直徑、D 補正值填成實際值，模擬結果才會準。',
+          });
+        } else {
+          rows.push({ key: 'tools', label: '刀具', level: 'ok', text: `${tools.length} 把，型式與直徑都已填`, short: `${tools.length} 把` });
+        }
+      }
+
+      // 刀庫（整台機共用）
+      {
+        const mag = L.normalizeMagazine(state.settings.magazine);
+        if (!mag) {
+          rows.push({
+            key: 'mag', label: '刀庫', level: 'muted', text: '未啟用，不檢查刀位衝突', short: '未啟用',
+            detail: '刀庫是整台機共用的設定；啟用後會檢查大徑刀的鄰位與同一刀位放兩把刀。',
+          });
+        } else {
+          let ms = null;
+          try { ms = L.magazineStatus(mag, res.toolTable, usedToolsOf(run)); } catch (e) { ms = null; }
+          const errs = ms ? ms.issues.filter((i) => i.severity === 'error') : [];
+          const missing = ms ? ms.unassigned : [];
+          if (errs.length) {
+            rows.push({ key: 'mag', label: '刀庫', level: 'error', text: `${errs.length} 處會撞刀`, short: `撞刀 ${errs.length}`, detail: errs.map((i) => i.text).join('\n') });
+          } else if (missing.length) {
+            rows.push({ key: 'mag', label: '刀庫', level: 'warn', text: `${missing.length} 把刀還沒登記刀位（${missing.map((t) => 'T' + t).join('、')}）`, short: `缺 ${missing.length} 位` });
+          } else {
+            rows.push({ key: 'mag', label: '刀庫', level: 'ok', text: `${mag.size} 個刀位，這支程式的刀都已登記、無衝突`, short: '無衝突' });
+          }
+        }
+      }
+
+      // 機台（第四軸那組跟著程式走）
+      {
+        const rot = run && run.rotary;
+        const rotOn = !!(rot && rot.used && rot.rotateLines.length);
+        const parts = [];
+        let level = 'ok';
+        if (rotOn) {
+          const r = effectiveRotary();
+          if (rot.mode === 'simultaneous') { parts.push(`${rot.axis} 軸同動切削，這幾段沒有預演`); level = 'warn'; }
+          else parts.push(`第四軸 ${rot.axis} 分度 ${rot.angles.length} 個角度`);
+          parts.push(`迴轉中心 Y${fmt(r.center.y)} Z${fmt(r.center.z)}`);
+          parts.push(r.radius > 0 ? `工件 Ø${fmt(r.radius * 2)}` : '直徑由程式推估');
+        } else {
+          parts.push('三軸');
+        }
+        parts.push(`格距 ${state.cell} mm`);
+        parts.push(`Block skip ${SCENARIO_SHORT[state.scenario] || state.scenario}`);
+        rows.push({ key: 'machine', label: '機台', level, text: parts.join(' · '), short: rotOn ? `${rot.axis} 軸分度` : '三軸' });
+      }
+      return rows;
+    }
+
+    function renderOverview(res, run, hasSim) {
+      const rows = buildOverviewRows(res, run, hasSim);
+      overviewPanel.update({ rows });
+      chipsPanel.update({ rows: rows.filter((r) => r.key !== 'program') });
     }
 
     /**
@@ -1182,6 +1292,7 @@
       const blocks = state.result ? state.result.tok.blocks : null;
       const b = (blocks && line > 0) ? blocks[line - 1] : null;
       el.modalLineLabel.textContent = line > 0 ? `第 ${line} 行` : '';
+      renderMiniModal(line, eb);
       if (!eb) { modalPanel.update(null, null); return; }
       modalPanel.update(eb.after, {
         line,
@@ -1193,12 +1304,59 @@
       });
     }
 
+    /**
+     * 編輯器底下那一行：游標行執行後的模態摘要。
+     * 完整的模態面板搬到下方狀態條的「游標行」分頁之後，人在看錯誤清單時就看不到它了；
+     * 這一行把最常要對的幾樣（G 群組、F/S/M、主軸上的刀、位置）留在編輯器旁邊，點了切到完整版。
+     */
+    function renderMiniModal(line, eb) {
+      const host = el.miniModal;
+      if (!host) return;
+      clearEl(host);
+      if (!eb) {
+        host.classList.add('is-empty');
+        host.textContent = line > 0 ? `第 ${line} 行：尚無執行資訊` : '游標所在行執行後的模態會顯示在這裡';
+        return;
+      }
+      host.classList.remove('is-empty');
+      const st = eb.after;
+      const sp = st.spindle || {};
+      const seg = (text, cls) => {
+        const x = document.createElement('span');
+        if (cls) x.className = cls;
+        x.textContent = text;
+        host.appendChild(x);
+      };
+      const sep = () => seg('·', 'app-mini-modal__sep');
+      seg('L' + line, 'app-mini-modal__line');
+      if (eb.skipped) { sep(); seg('此情境跳過', 'nc-warn'); }
+      if (eb.ignored) { sep(); seg('多斜線忽略', 'nc-warn'); }
+      const g = [st.motion || '—', st.distance, st.wcs];
+      if (st.comp && st.comp !== 'G40') g.push(st.comp + (st.d ? 'D' + st.d : ''));
+      if (st.lengthComp && st.lengthComp !== 'G49') g.push(st.lengthComp + (st.h ? 'H' + st.h : ''));
+      if (st.cycle) g.push(st.cycle.code);
+      sep(); seg(g.filter(Boolean).join(' '));
+      sep();
+      seg(st.feed == null ? 'F—' : 'F' + fmt(st.feed), st.feed == null ? 'nc-warn' : '');
+      seg(' ');
+      seg((sp.dir || 'M5') + (sp.rpm != null ? ' S' + fmt(sp.rpm) : ''), sp.dir === 'M5' || !sp.dir ? 'nc-warn' : '');
+      if (st.coolant) seg(' M8');
+      sep();
+      seg('T' + (st.toolInSpindle != null ? st.toolInSpindle : '—') + (st.toolStaged != null ? '（預選 T' + st.toolStaged + '）' : ''));
+      sep();
+      let pos = `X${fmt(st.pos.x)} Y${fmt(st.pos.y)} Z${fmt(st.pos.z)}`;
+      if (typeof st.a === 'number' && Math.abs(st.a) > 1e-9) pos += ` A${fmt(st.a)}`;
+      seg(pos, 'nc-active');
+    }
+
     function selectLine(line, opts) {
       opts = opts || {};
       state.selectedLine = line;
       editor.highlightLine(line);
       eachView((v) => v.highlightLine(line));
       showModalFor(line);
+      // 從視圖／錯誤清單／作業摘要跳過來的：左欄要在「程式」頁才看得到那一行
+      if (opts.scroll) selectProjectTab('program');
       if (opts.scroll) editor.scrollToLine(line, { center: true });
       // 作業表跟著選
       const sr = currentScenario();
@@ -1211,9 +1369,9 @@
     function jumpToLine(line, opts) {
       if (!(line > 0)) return;
       selectLine(line, { scroll: true });
-      // 手機版：從錯誤清單／作業摘要點行號時人在「資料」頁，要切回「程式」頁才看得到那一行；
+      // 手機版：從錯誤清單／作業摘要點行號時人在「狀態」頁，要切回 Project 頁才看得到那一行；
       // 也不搶 focus——手機上 focus 會彈出鍵盤，把半個畫面吃掉
-      if (isMobileLayout()) selectMobileView('editor');
+      if (isMobileLayout()) selectMobileView('project');
       else editor.focus();
     }
 
@@ -1500,19 +1658,80 @@
       bar.addEventListener('pointercancel', stop);
       bar.addEventListener('dblclick', () => { setRatio(0.5); persistSettings(); if (view3d) view3d.resize(); });
     })();
-    // ---- 全螢幕設定頁（素材與設定） ----
-    function openSetup() {
-      el.setupSub.textContent = state.fileName || (state.text ? state.programKey : '（尚未載入程式）');
-      show(el.setupOverlay, true);
+    // ---- 左右／上下分隔線可拖（比例存進偏好） ----
+    function afterPaneResize() {
+      // canvas 的像素尺寸靠各自的 ResizeObserver 跟上，這裡再踢一次確保放手後立刻對齊
+      view.render();
+      if (view3d) view3d.resize();
     }
-    function closeSetup() { show(el.setupOverlay, false); }
-    el.btnSetupClose.addEventListener('click', closeSetup);
-    document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && !el.setupOverlay.classList.contains('nc-hidden')) closeSetup();
+    function initPaneSplit(bar, opts) {
+      if (!bar || typeof bar.addEventListener !== 'function') return;
+      let dragging = false;
+      const apply = (v) => {
+        opts.set(v);
+        document.documentElement.style.setProperty(opts.cssVar, (v * 100).toFixed(2) + '%');
+      };
+      bar.addEventListener('pointerdown', (ev) => {
+        dragging = true;
+        bar.classList.add('is-dragging');
+        el.app.classList.add('is-resizing');
+        if (ev.pointerId != null && bar.setPointerCapture) { try { bar.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ } }
+        if (ev.preventDefault) ev.preventDefault();
+      });
+      bar.addEventListener('pointermove', (ev) => { if (dragging) apply(opts.ratioAt(ev)); });
+      const stop = () => {
+        if (!dragging) return;
+        dragging = false;
+        bar.classList.remove('is-dragging');
+        el.app.classList.remove('is-resizing');
+        persistSettings();
+        afterPaneResize();
+      };
+      bar.addEventListener('pointerup', stop);
+      bar.addEventListener('pointercancel', stop);
+      bar.addEventListener('dblclick', () => { apply(opts.reset); persistSettings(); afterPaneResize(); });
+      apply(opts.get());
+    }
+    // 左欄 Project 的寬度：預設一半，可拖到 30%～72%（刀具表欄位多，要拉寬時有得拉）
+    initPaneSplit(el.colSplit, {
+      cssVar: '--app-left-w', reset: 0.5,
+      get: () => state.viewPref.leftRatio,
+      set: (v) => { state.viewPref.leftRatio = v; },
+      ratioAt: (ev) => {
+        // flex-basis 的百分比是對主體的內容寬算的，要把 padding 扣掉
+        const m = el.appMain;
+        const r = m ? m.getBoundingClientRect() : null;
+        if (!r || !(r.width > 0)) return state.viewPref.leftRatio;
+        const cs = getComputedStyle(m);
+        const pl = parseFloat(cs.paddingLeft) || 0, pr = parseFloat(cs.paddingRight) || 0;
+        const w = r.width - pl - pr;
+        return w > 0 ? U.clamp((ev.clientX - r.left - pl) / w, 0.3, 0.72) : state.viewPref.leftRatio;
+      },
     });
-    // 頂列的「素材為推估」橫幅直接開設定頁——這是現場填素材的主要入口
-    el.stockBanner.addEventListener('click', () => openSetup());
-    el.rotaryBanner.addEventListener('click', () => { selectTab('diag'); if (isMobileLayout()) selectMobileView('data'); });
+    // 右欄下方狀態條的高度（佔右欄）：預設 30%，可拖到 12%～60%
+    initPaneSplit(el.rowSplit, {
+      cssVar: '--app-status-h', reset: 0.3,
+      get: () => state.viewPref.statusRatio,
+      set: (v) => { state.viewPref.statusRatio = v; },
+      ratioAt: (ev) => {
+        const r = el.appRight ? el.appRight.getBoundingClientRect() : null;
+        return (r && r.height > 0) ? U.clamp(1 - (ev.clientY - r.top) / r.height, 0.12, 0.6) : state.viewPref.statusRatio;
+      },
+    });
+
+    // ---- Project 子頁的入口 ----
+    /** 切到左欄的某個子頁（手機版順便切到 Project 頁）。key 同總覽列的 key：program/stock/tools/mag/machine */
+    function openProjectPage(key) {
+      if (!selectProjectTab(key)) return false;
+      if (isMobileLayout()) selectMobileView('project');
+      else if (key === 'program') editor.focus();
+      return true;
+    }
+    /** 舊名字：以前是全螢幕設定頁，現在就是素材子頁（URL hash setup=1 仍然接受） */
+    function openSetup() { return openProjectPage('stock'); }
+    el.rotaryBanner.addEventListener('click', () => { selectTab('diag'); if (isMobileLayout()) selectMobileView('status'); });
+    // 編輯器底下那一行摘要 → 完整的模態面板
+    if (el.miniModal) el.miniModal.addEventListener('click', () => { selectTab('modal'); if (isMobileLayout()) selectMobileView('status'); });
     el.rngSnapshot.addEventListener('input', () => {
       const v = Number(el.rngSnapshot.value);
       const sim = currentScenario() && currentScenario().sim;
@@ -1525,22 +1744,47 @@
     });
     for (const c of [el.chkRapid, el.chkFeed, el.chkRef, el.chkStock, el.chkRotary]) c.addEventListener('change', applyVisible);
 
-    // 分頁
+    // 下方狀態條的分頁（總覽／游標行／作業摘要／錯誤清單）
     function selectTab(name) {
       let hit = false;
-      for (const t of document.querySelectorAll('.app-tab')) {
+      for (const t of document.querySelectorAll('.app-tab[data-tab]')) {
         const on = t.dataset.tab === name;
         if (on) hit = true;
         t.classList.toggle('is-on', on);
       }
       if (!hit) return false;
-      for (const body of document.querySelectorAll('.app-tab-body')) {
+      for (const body of document.querySelectorAll('.app-tab-body[data-panel]')) {
         body.classList.toggle('nc-hidden', body.dataset.panel !== name);
       }
       return true;
     }
-    for (const tab of document.querySelectorAll('.app-tab')) {
+    for (const tab of document.querySelectorAll('.app-tab[data-tab]')) {
       tab.addEventListener('click', () => selectTab(tab.dataset.tab));
+    }
+    // 左欄 Project 的子頁（程式／素材／刀具表／刀庫／機台）。舊名字照收，分享出去的連結不會壞。
+    const PTAB_ALIAS = { editor: 'program', settings: 'machine', setup: 'stock', magazine: 'mag' };
+    function selectProjectTab(name) {
+      name = PTAB_ALIAS[name] || name;
+      let hit = false;
+      for (const t of document.querySelectorAll('.app-tab[data-ptab]')) {
+        const on = t.dataset.ptab === name;
+        if (on) hit = true;
+        t.classList.toggle('is-on', on);
+      }
+      if (!hit) return false;
+      for (const body of document.querySelectorAll('.app-ptab[data-ppanel]')) {
+        body.classList.toggle('nc-hidden', body.dataset.ppanel !== name);
+      }
+      return true;
+    }
+    for (const tab of document.querySelectorAll('.app-tab[data-ptab]')) {
+      tab.addEventListener('click', () => selectProjectTab(tab.dataset.ptab));
+    }
+    /** 網址 tab= 參數：先試狀態條，再試 Project 子頁（舊連結的 tools／stock／mag 都還能用）。回傳落在哪一區。 */
+    function selectAnyTab(name) {
+      if (selectTab(name)) return 'status';
+      if (selectProjectTab(name)) return 'project';
+      return null;
     }
 
     // ---- 手機版底部導覽 ----
@@ -1627,7 +1871,7 @@
       }
     })();
 
-    // URL hash：#sample=樣本 C（可再加 &scenario=on&mode=sectionY&section=-20&tab=diag，供截圖／分享用）
+    // URL hash：#sample=樣本 C（可再加 &scenario=on&mode=sectionY&section=-20&tab=diag&ptab=tools，供截圖／分享用）
     function hashParams() {
       const out = {};
       const raw = String(location.hash || '').replace(/^#/, '');
@@ -1657,9 +1901,13 @@
         box.checked = state.viewPref[pref];
       }
       if (p.mode) setViewMode(p.mode); else applyViewLayout({ fit3d: true });
-      // 手機版分頁藏在「資料」頁裡；分享的網址帶了 tab 參數就直接切過去，不然選了也看不到
-      if (p.tab && selectTab(p.tab) && isMobileLayout()) selectMobileView('data');
-      // #setup=1：直接開設定頁（截圖與「把素材填一填」的分享連結用）
+      // 手機版一次只看一區；分享的網址帶了 tab 參數就把那一區切出來，不然選了也看不到
+      if (p.tab) {
+        const where = selectAnyTab(p.tab);
+        if (where && isMobileLayout()) selectMobileView(where === 'status' ? 'status' : 'project');
+      }
+      // #ptab=stock：直接切到 Project 的某個子頁；#setup=1 是舊寫法（以前的全螢幕設定頁），等於 ptab=stock
+      if (p.ptab) openProjectPage(p.ptab);
       if (p.setup !== undefined && p.setup !== '' && p.setup !== '0') openSetup();
       if (p.section !== undefined && p.section !== '' && Number.isFinite(Number(p.section)) && sectionMode()) {
         sectionTouched = true;
@@ -1686,8 +1934,9 @@
 
     return {
       state, editor, view,
-      panels: { tools: toolsPanel, diag: diagPanel, modal: modalPanel, ops: opsPanel, stock: stockPanel, settings: settingsPanel, magazine: magPanel },
+      panels: { tools: toolsPanel, diag: diagPanel, modal: modalPanel, ops: opsPanel, stock: stockPanel, settings: settingsPanel, magazine: magPanel, overview: overviewPanel },
       loadProgram, loadSample, refresh, exportToolCSV, importToolCSV,
+      selectTab, selectProjectTab, openProjectPage,
     };
   }
 

@@ -165,9 +165,9 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 
 - `editor.js` — `NC.ui.createEditor(container) → Editor`：textarea + 左側 gutter（行號、錯誤標記）+ 右側行旁資訊欄（每行執行後 `G0/G1 · G90/91 · G41 D · F · Z`，由 app 提供 `lineInfo(line) → string`）；`setText(text)`, `getText()`, `onChange(cb)`（300 ms debounce）, `setDiagnostics(diags)`, `setLineInfo(fn)`, `highlightLine(n)`, `scrollToLine(n)`, `onCursorLine(cb)`, `getSelectionLines() → [a,b]`, `replaceLines(a,b,text)`。捲動同步：gutter/info 欄用同一個 scrollTop。折疊功能本版不做。
 - `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY'|'unroll')`, `setSection(v)`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。第四軸的三張圖（俯視／剖面 X／剖面 Y）改畫在工件座標上，見 §13.7。
-- `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, rotaryUsed?, onChange})`（素材**編輯器**：形狀／尺寸／原點九宮格／基準點座標／夾具／即時預覽，onChange 給的是帶 spec 的 stock，null = 回到推估；掛在設定頁）、`stockSummary(container, {stock, onOpen})`（分頁裡的摘要卡：一句話摘要＋小預覽＋開啟設定頁）、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
+- `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, rotaryUsed?, onChange})`（素材**編輯器**：形狀／尺寸／原點位置／夾具／即時預覽，onChange 給的是帶 spec 的 stock，null = 回到推估；掛在 Project 的素材子頁）、`overview(container, {rows, compact?, onOpen})`（狀態條的 Project 總覽列／分頁列右端的徽章；rows 由 app 算，這裡只畫）、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
 - `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）、設定、素材（`ncPreview.stock.v1`，key = programKey，只存 `{spec, fixtures}`——min/max 每次由 spec 重算，存包絡盒的話改天換算規則改了，舊資料就對不上）；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌四支程式文字，由整合者用腳本產生）。
-- `index.html` — 版面：頂列工具列；左 45% 編輯器（上）+ 模態面板（下）；右 55% 視圖（上，含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選）+ 分頁面板（刀具表 / 錯誤清單 / 作業摘要 / 素材與設定 / 刀庫）。「素材與設定」分頁只放**摘要卡**；完整的素材編輯器與機台設定在**全螢幕設定頁**（`#setupOverlay`，見 §14.2）：頂列推估橫幅、摘要卡的按鈕、URL hash `setup=1` 都會開它，Esc 或「完成」關閉。視圖區本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
+- `index.html` — 版面（2026-09-02 改版）：頂列工具列；主體左右兩欄。**左欄** 50%（可拖 30～72%）整欄全高，是 **Project** 面板：標題列放檔名，五個子頁「程式｜素材｜刀具表｜刀庫｜機台」（`data-ptab`，一次一頁），程式頁＝編輯器＋底下一行游標行摘要（`#miniModal`）；**右欄**上面是視圖（含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選），本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1；右欄下面是**狀態條**（佔右欄 30% 高，可拖 12～60%）：分頁「總覽｜游標行｜作業摘要｜錯誤清單」（`data-tab`），分頁列右端四顆 Project 徽章（素材／刀具／刀庫／機台）。設計原則見 §8.2。舊的全螢幕設定頁（`#setupOverlay`）已移除；URL hash `setup=1` 等於 `ptab=stock`，`tab=tools|stock|mag` 這些舊名字會自動落到 Project 子頁。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
 - 不依賴任何外部資源（無 CDN、無 Google Fonts）。
 
 ### 8.1 視圖區：左 2D／右 3D 並排
@@ -208,6 +208,25 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 - 並排／剖切／左右比例存在 `SETTINGS_KEY` 的 `view` 欄（機台層級的版面偏好，
   不是 `Settings`，不進 core）。網址參數 `split=0`、`clip=0` 可以關掉，方便截圖。
 - WebGL 開不起來時 `ensureView3D()` 回 null，並排開關自動取消勾選並停用，2D 照常。
+
+### 8.2 版面：左欄 Project 與下方狀態條（2026-09-02）
+
+使用者的要求：「游標行狀態、作業摘要、錯誤清單整合在一起；刀具表、刀庫、素材與設定整合成 Project 區塊，
+子頁放這些，放左側；下方顯示 Project 相關資料狀態；設定跟顯示分開」。追加兩點：程式本身也算 Project 的一部分，
+不能跟 Project 並列；設定區至少佔一半，下方兩個狀態區合併成一條；合併後的狀態條只佔右欄下方 30%，左欄 Project 要整欄全高（設定表單長，要的是高度）。
+
+- **左欄＝Project，五個子頁平行**：程式、素材、刀具表、刀庫、機台。程式是預設頁。子頁最上面一行註明這頁的資料是
+  「跟著這支程式存」還是「整台機共用」——刀具表與素材跟程式走、刀庫與機台參數整台機共用、機台頁裡的第四軸那組又跟程式走，
+  不標的話換程式時會以為刀庫也跟著換。
+- **狀態條＝所有「看」的東西**：總覽（Project 五列）、游標行（完整模態）、作業摘要、錯誤清單合成一組分頁，
+  三者都是「點一下跳到某一行」的東西。分頁列右端常駐四顆徽章（`panels.overview` 的 compact 版），不切到總覽也看得到警告。
+  以前頂列的「素材為推估」「N 把刀使用預設值」兩條橫幅搬進總覽與徽章；第四軸橫幅留在頂列，它講的是「這張圖能不能信」，要貼著視圖。
+- **游標行摘要**：模態面板變成分頁之後，人在看錯誤清單時就看不到游標行的模態，所以編輯器底下加一行摘要
+  （行號、G 群組、F/S/M、主軸上的刀、位置），點了切到完整版。
+- **兩條分隔線可拖**（`--app-left-w` 佔主體寬、`--app-status-h` 佔右欄高，存進 viewPref 的 leftRatio／statusRatio），
+  刀具表欄位多的時候把左欄拉寬。狀態條只有半寬，分頁列放不下時徽章折到第二行。
+- **手機版**底部導覽三頁：Project（左欄，含五個子頁）｜視圖｜狀態（狀態條）。
+- 上一版（同日下午）依「跟程式存／整台機共用」把素材放左、刀庫機台放右下，被退回；這版依使用者自己的分法：全部進 Project。
 
 ## 9. 測試載入器
 
@@ -681,7 +700,7 @@ r=14/cosθ）拉出 ~Δθ·tanθ 的偏差，內插後槽底回到準確的 z=14
    `unrollPath` 對 `r < 1e-9` 的點一律沿用前一點的角度。
    `rotary.test.mjs` 有一條釘住「表面只該開一條孔口」。
 
-## 14. 素材規格（spec）與全螢幕設定頁（2026-09-02）
+## 14. 素材規格（spec）與素材子頁（2026-09-02）
 
 需求出處：現場（Yuan）確認素材輸入必須是「形狀＋長寬高＋原點在素材的哪裡」，
 不是包絡盒——為了小數點好算，工件原點（G54）常被刻意設在素材的邊或角
@@ -709,13 +728,13 @@ spec = { shape: 'box'|'cylZ'|'cylX', size: {x,y,z}, anchor: {x,y,z}, pos: {x,y,z
 - 非四軸選 cylX：以包絡盒模擬（已知限制，UI 有註明）；cylZ 有圓外遮罩（§5）。
 - 驗收：`test/stock-spec.test.mjs`（換算 golden、反算 round-trip、四軸 spec、cylZ 遮罩）。
 
-### 14.2 設定頁 UI 決策
+### 14.2 素材子頁 UI 決策（原為全螢幕設定頁，同日晚間併入左欄 Project，見 §8.2）
 
 工具的定位（2026-09-02 使用者確認）：**不只檢查現成程式，還要能用來寫程式**——
 先挑素材、拖一拖調到像、再開始寫程式邊看邊改。所以：設定以**拖曳為主、數字欄微調為輔**、
 形狀永遠可挑、沒有程式也能先設素材。
 
-- 素材編輯器＝設定頁的主角：形狀三鈕 → 尺寸 → 原點位置微調 → 夾具，
+- 素材編輯器＝素材子頁的主角：形狀三鈕 → 尺寸 → 原點位置微調 → 夾具，
   右側即時預覽分**兩個互動區塊**（互動模式不同的元件不能長得一樣混在一疊——
   看到俯視能拖點，誰都會以為 3D 也能）：
   「調整——直接拖」＝俯視＋正視（白底、可拖 ⊕ 與邊）；

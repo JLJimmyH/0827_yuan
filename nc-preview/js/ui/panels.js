@@ -10,7 +10,7 @@
  *   modal(container, state, extra?)                              純顯示
  *   ops(container, {ops, onJump, time?, toolTable?, selectedIndex?})  onJump(line, op)
  *   stock(container, {stock, rotaryUsed?, onChange})             onChange(stockWithSpec | null)  null = 回到推估
- *   stockSummary(container, {stock, onOpen})                     摘要卡（分頁用；完整編輯在設定頁）
+ *   overview(container, {rows, compact?, onOpen})              Project 總覽列／徽章（狀態條用；rows 由 app 算）
  *   settings(container, {settings, scenario, cell, onChange})    onChange({settings, scenario, cell})
  */
 (function (NC) {
@@ -1912,48 +1912,52 @@
     return { el: root, update, getStock: () => builtStock() };
   };
 
-  /**
-   * 素材摘要卡（放在「素材與設定」分頁）：一句話摘要＋小預覽圖＋開啟設定頁。
-   * 完整的編輯欄位在全螢幕設定頁裡——設定是「開新程式時調一次」的東西，
-   * 塞在 1/4 高的分頁裡欄位放不下，現場也真的以為「素材設定都不能動」過。
-   *
-   *   stockSummary(container, {stock, onOpen})
-   */
-  panels.stockSummary = function stockSummary(container, opts) {
-    const state = { opts: Object.assign({}, opts), stock: null };
-    const root = h('div', { class: 'nc-panel nc-panel-stocksum' });
+  // ---------------------------------------------------------------------------
+  // Project 總覽與徽章（狀態條）
+  //
+  // overview(container, {rows, compact?, onOpen})
+  //   rows: [{key, label, level:'ok'|'warn'|'error'|'muted', text, short?, detail?, go?}]
+  //   compact=false：一列一項（標籤、色點、一句話、右端「設定 ›」），點一列 onOpen(key)
+  //   compact=true ：一排小徽章（label + short），放在分頁列右端；點了同樣 onOpen(key)
+  //   rows 的內容由 app 算（素材推估／刀具用預設／刀庫衝突／第四軸…），這裡只負責畫。
+  // ---------------------------------------------------------------------------
+  panels.overview = function overview(container, opts) {
+    const state = { opts: Object.assign({}, opts), rows: [] };
+    const compact = !!state.opts.compact;
+    const root = h('div', { class: compact ? 'nc-ovchips' : 'nc-panel nc-panel-overview' });
     mount(container, root);
+    function open(key) { call(state.opts.onOpen, key); }
     function render() {
       clear(root);
-      const s = state.stock;
-      if (!s) {
-        root.appendChild(h('div', { class: 'nc-muted' },
-          '還沒有素材。可以先把素材設好、再開始寫程式——素材會跟著這支程式存起來。'));
-        root.appendChild(h('div', null, h('button', {
-          type: 'button', class: 'nc-btn nc-btn-open-setup',
-          onclick: () => call(state.opts.onOpen),
-        }, '開啟素材與設定頁…')));
+      if (!state.rows.length) {
+        if (!compact) root.appendChild(h('div', { class: 'nc-empty' }, '尚未載入程式'));
         return;
       }
-      const isUser = s.source === 'user';
-      root.appendChild(h('div', { class: 'nc-stock-head' },
-        h('span', { class: 'nc-badge ' + (isUser ? 'nc-badge-user' : 'nc-badge-est'), dataset: { source: s.source } }, isUser ? '手動指定' : '由程式推估'),
-        h('span', { class: 'nc-muted nc-stock-brief' }, ' ' + stockSummaryText(s))));
-      if (!isUser) {
-        root.appendChild(h('div', { class: 'nc-muted nc-stock-note' },
-          '推估素材是用切削範圍猜的，不是真的毛胚；相關判定都會標註。到設定頁填入實際尺寸最準。'));
+      for (const r of state.rows) {
+        const level = r.level || 'muted';
+        if (compact) {
+          root.appendChild(h('button', {
+            type: 'button', class: 'nc-chip is-' + level,
+            title: (r.text || '') + (r.detail ? '\n' + r.detail : ''),
+            dataset: { key: r.key, level }, onclick: () => open(r.key),
+          }, h('span', { class: 'nc-chip__k' }, r.label), h('span', { class: 'nc-chip__v' }, r.short || r.text || '')));
+          continue;
+        }
+        root.appendChild(h('div', {
+          class: 'nc-ov-row', dataset: { key: r.key, level }, title: r.detail || '',
+          attrs: { role: 'button', tabindex: '0' },
+          onclick: () => open(r.key),
+          onkeydown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { if (ev.preventDefault) ev.preventDefault(); open(r.key); } },
+        },
+          h('span', { class: 'nc-ov-k' }, r.label),
+          h('span', { class: 'nc-ov-dot is-' + level }),
+          h('span', { class: 'nc-ov-v' }, r.text || '', r.detail ? h('span', { class: 'nc-ov-detail' }, ' ' + r.detail) : null),
+          h('span', { class: 'nc-ov-go' }, r.go || '設定 ›')));
       }
-      const cv = h('canvas', { class: 'nc-stock-cv nc-stock-cv-sum', attrs: { width: 360, height: 220 } });
-      root.appendChild(cv);
-      root.appendChild(h('div', null, h('button', {
-        type: 'button', class: 'nc-btn nc-btn-open-setup',
-        onclick: () => call(state.opts.onOpen),
-      }, '開啟素材與設定頁…')));
-      drawStockPreview(cv, s, 'top');
     }
     function update(next) {
       if (next) Object.assign(state.opts, next);
-      state.stock = state.opts.stock ? U.deepClone(state.opts.stock) : null;
+      state.rows = Array.isArray(state.opts.rows) ? state.opts.rows : [];
       render();
     }
     update();

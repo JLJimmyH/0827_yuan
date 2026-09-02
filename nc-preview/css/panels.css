@@ -205,10 +205,35 @@
 .nc-shape-icon-cylZ { width: 16px; height: 24px; border-radius: 50% / 22%; }
 .nc-shape-icon-cylX { width: 30px; height: 15px; border-radius: 22% / 50%; }
 
-/* 摘要卡（分頁裡） */
-.nc-panel-stocksum { padding: 6px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
-.nc-stock-cv-sum { max-width: 300px; }
-.nc-btn-open-setup { font-weight: 600; padding: 6px 14px; }
+/* ---- Project 總覽（狀態條）：一列一項，點了跳到對應的 Project 子頁 ---- */
+.nc-panel-overview { padding: 4px 2px; }
+.nc-ov-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
+.nc-ov-row:hover, .nc-ov-row:focus-visible { background: var(--nc-bg-alt); outline: none; }
+.nc-ov-k { flex: none; width: 3.5em; font-weight: 600; }
+.nc-ov-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--nc-border); align-self: center; }
+.nc-ov-dot.is-ok { background: var(--nc-src-comment); }
+.nc-ov-dot.is-warn { background: var(--nc-warning); }
+.nc-ov-dot.is-error { background: var(--nc-error); }
+.nc-ov-v { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-ov-row[data-level="warn"] .nc-ov-v { color: var(--nc-warning); }
+.nc-ov-row[data-level="error"] .nc-ov-v { color: var(--nc-error); }
+.nc-ov-detail { color: var(--nc-muted); font-size: 11px; }
+.nc-ov-go { flex: none; color: var(--nc-accent); font-size: 11px; }
+
+/* ---- Project 徽章（狀態條分頁列右端）：同一份資料的縮寫版 ---- */
+.nc-ovchips { display: flex; align-items: center; gap: 4px; }
+.nc-chip {
+  font: inherit; font-size: 11px; display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: 10px; border: 1px solid var(--nc-border);
+  background: var(--nc-bg); color: var(--nc-muted); cursor: pointer; white-space: nowrap;
+  max-width: 18ch; overflow: hidden; text-overflow: ellipsis;
+}
+.nc-chip__k { font-weight: 600; color: var(--nc-text); }
+.nc-chip:hover { filter: brightness(0.96); }
+.nc-chip.is-ok { border-color: #b7dbbd; background: var(--nc-src-comment-bg); color: var(--nc-src-comment); }
+.nc-chip.is-warn { border-color: #e4c27a; background: var(--nc-warning-bg); color: var(--nc-warning); }
+.nc-chip.is-error { border-color: #e7a5a5; background: var(--nc-error-bg); color: var(--nc-error); }
+.nc-chip.is-ok .nc-chip__k, .nc-chip.is-warn .nc-chip__k, .nc-chip.is-error .nc-chip__k { color: inherit; }
 
 
 /* ==================== 刀具表 CSV 匯入／匯出 ==================== */

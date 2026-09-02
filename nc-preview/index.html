@@ -47,9 +47,9 @@
 
     <div class="app-bar__spacer"></div>
 
-    <div class="nc-banner nc-banner-warn app-bar__banner nc-hidden" id="defaultBanner"></div>
+    <!-- 第四軸橫幅留在頂列：它講的是「這張圖能不能信」，要貼著視圖。
+         素材推估／刀具用預設值那兩條搬到下方狀態條的總覽與徽章。 -->
     <button type="button" class="nc-banner nc-banner-warn app-bar__banner nc-hidden" id="rotaryBanner"></button>
-    <button type="button" class="nc-banner nc-banner-info app-bar__banner nc-hidden" id="stockBanner"></button>
 
     <div class="app-bar__status" id="status" role="status" aria-live="polite">
       <span class="app-status__text" id="statusText">尚未載入程式</span>
@@ -58,32 +58,47 @@
     </div>
   </header>
 
-  <!-- ==================== 主體：左 45% / 右 55% ==================== -->
-  <main class="app-main">
+  <!-- ==================== 主體：左 Project（全高）｜右 視圖（上）＋狀態條（下） ==================== -->
+  <main class="app-main" id="appMain">
 
-    <!-- ---------- 左：編輯器 + 模態面板 ---------- -->
-    <section class="app-left" id="appLeft">
-      <div class="app-pane app-pane--editor">
+      <!-- ---------- 左：Project（程式、素材、刀具表、刀庫、機台都在這裡改） ---------- -->
+      <section class="app-pane app-left" id="appLeft">
         <div class="app-pane__head">
-          <span class="app-pane__title">程式</span>
+          <span class="app-pane__title">Project</span>
           <span class="app-pane__sub" id="fileLabel">（未載入）</span>
         </div>
-        <div class="app-pane__body" id="editorHost"></div>
-      </div>
-
-      <div class="app-splitter" aria-hidden="true"></div>
-
-      <div class="app-pane app-pane--modal">
-        <div class="app-pane__head">
-          <span class="app-pane__title">游標行的模態狀態</span>
-          <span class="app-pane__sub" id="modalLineLabel"></span>
+        <div class="app-tabs app-tabs--project" role="tablist" aria-label="Project 子頁">
+          <button type="button" class="app-tab is-on" data-ptab="program" role="tab">程式</button>
+          <button type="button" class="app-tab" data-ptab="stock" role="tab" title="素材形狀、尺寸、原點位置、夾具（跟著這支程式存）">素材</button>
+          <button type="button" class="app-tab" data-ptab="tools" role="tab" title="這支程式用到的刀：型式、直徑、D／H 補正（跟著這支程式存）">刀具表</button>
+          <button type="button" class="app-tab" data-ptab="mag" role="tab" title="刀庫刀位配置（整台機共用，不跟著程式走）">刀庫</button>
+          <button type="button" class="app-tab" data-ptab="machine" role="tab" title="第四軸裝夾、Block skip、機台參數、模擬格距">機台</button>
         </div>
-        <div class="app-pane__body app-pane__body--scroll" id="modalHost"></div>
-      </div>
-    </section>
 
-    <!-- ---------- 右：視圖 + 分頁 ---------- -->
-    <section class="app-right" id="appRight">
+        <div class="app-ptab app-ptab--program" data-ppanel="program">
+          <div class="app-pane__body" id="editorHost"></div>
+          <!-- 游標行的一行摘要：完整的模態狀態在下方「游標行」分頁，點這一行就切過去 -->
+          <button type="button" class="app-mini-modal" id="miniModal" title="游標行執行後的模態摘要。點一下看完整的模態狀態。"></button>
+        </div>
+        <div class="app-ptab app-pane__body--scroll nc-hidden" data-ppanel="stock">
+          <div class="app-ptab__note">跟著這支程式存。沒填的話用切削範圍推估，靠素材判斷的檢查只會給黃色警告。</div>
+          <div id="stockHost"></div>
+        </div>
+        <div class="app-ptab app-pane__body--scroll nc-hidden" id="tabTools" data-ppanel="tools"></div>
+        <div class="app-ptab app-pane__body--scroll nc-hidden" id="tabMag" data-ppanel="mag">
+          <div class="app-ptab__note">整台機共用，換程式不會變。</div>
+          <div id="magHost"></div>
+        </div>
+        <div class="app-ptab app-pane__body--scroll nc-hidden" data-ppanel="machine">
+          <div class="app-ptab__note">整台機共用；「第四軸」那一組是這支程式的裝夾參數，跟著程式存。</div>
+          <div id="settingsHost"></div>
+        </div>
+      </section>
+
+      <div class="app-vsplit" id="colSplit" role="separator" aria-orientation="vertical" title="拖曳調整左右比例（雙擊回到一半一半）"></div>
+
+      <!-- ---------- 右：視圖 ---------- -->
+      <section class="app-right" id="appRight">
 
       <div class="app-pane app-pane--view">
         <div class="app-view-tools" id="viewTools">
@@ -149,58 +164,32 @@
         </div>
       </div>
 
-      <div class="app-splitter" aria-hidden="true"></div>
+    <div class="app-hsplit" id="rowSplit" role="separator" aria-orientation="horizontal" title="拖曳調整狀態條高度（雙擊回到預設）"></div>
 
-      <div class="app-pane app-pane--tabs">
-        <div class="app-tabs" role="tablist">
-          <button type="button" class="app-tab is-on" data-tab="tools" role="tab">刀具表</button>
-          <button type="button" class="app-tab" data-tab="diag" role="tab">錯誤清單 <span class="app-tab__badge nc-hidden" id="diagBadge"></span></button>
+        <!-- ---------- 右下：狀態條（總覽、游標行、作業摘要、錯誤清單；右端是 Project 徽章） ---------- -->
+      <section class="app-pane app-pane--status" id="appStatus">
+        <div class="app-tabs" role="tablist" aria-label="狀態">
+          <button type="button" class="app-tab is-on" data-tab="overview" role="tab" title="這支程式的素材、刀具、刀庫、機台設定現在長什麼樣；點一列跳到對應的 Project 子頁">總覽</button>
+          <button type="button" class="app-tab" data-tab="modal" role="tab" title="游標所在行執行後的模態狀態">游標行 <span class="app-tab__sub" id="modalLineLabel"></span></button>
           <button type="button" class="app-tab" data-tab="ops" role="tab">作業摘要</button>
-          <button type="button" class="app-tab" data-tab="stock" role="tab">素材與設定</button>
-          <button type="button" class="app-tab" data-tab="mag" role="tab" title="刀庫刀位配置（整台機共用，不跟著程式走）">刀庫</button>
+          <button type="button" class="app-tab" data-tab="diag" role="tab">錯誤清單 <span class="app-tab__badge nc-hidden" id="diagBadge"></span></button>
+            <div class="app-chips" id="projectChips" aria-label="Project 狀態徽章"></div>
         </div>
-        <div class="app-tab-body app-pane__body--scroll" id="tabTools" data-panel="tools"></div>
-        <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabDiag" data-panel="diag"></div>
+        <div class="app-tab-body app-pane__body--scroll" id="tabOverview" data-panel="overview"></div>
+        <div class="app-tab-body app-pane__body--scroll nc-hidden" id="modalHost" data-panel="modal"></div>
         <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabOps" data-panel="ops"></div>
-        <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabStock" data-panel="stock">
-          <div id="stockSummaryHost"></div>
-        </div>
-        <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabMag" data-panel="mag">
-          <div id="magHost"></div>
-        </div>
-      </div>
+        <div class="app-tab-body app-pane__body--scroll nc-hidden" id="tabDiag" data-panel="diag"></div>
+      </section>
 
-    </section>
+      </section>
   </main>
 
   <!-- ==================== 手機版底部導覽（桌機由 CSS 隱藏） ==================== -->
   <nav class="app-mnav" aria-label="主要區域切換">
-    <button type="button" class="app-mnav__btn" data-mview="editor">程式</button>
+    <button type="button" class="app-mnav__btn" data-mview="project">Project</button>
     <button type="button" class="app-mnav__btn is-on" data-mview="view">視圖</button>
-    <button type="button" class="app-mnav__btn" data-mview="data">資料 <span class="app-tab__badge nc-hidden" id="mnavDiagBadge"></span></button>
+    <button type="button" class="app-mnav__btn" data-mview="status">狀態 <span class="app-tab__badge nc-hidden" id="mnavDiagBadge"></span></button>
   </nav>
-
-  <!-- ==================== 全螢幕設定頁（素材與設定） ====================
-       設定是「開新程式時調一次，之後不動」的東西：平常不佔畫面，要調時給全螢幕
-       好好填。素材編輯器（形狀／尺寸／原點九宮格／預覽）與機台設定都在這一頁。 -->
-  <div class="app-setup nc-hidden" id="setupOverlay" role="dialog" aria-modal="true" aria-label="素材與設定">
-    <div class="app-setup__head">
-      <span class="app-setup__title">素材與設定</span>
-      <span class="app-setup__sub" id="setupSub"></span>
-      <span class="app-setup__spacer"></span>
-      <button type="button" class="nc-btn nc-btn-primary" id="btnSetupClose" title="關閉設定頁（改動即時生效，不需要另外儲存）">完成</button>
-    </div>
-    <div class="app-setup__body">
-      <section class="app-setup__col app-setup__col--stock">
-        <div class="app-setup__grouptitle">素材</div>
-        <div id="stockHost"></div>
-      </section>
-      <section class="app-setup__col app-setup__col--settings">
-        <div class="app-setup__grouptitle">機台與模擬</div>
-        <div id="settingsHost"></div>
-      </section>
-    </div>
-  </div>
 
   <!-- 整頁拖放提示 -->
   <div class="app-drop" id="dropOverlay" aria-hidden="true"><div class="app-drop__box">放開以載入<br>NC 程式，或刀具表 CSV</div></div>

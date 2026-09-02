@@ -1,7 +1,9 @@
 /*
  * NC 預演台 — 整體版面（index.html / js/ui/app.js）
  * 色彩沿用 panels.css 的 CSS 變數（--nc-*），這裡只補版面與工具列自己的樣式。
- * 版面：頂列工具列 ─ 左 45%（編輯器 + 模態）｜右 55%（視圖 + 分頁）。
+ * 版面：頂列工具列 ─ 左 Project（程式｜素材｜刀具表｜刀庫｜機台，整欄全高）
+ *      ｜右：視圖（上）＋狀態條（下 30%：總覽｜游標行｜作業摘要｜錯誤清單，右端 Project 徽章）。
+ *      左右、上下兩條分隔線都可拖。
  */
 
 /*
@@ -14,6 +16,9 @@
   --app-bar-h: 44px;
   --app-gap: 8px;
   --app-head-h: 26px;
+  /* 左欄寬（佔主體）與狀態條高（佔右欄）的預設值；拖分隔線時 app.js 會改寫這兩個變數（存進偏好） */
+  --app-left-w: 50%;
+  --app-status-h: 30%;
 }
 
 * { box-sizing: border-box; }
@@ -111,34 +116,46 @@ html, body {
 }
 
 /* ==================== 主體 ==================== */
+/* 左 Project 整欄全高｜右欄上視圖、下狀態條。兩條分隔線（.app-vsplit / .app-hsplit）可拖。
+ * 狀態條只佔右欄：設定（左欄）要的是高度——刀具表、素材表單都長；狀態條要的是寬度沒那麼多。 */
 .app-main {
   flex: 1 1 auto;
   display: flex;
   min-height: 0;
   min-width: 0;
+  padding: var(--app-gap);
 }
 .app-left {
-  flex: 0 0 45%;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  padding: var(--app-gap);
-  gap: 0;
+  flex: 0 0 var(--app-left-w);
+  min-width: 280px;
 }
 .app-right {
-  flex: 1 1 55%;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  padding: var(--app-gap) var(--app-gap) var(--app-gap) 0;
-  gap: 0;
 }
-.app-splitter {
+.app-vsplit, .app-hsplit {
   flex: none;
-  height: var(--app-gap);
+  position: relative;
+  touch-action: none;
+  user-select: none;
 }
+.app-vsplit { width: var(--app-gap); cursor: col-resize; }
+.app-hsplit { height: var(--app-gap); cursor: row-resize; }
+.app-vsplit::after, .app-hsplit::after {
+  content: '';
+  position: absolute;
+  border-radius: 2px;
+}
+.app-vsplit::after { top: 0; bottom: 0; left: 2px; right: 2px; }
+.app-hsplit::after { left: 0; right: 0; top: 2px; bottom: 2px; }
+.app-vsplit:hover::after, .app-vsplit.is-dragging::after,
+.app-hsplit:hover::after, .app-hsplit.is-dragging::after { background: var(--nc-accent, #2b6cb0); }
+/* 拖分隔線時 iframe／canvas 不要搶指標，也不要選到字 */
+.app.is-resizing { cursor: inherit; user-select: none; }
+.app.is-resizing canvas, .app.is-resizing textarea { pointer-events: none; }
 
 .app-pane {
   display: flex;
@@ -150,10 +167,8 @@ html, body {
   border-radius: 4px;
   overflow: hidden;
 }
-.app-pane--editor { flex: 3 1 0; }
-.app-pane--modal  { flex: 2 1 0; min-height: 120px; }
-.app-pane--view   { flex: 3 1 0; min-height: 220px; }
-.app-pane--tabs   { flex: 2 1 0; min-height: 150px; }
+.app-pane--view   { flex: 1 1 auto; min-height: 220px; }
+.app-pane--status { flex: 0 0 var(--app-status-h); min-height: 110px; }
 
 .app-pane__head {
   flex: none;
@@ -183,9 +198,60 @@ html, body {
 .app-pane__body--scroll { overflow: auto; }
 .app-pane__body--scroll > .nc-panel { padding: 6px 8px; }
 
+/* ==================== 左欄：Project 子頁 ==================== */
+/* 程式子頁＝編輯器＋底下一行游標行摘要；其他四頁是可捲的表單。一次只顯示一頁（nc-hidden）。 */
+.app-ptab {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+.app-ptab.app-pane__body--scroll { padding: 4px 8px 10px; }
+.app-ptab > .nc-panel { padding: 0; }
+.app-ptab--program {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.app-ptab--program > .app-pane__body { flex: 1 1 auto; }
 /* 編輯器要撐滿它的格子 */
-.app-pane--editor .app-pane__body > .nc-editor { border: 0; height: 100%; }
+#editorHost > .nc-editor { border: 0; height: 100%; }
 .nc-editor { --nc-editor-info-w: 26ch; }
+
+/* 子頁最上面一行：這頁的資料是跟程式存還是整台機共用 */
+.app-ptab__note {
+  font-size: 11px;
+  color: var(--nc-muted, #6b7480);
+  padding: 2px 0 5px;
+  margin-bottom: 6px;
+  border-bottom: 1px dashed var(--nc-border, #d9dde3);
+}
+
+/* 游標行摘要：貼在編輯器底下的一行，點了切到狀態條的「游標行」分頁 */
+.app-mini-modal {
+  flex: none;
+  display: block;
+  width: 100%;
+  min-height: 22px;
+  padding: 3px 8px;
+  border: 0;
+  border-top: 1px solid var(--nc-border, #d9dde3);
+  background: var(--nc-bg-alt, #f6f7f9);
+  color: var(--nc-text, #1f2429);
+  font: 11.5px var(--nc-mono, Consolas, monospace);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.app-mini-modal:hover { background: #eceff3; }
+.app-mini-modal__line { color: var(--nc-accent, #2b6cb0); font-weight: 700; }
+.app-mini-modal__sep { color: var(--nc-border, #c3c9d2); margin: 0 5px; }
+.app-mini-modal__k { color: var(--nc-muted, #6b7480); }
+.app-mini-modal .nc-warn { color: var(--nc-warning, #b26a00); }
+.app-mini-modal .nc-active { color: var(--nc-accent, #2b6cb0); font-weight: 600; }
+.app-mini-modal.is-empty { color: var(--nc-muted, #6b7480); font-family: inherit; }
 
 /* ==================== 視圖工具列 ==================== */
 .app-view-tools {
@@ -327,7 +393,7 @@ html, body {
 .app-view-foot__hint { overflow: hidden; text-overflow: ellipsis; }
 .app-view-foot__hint--touch { display: none; }
 
-/* ==================== 分頁 ==================== */
+/* ==================== 分頁（左欄 Project 子頁與下方狀態條共用） ==================== */
 .app-tabs {
   flex: none;
   display: flex;
@@ -348,6 +414,7 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 .app-tab:hover { background: #eceff3; }
 .app-tab.is-on {
@@ -356,6 +423,7 @@ html, body {
   font-weight: 600;
   box-shadow: inset 0 -2px 0 var(--nc-accent, #2b6cb0);
 }
+.app-tab__sub { color: var(--nc-muted, #6b7480); font-weight: 400; font-size: 11px; }
 .app-tab__badge {
   display: inline-block;
   min-width: 1.6em;
@@ -368,6 +436,9 @@ html, body {
   text-align: center;
 }
 .app-tab__badge.is-warn { background: var(--nc-warning, #b26a00); }
+/* 狀態條的分頁列：右欄只有一半寬，分頁＋徽章擠不下時徽章折到第二行（靠右） */
+.app-pane--status .app-tabs { flex-wrap: wrap; height: auto; min-height: var(--app-head-h); }
+.app-pane--status .app-tab { min-height: var(--app-head-h); }
 .app-tab-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -376,53 +447,15 @@ html, body {
 }
 .app-tab-body > .nc-panel { padding: 0; }
 
-/* ==================== 全螢幕設定頁（素材與設定） ==================== */
-/* 設定是「開新程式時調一次就不動」的：平常不佔畫面，要調時給全螢幕好好填。
- * z-index 低於拖放提示（50）——設定頁開著時拖檔案進來，提示照樣蓋在最上面。 */
-.app-setup {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  background: var(--nc-bg-alt, #f6f7f9);
-}
-.app-setup__head {
-  flex: none;
+/* ---- 狀態條右端的 Project 徽章：不切到總覽也看得到素材／刀具／刀庫／機台有沒有事 ---- */
+.app-chips {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: var(--app-bar-h);
-  padding: 5px 14px;
-  background: linear-gradient(#ffffff, #f2f4f7);
-  border-bottom: 1px solid var(--nc-border, #d9dde3);
-}
-.app-setup__title { font-weight: 700; font-size: 15px; color: var(--nc-accent, #2b6cb0); }
-.app-setup__sub { color: var(--nc-muted, #6b7480); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.app-setup__spacer { flex: 1 1 auto; }
-.app-setup__body {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  gap: 14px;
-  padding: 12px 14px;
-  overflow: auto;
-  align-items: flex-start;
-}
-.app-setup__col {
-  background: var(--nc-bg, #fff);
-  border: 1px solid var(--nc-border, #d9dde3);
-  border-radius: 4px;
-  padding: 8px 12px 12px;
-}
-.app-setup__col--stock { flex: 2 1 560px; min-width: 300px; }
-.app-setup__col--settings { flex: 1 1 300px; min-width: 260px; max-width: 430px; }
-.app-setup__grouptitle {
-  font-weight: 700;
-  font-size: 13px;
-  padding: 2px 0 6px;
-  border-bottom: 1px solid var(--nc-border, #d9dde3);
-  margin-bottom: 6px;
+  gap: 4px;
+  padding: 2px 6px;
+  margin-left: auto;
+  min-height: var(--app-head-h);
+  overflow: hidden;
 }
 
 /* ==================== 整頁拖放 ==================== */
@@ -465,26 +498,10 @@ html, body {
   background: #fff;
 }
 
-/* 視窗較窄時左右比例放寬一點 */
+/* 視窗較窄時行旁資訊欄縮一點，留寬度給程式本文 */
 @media (max-width: 1200px) {
-  .app-left { flex-basis: 42%; }
   .nc-editor { --nc-editor-info-w: 18ch; }
 }
-
-
-/* ---- 頂列：素材推估橫幅（可點，跳到「素材與設定」分頁） ---- */
-#stockBanner {
-  font: inherit;
-  cursor: pointer;
-  border: 1px solid #a8c6e8;
-  background: var(--nc-info-bg, #eaf2fb);
-  color: var(--nc-info, #1b5fa8);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 30vw;
-}
-#stockBanner:hover { filter: brightness(0.97); }
 
 /* 同步分析（還沒跑模擬）時的狀態列註記 */
 .nc-pill-pending {
@@ -494,18 +511,18 @@ html, body {
 }
 
 
-/* ==================== 刀庫分頁 ==================== */
+/* ==================== 刀庫子頁 ==================== */
 /* 拖放提示現在有兩行（NC 程式／刀具表 CSV），置中才不會偏 */
 .app-drop__box { text-align: center; line-height: 1.35; }
-/* 刀位圖是固定尺寸的方塊，分頁窄的時候讓它自己捲，不要把整個版面推寬 */
+/* 刀位圖是固定尺寸的方塊，欄窄的時候讓它自己捲，不要把整個版面推寬 */
 #tabMag { overflow: auto; }
 #tabMag .nc-panel-mag { padding: 2px 0 8px; }
 
 /* ==================== 手機版（窄螢幕） ==================== */
 /* 手機的重點是「看圖」：頂列與視圖工具列預設收合（各一顆展開鈕），畫布吃掉其餘空間。
- * 底部導覽只在窄螢幕出現；一次只顯示一區（程式／視圖／資料），由 #app 的
+ * 底部導覽只在窄螢幕出現；一次只顯示一區（Project／視圖／狀態），由 #app 的
  * data-mview 屬性決定。桌機版完全不吃這個屬性、兩顆展開鈕也直接藏掉。
- * 800px 這個門檻在 app.js（強制關並排 3D、跳行時切回程式頁）也有一份，要一起改。 */
+ * 800px 這個門檻在 app.js（強制關並排 3D、跳行時切回 Project 頁）也有一份，要一起改。 */
 .app-mnav { display: none; }
 .app-bar__more, .app-view-tools__more { display: none; }
 
@@ -544,7 +561,6 @@ html, body {
     max-width: none;
   }
   .app-bar__banner { max-width: 100%; }
-  #stockBanner { max-width: 100%; }
 
   /* ---- 觸控目標放大 ---- */
   .nc-btn { padding: 6px 12px; }
@@ -554,22 +570,21 @@ html, body {
   .nc-check { min-height: 30px; }
   .app-view-tools input[type=range] { min-height: 30px; }
 
-  /* ---- 主體改直向，一次只顯示一區 ---- */
-  .app-main { flex-direction: column; }
+  /* ---- 主體：一次只顯示一區，分隔線用不到 ---- */
   .app-left, .app-right {
     flex: 1 1 auto;
     width: 100%;
+    min-width: 0;
     min-height: 0;
-    padding: var(--app-gap);
   }
-  /* 右欄裡視圖／分頁只會顯示其中一塊，中間的分隔就不需要了 */
-  .app-right .app-splitter { display: none; }
+  .app-pane--status { flex: 1 1 auto; }
+  .app-vsplit, .app-hsplit { display: none; }
 
-  .app[data-mview="editor"] .app-right { display: none; }
+  .app[data-mview="project"] .app-right { display: none; }
   .app[data-mview="view"] .app-left { display: none; }
-  .app[data-mview="view"] .app-pane--tabs { display: none; }
-  .app[data-mview="data"] .app-left { display: none; }
-  .app[data-mview="data"] .app-pane--view { display: none; }
+  .app[data-mview="view"] .app-pane--status { display: none; }
+  .app[data-mview="status"] .app-left { display: none; }
+  .app[data-mview="status"] .app-pane--view { display: none; }
 
   /* ---- 底部導覽 ---- */
   .app-mnav {
@@ -622,6 +637,7 @@ html, body {
     overflow-x: auto;
   }
   .app-tab { flex: none; white-space: nowrap; padding: 0 10px; }
+  .app-chips { flex: none; }
 
   /* ---- 操作提示換成觸控版 ---- */
   .app-view-foot__hint--mouse { display: none; }
@@ -630,9 +646,6 @@ html, body {
   /* ---- 編輯器：右側行旁資訊欄縮窄，留寬度給程式本文 ---- */
   .nc-editor { --nc-editor-info-w: 12ch; }
 
-  /* ---- 設定頁：直向堆疊（素材在上、機台設定在下）。預覽排到表單前面——
-   * 手機的重點是「看圖」，打開先看到素材長怎樣，再往下填欄位。 ---- */
-  .app-setup__body { flex-direction: column; align-items: stretch; padding: 8px; gap: 8px; }
-  .app-setup__col--stock, .app-setup__col--settings { flex: none; min-width: 0; max-width: none; }
+  /* ---- 素材子頁：預覽排到表單前面——手機的重點是「看圖」，打開先看到素材長怎樣，再往下填欄位。 ---- */
   .nc-stock-preview { position: static; order: -1; }
 }

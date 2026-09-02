@@ -690,27 +690,31 @@ test('drag：立圓柱拖圓周改直徑、拖 ⊕ 錨鎖軸心殘量進 pos', (
   assert.equal(moved.pos.x, -10);      // 原點在軸心右 10 → 軸心在 −10
 });
 
-test('stockSummary：摘要文字、推估警語、開啟設定頁', () => {
+test('overview：一列一項可點、徽章縮寫版、空狀態', () => {
   const c = container();
-  let opened = 0;
-  const hnd = P.stockSummary(c, { stock: null, onOpen: () => { opened++; } });
-  // 沒有素材（可能連程式都還沒有）也要給入口——先設素材再寫程式是正常流程
-  assert.match(c.textContent, /先把素材設好/);
-  fire(q(c, '.nc-btn-open-setup'), 'click');
-  assert.equal(opened, 1);
-  const user = NC.analysis.stockFromSpec({
-    shape: 'box', size: { x: 100, y: 60, z: 20 }, anchor: { x: 0.5, y: 1, z: 1 }, pos: { x: 0, y: 0, z: 0 },
-  });
-  hnd.update({ stock: user });
-  assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'user');
-  assert.match(q(c, '.nc-stock-brief').textContent, /長方體 100×60×20 mm・原點在上邊中點（頂面）/);
-  assert.equal(qa(c, '.nc-stock-note').length, 0);
-  fire(q(c, '.nc-btn-open-setup'), 'click');
-  assert.equal(opened, 2);
-  // 推估 → 有警語
-  hnd.update({ stock: sampleStock() });
-  assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'estimated');
-  assert.equal(qa(c, '.nc-stock-note').length, 1);
+  const opened = [];
+  const rows = [
+    { key: 'stock', label: '素材', level: 'warn', text: '由程式推估 175×110×17 mm', short: '推估', detail: '6 筆判定依此' },
+    { key: 'tools', label: '刀具', level: 'ok', text: '3 把', short: '3 把' },
+  ];
+  const full = P.overview(c, { rows, onOpen: (k) => opened.push(k) });
+  assert.equal(qa(c, '.nc-ov-row').length, 2);
+  assert.equal(q(c, '.nc-ov-row[data-key="stock"]').dataset.level, 'warn');
+  assert.match(q(c, '.nc-ov-row[data-key="stock"] .nc-ov-v').textContent, /由程式推估 175×110×17 mm/);
+  assert.match(q(c, '.nc-ov-row[data-key="stock"] .nc-ov-detail').textContent, /6 筆判定依此/);
+  fire(q(c, '.nc-ov-row[data-key="tools"]'), 'click');
+  assert.deepEqual(opened, ['tools']);
+  // 空 rows → 顯示「尚未載入程式」
+  full.update({ rows: [] });
+  assert.match(c.textContent, /尚未載入程式/);
+  // compact：一排徽章，用 short
+  const c2 = container();
+  P.overview(c2, { rows, compact: true, onOpen: (k) => opened.push(k) });
+  assert.equal(qa(c2, '.nc-chip').length, 2);
+  assert.equal(q(c2, '.nc-chip[data-key="stock"] .nc-chip__v').textContent, '推估');
+  assert.equal(qa(c2, '.nc-ov-row').length, 0);
+  fire(q(c2, '.nc-chip[data-key="stock"]'), 'click');
+  assert.deepEqual(opened, ['tools', 'stock']);
 });
 
 test('logic.stockAnchorText / stockSummaryText：現場說法', () => {
