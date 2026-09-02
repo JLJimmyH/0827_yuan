@@ -1369,3 +1369,388 @@ test('刀具表 CSV：toCSV → fromCSV → mergeCSVTable，手填值帶得回�
   assert.equal(merged.table.offsets.find((o) => o.n === 2).radGeom, 3.95);
   assert.match(L.describeImport(merged), /^匯入了 1 把刀、1 筆補正值$/);
 });
+
+// ---------------------------------------------------------------------------
+// 素材：廢料判定區塊
+// 改設定只走 onScrapChange；onChange（素材翻手動）一律不能被叫到——每個測試都順手驗。
+// ---------------------------------------------------------------------------
+function scrapPanel(extra) {
+  const c = container();
+  const changes = [], scraps = [], modes = [];
+  const hnd = P.stock(c, Object.assign({
+    stock: sampleStock(),
+    onChange: (s) => changes.push(s),
+    onScrapChange: (s) => scraps.push(s),
+    onMarkMode: (k) => modes.push(k),
+  }, extra || {}));
+  return { c, hnd, changes, scraps, modes };
+}
+const checkedAnchor = (c) => qa(c, 'input[data-field="scrap.anchor"]').find((r) => r.checked).value;
+// 瀏覽器會把同一個 name 群組的其他 radio 取消勾選；假 DOM 沒有這層，這裡自己做（面板改設定後不整片重畫，不能靠重建對齊）
+const pickAnchor = (c, v) => {
+  const r = q(c, `input[data-field="scrap.anchor"][value="${v}"]`);
+  for (const x of qa(c, 'input[data-field="scrap.anchor"]')) x.checked = (x === r);
+  fire(r, 'change');
+};
+
+test('stock.scrap：預設值渲染（auto、三個門檻、沒有記號、尚未模擬）', () => {
+  const { c, changes } = scrapPanel();
+  assert.ok(q(c, '.nc-scrap'));
+  assert.match(q(c, '.nc-scrap .nc-sub-title').textContent, /廢料判定/);
+  assert.equal(qa(c, 'input[data-field="scrap.anchor"]').length, 5);
+  assert.equal(checkedAnchor(c), 'auto');
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]').value, '0');
+  assert.equal(q(c, 'input[data-field="scrap.bridgeMm"]').value, '0');
+  assert.equal(q(c, 'input[data-field="scrap.minAreaMm2"]').value, '2');
+  assert.match(q(c, '.nc-scrap-marks').textContent, /（沒有記號）/);
+  assert.equal(q(c, '.nc-scrap-result').textContent, '尚未模擬');
+  assert.equal(qa(c, '.nc-scrap-warn').length, 0);
+  assert.ok(!q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  assert.equal(changes.length, 0);
+});
+
+test('stock.scrap：切 radio → onScrapChange 帶 anchor；素材不翻手動', () => {
+  const { c, changes, scraps } = scrapPanel();
+  pickAnchor(c, 'largest');
+  assert.equal(scraps.length, 1);
+  assert.equal(scraps[0].anchor, 'largest');
+  assert.equal(scraps[0].minAreaMm2, 2);          // 其餘欄位一併帶出（app 直接整包存）
+  assert.equal(checkedAnchor(c), 'largest');
+  pickAnchor(c, 'largest');                        // 同一顆再點：沒變就不送
+  assert.equal(scraps.length, 1);
+  pickAnchor(c, 'marks');
+  assert.equal(scraps[1].anchor, 'marks');
+  assert.equal(changes.length, 0);
+  assert.equal(q(c, '.nc-badge[data-source]').dataset.source, 'estimated');
+});
+
+test('stock.scrap：改門檻帶數字；負值與空白不送、重畫回舊值', () => {
+  const { c, scraps, changes } = scrapPanel();
+  setValue(q(c, 'input[data-field="scrap.skinMm"]'), 0.3);
+  assert.equal(scraps.length, 1);
+  assert.equal(scraps[0].skinMm, 0.3);
+  setValue(q(c, 'input[data-field="scrap.bridgeMm"]'), 2);
+  assert.equal(scraps[1].bridgeMm, 2);
+  assert.equal(scraps[1].skinMm, 0.3);
+  setValue(q(c, 'input[data-field="scrap.minAreaMm2"]'), 5);
+  assert.equal(scraps[2].minAreaMm2, 5);
+  setValue(q(c, 'input[data-field="scrap.skinMm"]'), -1);
+  assert.equal(scraps.length, 3);
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]').value, '0.3');
+  setValue(q(c, 'input[data-field="scrap.skinMm"]'), '');
+  assert.equal(scraps.length, 3);
+  setValue(q(c, 'input[data-field="scrap.skinMm"]'), 0.3);   // 沒變就不送
+  assert.equal(scraps.length, 3);
+  assert.equal(changes.length, 0);
+});
+
+test('stock.scrap：記號列表、刪一列、清除；標記按鈕切換 onMarkMode', () => {
+  const marks = [{ x: 10, y: 5, kind: 'part' }, { x: -40, y: 0, kind: 'scrap' }];
+  const { c, scraps, modes, changes } = scrapPanel({ scrap: { anchor: 'marks', marks } });
+  assert.equal(checkedAnchor(c), 'marks');
+  const rows = qa(c, '.nc-scrap-mark');
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /⊙ 工件/);
+  assert.match(rows[0].textContent, /X 10/);
+  assert.match(rows[0].textContent, /Y 5/);
+  assert.equal(rows[0].dataset.kind, 'part');
+  assert.match(rows[1].textContent, /✕ 廢料/);
+  assert.match(rows[1].textContent, /X -40/);
+  // 刪第一列
+  fire(q(rows[0], '.nc-btn-danger'), 'click');
+  assert.equal(scraps.length, 1);
+  assert.deepEqual(scraps[0].marks, [{ x: -40, y: 0, kind: 'scrap' }]);
+  assert.equal(qa(c, '.nc-scrap-mark').length, 1);
+  // 標記模式：按下 → onMarkMode('part') 且按鈕亮、有「標記模式」提示；再按一次 → null
+  fire(q(c, '.nc-scrap-mark-part'), 'click');
+  assert.deepEqual(modes, ['part']);
+  assert.ok(q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  assert.ok(!q(c, '.nc-scrap-mark-scrap').classList.contains('is-on'));
+  assert.ok(q(c, '.nc-scrap-marking'));
+  fire(q(c, '.nc-scrap-mark-part'), 'click');
+  assert.deepEqual(modes, ['part', null]);
+  assert.ok(!q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  assert.equal(qa(c, '.nc-scrap-marking').length, 0);
+  fire(q(c, '.nc-scrap-mark-scrap'), 'click');
+  assert.deepEqual(modes, ['part', null, 'scrap']);
+  assert.ok(q(c, '.nc-scrap-mark-scrap').classList.contains('is-on'));
+  // 清除 → marks 空；再清一次沒東西就不送
+  fire(q(c, '.nc-scrap-clear'), 'click');
+  assert.equal(scraps.length, 2);
+  assert.deepEqual(scraps[1].marks, []);
+  assert.match(q(c, '.nc-scrap-marks').textContent, /（沒有記號）/);
+  fire(q(c, '.nc-scrap-clear'), 'click');
+  assert.equal(scraps.length, 2);
+  // 面板用自己的副本，app 手上那份沒被動到
+  assert.equal(marks.length, 2);
+  assert.equal(changes.length, 0);
+});
+
+test('stock.scrap：結果文字各狀態、夾具警告；update({markMode}) 同步按鈕', () => {
+  const { c, hnd, changes } = scrapPanel();
+  hnd.update({ scrapResult: { supported: false, labels: null, chunks: [], partCount: 0, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false } });
+  assert.equal(q(c, '.nc-scrap-result').textContent, '四軸圓棒尚不支援廢料判定');
+  hnd.update({ scrapResult: { supported: true, partCount: 1, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false } });
+  assert.equal(q(c, '.nc-scrap-result').textContent, '工件 1 塊、廢料 0 塊');
+  assert.equal(qa(c, '.nc-scrap-warn').length, 0);
+  hnd.update({ scrapResult: { supported: true, partCount: 1, scrapCount: 1, scrapAreaMm2: 1234.56, partTouchesFixture: false, hasFixture: true, firstScrapText: '第 2 把刀（T2）之後切斷' } });
+  assert.equal(q(c, '.nc-scrap-result').textContent, '工件 1 塊、廢料 1 塊（合計 1234.6 mm²），第 2 把刀（T2）之後切斷');
+  assert.equal(q(c, '.nc-scrap-warn').textContent, '工件沒有碰到夾具，切斷後會掉落');
+  // firstScrapText 可為空；沒有夾具格就不提掉落（不知道現場怎麼夾的）
+  hnd.update({ scrapResult: { supported: true, partCount: 2, scrapCount: 1, scrapAreaMm2: 10, partTouchesFixture: false, hasFixture: false, firstScrapText: '' } });
+  assert.equal(q(c, '.nc-scrap-result').textContent, '工件 2 塊、廢料 1 塊（合計 10 mm²）');
+  assert.equal(qa(c, '.nc-scrap-warn').length, 0);
+  hnd.update({ scrapResult: null });
+  assert.equal(q(c, '.nc-scrap-result').textContent, '尚未模擬');
+  hnd.update({ markMode: 'scrap' });
+  assert.ok(q(c, '.nc-scrap-mark-scrap').classList.contains('is-on'));
+  hnd.update({ markMode: null });
+  assert.ok(!q(c, '.nc-scrap-mark-scrap').classList.contains('is-on'));
+  assert.equal(changes.length, 0);
+});
+
+test('stock.scrap：亂值正規化；update 沒帶 scrap 時沿用面板目前的設定；手機版提示', () => {
+  const { c, hnd, scraps } = scrapPanel({
+    scrap: { anchor: 'nonsense', skinMm: -3, bridgeMm: 'x', marks: [{ x: NaN, y: 1, kind: 'part' }, { x: 1, y: 2, kind: 'scrap' }, null] },
+  });
+  assert.equal(checkedAnchor(c), 'auto');
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]').value, '0');
+  assert.equal(q(c, 'input[data-field="scrap.bridgeMm"]').value, '0');
+  assert.equal(qa(c, '.nc-scrap-mark').length, 1);
+  pickAnchor(c, 'fixture');
+  assert.equal(scraps[0].anchor, 'fixture');
+  hnd.update({ stock: sampleStock(), rotaryUsed: false });   // app 更新素材時沒帶 scrap
+  assert.equal(checkedAnchor(c), 'fixture');
+  assert.equal(hnd.getScrap().anchor, 'fixture');
+  assert.equal(hnd.getScrap().marks.length, 1);
+  // app 帶新的 scrap 進來就以它為準
+  hnd.update({ scrap: { anchor: 'origin', marks: [] } });
+  assert.equal(checkedAnchor(c), 'origin');
+  assert.match(q(c, '.nc-scrap-marks').textContent, /（沒有記號）/);
+  // 提示不寫「下面」：手機版預覽排在表單前面（app.css order:-1），桌機版也只說「在預覽圖上點」
+  assert.match(q(c, '.nc-scrap-hint').textContent, /到右邊的俯視圖點那塊料，或在預覽圖上點/);
+  assert.doesNotMatch(q(c, '.nc-scrap-hint').textContent, /下面/);
+  hnd.update({ mobile: true });
+  assert.match(q(c, '.nc-scrap-hint').textContent, /在俯視預覽圖上點那塊料/);
+  assert.doesNotMatch(q(c, '.nc-scrap-hint').textContent, /下面|右邊/);
+});
+
+test('stock.scrap：推估素材＋廢料 0 塊時提示要填素材高度；手動素材、有廢料、不支援時不提', () => {
+  const est = { min: { x: -50, y: -50, z: -10 }, max: { x: 50, y: 50, z: 0 }, source: 'estimated', fixtures: [] };
+  const user = Object.assign({}, est, { source: 'user', spec: { shape: 'box', size: { x: 100, y: 100, z: 10 }, anchor: { x: 0.5, y: 0.5, z: 1 }, pos: { x: 0, y: 0, z: 0 } } });
+  const none = { supported: true, partCount: 1, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false };
+  const { c, hnd, changes } = scrapPanel({ stock: est, scrapResult: none });
+  assert.match(q(c, '.nc-scrap-stock-hint').textContent, /素材是推估的.*填實際的素材高度/);
+  // 尚未模擬：連結果都沒有，不提
+  hnd.update({ scrapResult: null });
+  assert.equal(qa(c, '.nc-scrap-stock-hint').length, 0);
+  // 有廢料：已經判出來了，這句只是噪音
+  hnd.update({ scrapResult: Object.assign({}, none, { scrapCount: 1, scrapAreaMm2: 5 }) });
+  assert.equal(qa(c, '.nc-scrap-stock-hint').length, 0);
+  // 四軸不支援：另一句已經說了
+  hnd.update({ scrapResult: { supported: false, partCount: 0, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false } });
+  assert.equal(qa(c, '.nc-scrap-stock-hint').length, 0);
+  // 手動素材：底面就是使用者填的，沒切穿就是沒切穿
+  hnd.update({ stock: user, scrapResult: none });
+  assert.equal(qa(c, '.nc-scrap-stock-hint').length, 0);
+  assert.equal(q(c, '.nc-scrap-result').textContent, '工件 1 塊、廢料 0 塊');
+  assert.equal(changes.length, 0);
+  assert.equal(typeof L.scrapStockHint(none, 'estimated'), 'string');
+  assert.equal(L.scrapStockHint(none, 'user'), null);
+  assert.equal(L.scrapStockHint(null, 'estimated'), null);
+});
+
+test('logic.scrapResultText / previewMark / scrapNormalize', () => {
+  assert.deepEqual(L.scrapResultText(null), { text: '尚未模擬', warn: null });
+  assert.deepEqual(L.scrapResultText({ supported: false }), { text: '四軸圓棒尚不支援廢料判定', warn: null });
+  assert.deepEqual(L.scrapResultText({ supported: true, partCount: 1, scrapCount: 2, scrapAreaMm2: 99.96, partTouchesFixture: true, hasFixture: true }),
+    { text: '工件 1 塊、廢料 2 塊（合計 100 mm²）', warn: null });
+  // 迷你預覽點一下 → 工件座標取到 0.01
+  const tf = L.stockPreviewTransform(dragStock(), 440, 300, 'top');
+  assert.deepEqual(L.previewMark(tf, L.tfPx(tf, 12.3456), L.tfPy(tf, -7.8912), 'scrap'), { x: 12.35, y: -7.89, kind: 'scrap' });
+  // 正規化：預設值、負值夾 0、anchor 亂填回 auto、marks 過濾 NaN／怪 kind
+  const d = L.scrapDefaults();
+  assert.equal(d.anchor, 'auto');
+  assert.deepEqual(d.marks, []);
+  const n = L.scrapNormalize({ anchor: 'bogus', skinMm: -1, minAreaMm2: 3, marks: [{ x: 1, y: NaN, kind: 'part' }, { x: 1, y: 2, kind: 'weird' }, { x: 0, y: 0, kind: 'scrap' }] });
+  assert.equal(n.anchor, 'auto');
+  assert.equal(n.skinMm, 0);
+  assert.equal(n.minAreaMm2, 3);
+  assert.deepEqual(n.marks, [{ x: 0, y: 0, kind: 'scrap' }]);
+});
+
+// ---------------------------------------------------------------------------
+// 素材：徽章三態（推估／手動／範例附帶）與廢料區塊的局部重畫
+// ---------------------------------------------------------------------------
+const CUTOUT_SPEC = { shape: 'box', size: { x: 120, y: 80, z: 10 }, anchor: { x: 0.5, y: 0.5, z: 1 }, pos: { x: 0, y: 0, z: 0 } };
+
+test('stock：徽章三態——由程式推估／手動指定／範例附帶；範例附帶改任何一格就變手動、「回到推估」留著', () => {
+  const c = container();
+  const changes = [];
+  const sample = NC.analysis.stockFromSpec(CUTOUT_SPEC, []);
+  const hnd = P.stock(c, { stock: sample, stockOrigin: 'sample', onChange: (s) => changes.push(s) });
+  const badge = () => q(c, '.nc-badge[data-source]');
+  assert.equal(badge().dataset.source, 'sample');
+  assert.equal(badge().textContent, '範例附帶');
+  assert.ok(badge().classList.contains('nc-badge-sample'));
+  assert.ok(!badge().classList.contains('nc-badge-user'));
+  assert.match(q(c, '.nc-stock-note').textContent, /這支範例附了素材尺寸；改任何一格就變成手動指定/);
+  assert.equal(qa(c, '.nc-btn-reset').length, 1);
+  assert.match(q(c, '.nc-btn-reset').title, /範例/);
+  // 改一格 → onChange 帶 source user；徽章立刻變「手動指定」，不必等 app 回 update
+  setValue(q(c, 'input[data-field="size.z"]'), 12);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].source, 'user');
+  assert.equal(changes[0].spec.size.z, 12);
+  assert.equal(badge().dataset.source, 'user');
+  assert.equal(badge().textContent, '手動指定');
+  assert.ok(badge().classList.contains('nc-badge-user'));
+  assert.equal(qa(c, '.nc-stock-note').length, 0);
+  // app 回 update 帶 'user' → 還是手動
+  hnd.update({ stock: changes[0], stockOrigin: 'user' });
+  assert.equal(badge().dataset.source, 'user');
+  // 推估素材配 stockOrigin 'sample'（不該發生）→ 照 source 走，不冒充範例附帶
+  hnd.update({ stock: sampleStock(), stockOrigin: 'sample' });
+  assert.equal(badge().dataset.source, 'estimated');
+  assert.equal(badge().textContent, '由程式推估');
+  assert.ok(badge().classList.contains('nc-badge-est'));
+  assert.equal(qa(c, '.nc-btn-reset').length, 0);
+  assert.match(q(c, '.nc-stock-note').textContent, /程式推估的反算值/);
+  // 範例附帶按「回到推估」→ onChange(null)
+  hnd.update({ stock: sample, stockOrigin: 'sample' });
+  assert.equal(badge().dataset.source, 'sample');
+  fire(q(c, '.nc-btn-reset'), 'click');
+  assert.equal(changes[1], null);
+  // 沒帶 stockOrigin 的手動素材 → 手動指定
+  hnd.update({ stock: sample, stockOrigin: null });
+  assert.equal(badge().dataset.source, 'user');
+});
+
+test('stock.scrap：setScrapResult 只換「目前結果」三行，門檻欄位節點不動、打到一半的值留著；結果在標題正下方', () => {
+  const { c, hnd, scraps } = scrapPanel();
+  const skin = q(c, 'input[data-field="scrap.skinMm"]');
+  const radio = q(c, 'input[data-field="scrap.anchor"][value="largest"]');
+  skin.value = '0.4';   // 打到一半（還沒 change）
+  hnd.setScrapResult({ supported: true, partCount: 1, scrapCount: 1, scrapAreaMm2: 12, partTouchesFixture: null, hasFixture: false, firstScrapText: '第 2 把刀（T2）之後切斷' });
+  assert.equal(q(c, '.nc-scrap-result').textContent, '工件 1 塊、廢料 1 塊（合計 12 mm²），第 2 把刀（T2）之後切斷');
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin, '同一個節點，沒有重建');
+  assert.equal(skin.value, '0.4');
+  assert.equal(q(c, 'input[data-field="scrap.anchor"][value="largest"]'), radio);
+  // 「目前結果」在區塊標題正下方（改設定馬上看得到）
+  const kids = q(c, '.nc-scrap').children;
+  assert.ok(kids[0].classList.contains('nc-sub-title'));
+  assert.ok(kids[1].classList.contains('nc-scrap-status'));
+  assert.equal(q(kids[1], '.nc-scrap-q').textContent, '目前結果');
+  assert.ok(q(kids[1], '.nc-scrap-result'));
+  // 掉落警告與推估提示也只在這一段換
+  hnd.setScrapResult({ supported: true, partCount: 1, scrapCount: 1, scrapAreaMm2: 12, partTouchesFixture: false, hasFixture: true });
+  assert.ok(q(kids[1], '.nc-scrap-warn'));
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  hnd.setScrapResult({ supported: true, partCount: 1, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false });
+  assert.equal(qa(c, '.nc-scrap-warn').length, 0);
+  assert.ok(q(kids[1], '.nc-scrap-stock-hint'), '推估素材＋0 塊 → 提示填素材高度');
+  // 改門檻／切 radio 之後也不整片重畫：節點還是同一個、結果那行也還在
+  setValue(skin, 0.4);
+  assert.equal(scraps.length, 1);
+  assert.equal(scraps[0].skinMm, 0.4);
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  pickAnchor(c, 'largest');
+  assert.equal(scraps[1].anchor, 'largest');
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  assert.equal(q(c, 'input[data-field="scrap.anchor"][value="largest"]'), radio);
+  assert.equal(q(c, '.nc-scrap-result').textContent, '工件 1 塊、廢料 0 塊');
+  // 負值：只把這一格改回舊值，不重建
+  setValue(skin, -1);
+  assert.equal(scraps.length, 2);
+  assert.equal(skin.value, '0.4');
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  // 三個門檻用 .nc-row 排成標籤對齊的三列
+  assert.equal(qa(c, '.nc-scrap-thresholds .nc-row').length, 3);
+  assert.deepEqual(qa(c, '.nc-scrap-thresholds .nc-row-label').map((e) => e.textContent), ['底皮薄於', '細於', '小於']);
+  hnd.setScrapResult(null);
+  assert.equal(q(c, '.nc-scrap-result').textContent, '尚未模擬');
+});
+
+test('stock.scrap：handle.setMarkMode 只更新按鈕與提示、不回呼 onMarkMode；記號增減只重畫記號那段', () => {
+  const marks = [{ x: 10, y: 5, kind: 'part' }, { x: -40, y: 0, kind: 'scrap' }];
+  const { c, hnd, scraps, modes, changes } = scrapPanel({ scrap: { anchor: 'marks', marks } });
+  const skin = q(c, 'input[data-field="scrap.skinMm"]');
+  const partBtn = q(c, '.nc-scrap-mark-part');
+  hnd.setMarkMode('scrap');
+  assert.ok(q(c, '.nc-scrap-mark-scrap').classList.contains('is-on'));
+  assert.ok(!q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  assert.match(q(c, '.nc-scrap-marking').textContent, /廢料/);
+  assert.deepEqual(modes, [], 'app 切的不回呼，免得繞圈');
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  hnd.setMarkMode(null);
+  assert.ok(!q(c, '.nc-scrap-mark-scrap').classList.contains('is-on'));
+  assert.equal(qa(c, '.nc-scrap-marking').length, 0);
+  hnd.setMarkMode('bogus');
+  assert.equal(qa(c, '.nc-scrap-marking').length, 0);
+  assert.ok(!q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  // 使用者按按鈕：按鈕重建（那一段重畫）、有回呼；門檻欄位不動
+  fire(q(c, '.nc-scrap-mark-part'), 'click');
+  assert.deepEqual(modes, ['part']);
+  assert.ok(q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  assert.notEqual(q(c, '.nc-scrap-mark-part'), partBtn);
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  // 刪一列：記號列表重畫、門檻欄位還是同一個節點；標記模式照舊
+  fire(q(qa(c, '.nc-scrap-mark')[0], '.nc-btn-danger'), 'click');
+  assert.equal(qa(c, '.nc-scrap-mark').length, 1);
+  assert.deepEqual(scraps[0].marks, [{ x: -40, y: 0, kind: 'scrap' }]);
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  assert.ok(q(c, '.nc-scrap-mark-part').classList.contains('is-on'));
+  fire(q(c, '.nc-scrap-clear'), 'click');
+  assert.match(q(c, '.nc-scrap-marks').textContent, /（沒有記號）/);
+  assert.equal(q(c, 'input[data-field="scrap.skinMm"]'), skin);
+  assert.equal(changes.length, 0);
+});
+
+test('logic.markInStock：含邊、素材外不收；scrapResultText 沒有工件時不報掉落', () => {
+  const s = sampleStock();   // X −65～65、Y −30～30
+  assert.equal(L.markInStock(s, 0, 0), true);
+  assert.equal(L.markInStock(s, 65, 30), true);
+  assert.equal(L.markInStock(s, -65, -30), true);
+  assert.equal(L.markInStock(s, 65.01, 0), false);
+  assert.equal(L.markInStock(s, 0, -30.5), false);
+  assert.equal(L.markInStock(s, NaN, 0), false);
+  assert.equal(L.markInStock(null, 0, 0), false);
+  assert.equal(L.MARK_OUT_OF_STOCK, '記號要點在素材範圍內');
+  const base = { supported: true, partCount: 0, scrapCount: 1, scrapAreaMm2: 5, partTouchesFixture: false, hasFixture: true };
+  assert.equal(L.scrapResultText(base).warn, null, '沒有工件就沒有「工件沒碰到夾具」可言');
+  assert.equal(L.scrapResultText(Object.assign({}, base, { partCount: 1 })).warn, '工件沒有碰到夾具，切斷後會掉落');
+});
+
+// ---------------------------------------------------------------------------
+// app.js 的純邏輯（appUtil）：素材要存進 localStorage 的項目、記號範圍與精度。
+// app.js 在 document 存在時會自己啟動；把 readyState 設成 loading 讓它等一個永遠不會來的 DOMContentLoaded。
+// ---------------------------------------------------------------------------
+fakeDocument.readyState = 'loading';
+fakeDocument.addEventListener = () => {};
+vm.runInThisContext(fs.readFileSync(path.join(ROOT, 'js', 'ui', 'app.js'), 'utf8'), { filename: 'app.js' });
+const AU = NC.ui.appUtil;
+
+test('appUtil.stockItemOf：範例附帶不寫、拒絕範例留 estimated 標記、手動存 spec、廢料非預設才帶', () => {
+  const stock = NC.analysis.stockFromSpec(CUTOUT_SPEC, []);
+  const d = AU.defaultScrap();
+  // 範例附帶（沒動過）→ 不留痕跡
+  assert.equal(AU.stockItemOf({ stock, stockOrigin: 'sample', sampleDeclined: false, scrap: d }), null);
+  // 手動 → { spec, fixtures }
+  assert.deepEqual(AU.stockItemOf({ stock, stockOrigin: 'user', sampleDeclined: false, scrap: d }), { spec: stock.spec, fixtures: [] });
+  // 對範例按了「回到推估」→ 只留標記
+  assert.deepEqual(AU.stockItemOf({ stock: null, stockOrigin: null, sampleDeclined: true, scrap: d }), { estimated: true });
+  // 範例附帶＋只調了廢料 → 只存 { scrap }（spec 不寫，下次載入還是範例附帶）
+  const sc = Object.assign({}, d, { anchor: 'largest' });
+  assert.deepEqual(AU.stockItemOf({ stock, stockOrigin: 'sample', sampleDeclined: false, scrap: sc }), { scrap: AU.normalizeScrap(sc) });
+  assert.deepEqual(AU.stockItemOf({ stock: null, stockOrigin: null, sampleDeclined: true, scrap: sc }), { estimated: true, scrap: AU.normalizeScrap(sc) });
+  // 拒絕過範例之後又手動設了 → spec 優先，標記不寫（有 spec 就不會套側車）
+  assert.deepEqual(AU.stockItemOf({ stock, stockOrigin: 'user', sampleDeclined: true, scrap: d }), { spec: stock.spec, fixtures: [] });
+  // 推估＋預設廢料 → 整格刪掉
+  assert.equal(AU.stockItemOf({ stock: null, stockOrigin: null, sampleDeclined: false, scrap: d }), null);
+  // 記號：取到 0.01、要在素材範圍內（含邊）
+  assert.equal(AU.roundMark(12.3456), 12.35);
+  assert.equal(AU.roundMark(-7.894), -7.89);
+  assert.equal(AU.markInStock(stock, 60, 40), true);
+  assert.equal(AU.markInStock(stock, 60.01, 0), false);
+  assert.equal(AU.markInStock(null, 0, 0), false);
+});

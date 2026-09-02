@@ -18,6 +18,8 @@
  *
  * 匯出：NC.sim.create(stock, cell) → Sim；NC.sim.run(sim, scenarioResult, toolTable, settings, opts) → Promise<SimResult>
  *       NC.sim.heightAt(simOrResult, x, y)、NC.sim.profileFor(tool)、NC.sim.selectSegments(segments)
+ *       廢料判定：NC.sim.chunks(simOrResult, heightArr?, scrap?) → ChunkResult、NC.sim.chunkHeights(arr, labels, chunks, floorZ, which)、
+ *                 NC.sim.defaultScrap()、NC.sim.normalizeScrap(o)、NC.sim.SCRAP_MAX（見檔尾「廢料判定（chunks）」一節）
  */
 (function (NC) {
   'use strict';
@@ -1471,8 +1473,323 @@
     return idx < 0 ? null : s.height[idx];
   }
 
+  // ---------------------------------------------------------------------------
+  // 廢料判定（chunks）
+  //
+  // 輪廓整圈切穿、鋸斷之後，素材會分成幾塊互不相連的料：要留下來的那塊是「工件」，
+  // 其餘是「廢料」。視圖要把廢料標成橘色或乾脆不畫、素材子頁要報「廢料 N 塊」，
+  // 所以這裡把高度圖切成「四鄰連通的實料區域」（塊），再依設定決定哪幾塊是工件。
+  //
+  // 為什麼放 core 而不是 UI：2D／3D／素材子頁三邊要同一份答案，而且要能在 Node 測。
+  // 為什麼不進 analyze 的 request：判定只看高度圖，改設定不必重跑模擬（第一版）。
+  //
+  // 「沒有料」＝高度夾在 floorZ（cutLine／cutArc 把切穿夾在 floorZ；cylZ 圓外一開始就是 floorZ）。
+  // 夾具格（mask ≠ 0）是不可切材料，不算料；但記下來給 anchor 'fixture' 與 touchesFixture 用。
+  // 全部用 typed array 與自己的堆疊（不遞迴）：0.17 M 格要在 30 ms 內做完，
+  // 而且遞迴的 flood fill 在大格網會把呼叫堆疊撐爆。
+  // ---------------------------------------------------------------------------
+  /** anchor 的合法值（素材子頁的 radio 與 normalizeScrap 共用） */
+  const SCRAP_ANCHORS = Object.freeze(['auto', 'origin', 'largest', 'fixture', 'marks']);
+
+  /** 廢料判定的預設設定（跟程式一起存在素材項目裡；欄位見 ns.js 的 Scrap） */
+  function defaultScrap() {
+    return { anchor: 'auto', marks: [], skinMm: 0, bridgeMm: 0, minAreaMm2: 2 };
+  }
+
+  /**
+   * 三個門檻的上限（normalizeScrap 夾範圍用；素材子頁的輸入框可拿去當 max）。
+   * bridgeMm 的上限是效能問題、不是幾何問題：侵蝕是 O(k·n)，k = bridgeMm/(2·cell)，手滑打 5000 在
+   * 0.25 mm 格距下是一萬輪、主執行緒直接凍住；50 mm 已經比任何留耳都寬得多。
+   * skinMm／minAreaMm2 只是擋荒謬值（比整塊素材還厚／比整張圖還大）。
+   */
+  const SCRAP_MAX = Object.freeze({ skinMm: 1000, bridgeMm: 50, minAreaMm2: 1e6 });
+
+  /**
+   * 補預設、夾範圍。localStorage 回來的可能是舊版或被手改過，所以每個欄位都自己驗：
+   * 三個門檻負值沒有意義 → 夾成 0、超過 SCRAP_MAX → 夾到上限、空值／非數字 → 用預設；anchor 不認得 → 'auto'；
+   * marks 只留 x/y 都是有限數字且 kind 合法的（壞掉的記號留著只會讓判定莫名其妙）。
+   * @param {Partial<Scrap>|null|undefined} o
+   * @returns {Scrap}
+   */
+  function normalizeScrap(o) {
+    const d = defaultScrap();
+    if (!o || typeof o !== 'object') return d;
+    // null／undefined／空字串／布林都不是數字：Number(null) 會變 0，JSON 往返後的 NaN 記號就會偷偷變成 (0, y)。
+    // 字串先 trim：Number('   ') 也是 0，輸入框只剩空白時要當成「沒填」用預設，不是門檻 0。
+    const finite = (v) => {
+      if (v == null || typeof v === 'boolean') return null;
+      if (typeof v === 'string') { v = v.trim(); if (v === '') return null; }
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const clamp = (v, dflt, hi) => { const n = finite(v); return n == null ? dflt : Math.min(hi, Math.max(0, n)); };
+    const marks = [];
+    if (Array.isArray(o.marks)) {
+      for (const m of o.marks) {
+        if (!m || typeof m !== 'object') continue;
+        const x = finite(m.x), y = finite(m.y);
+        if (x == null || y == null) continue;
+        if (m.kind !== 'part' && m.kind !== 'scrap') continue;
+        marks.push({ x, y, kind: m.kind });
+      }
+    }
+    return {
+      anchor: SCRAP_ANCHORS.includes(o.anchor) ? o.anchor : 'auto',
+      marks,
+      skinMm: clamp(o.skinMm, d.skinMm, SCRAP_MAX.skinMm),
+      bridgeMm: clamp(o.bridgeMm, d.bridgeMm, SCRAP_MAX.bridgeMm),
+      minAreaMm2: clamp(o.minAreaMm2, d.minAreaMm2, SCRAP_MAX.minAreaMm2),
+    };
+  }
+
+  /** 不支援（四軸圓棒）或沒有格網時的空結果：欄位齊全，呼叫端不必每個欄位都判 null */
+  function noChunks() {
+    return { supported: false, labels: null, chunks: [], partCount: 0, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false };
+  }
+
+  /**
+   * 把高度圖切成塊並分類。
+   *
+   * 步驟：實料格 → （細橋：侵蝕 k 格）→ 四鄰 flood fill 標號 → （長回來：多源 BFS → 沒核心的孤立塊補標號）→
+   *       每塊統計 → 丟掉太小的 → 依 anchor 與記號決定哪幾塊是工件。
+   *
+   * @param {Sim|SimResult} sim         只用 nx, ny, cellX, cellY, cell, origin, floorZ, mask, cylinder, wrapY
+   * @param {Float32Array} [heightArr]  預設 sim.height；傳快照的 height 就能看「某一刀之後」的狀況
+   * @param {Partial<Scrap>} [scrap]    會先 normalizeScrap
+   * @param {Object} [opts]             保留給日後（目前沒有選項，傳了也不看）
+   * @returns {ChunkResult}
+   */
+  function chunks(sim, heightArr, scrap, opts) { // eslint-disable-line no-unused-vars
+    // 圓棒的「料」是每格一串徑向區間（extra），不是高度圖的連通問題：本版不做
+    if (!sim || sim.cylinder || !(sim.nx > 0 && sim.ny > 0)) return noChunks();
+    const s = normalizeScrap(scrap);
+    const h = heightArr || sim.height;
+    const nx = sim.nx, ny = sim.ny, n = nx * ny;
+    if (!h || h.length !== n) return noChunks();
+    const cellX = sim.cellX || sim.cell, cellY = sim.cellY || sim.cell;
+    const fix = (sim.mask && sim.mask.length === n) ? sim.mask : null;
+
+    // 1. 實料格：剩餘厚度 > 底皮門檻才算有料。
+    //    floorZ 先過 Math.fround：高度圖是 Float32Array，夾在 floorZ 的格存的是 fround(floorZ)，
+    //    直接跟 float64 的 floorZ 相減會剩 1e-6 等級的殘差（|Z| 越大越大），深一點的素材整圈切穿會被當成還有料。
+    //    1e-6 是浮點容差；skinMm 讓「現場留 0.3 薄皮再敲掉」的程式也能判成切斷。
+    const floor32 = Math.fround(sim.floorZ);
+    const thr = Math.max(s.skinMm, 1e-6);
+    const solid = new Uint8Array(n);
+    let hasFixture = false;
+    for (let i = 0; i < n; i++) {
+      if (fix && fix[i]) { hasFixture = true; continue; }
+      if (h[i] - floor32 > thr) solid[i] = 1;
+    }
+
+    // 2. 細橋：侵蝕 k 次。橋從兩側各被吃掉 k 格，寬 ≤ 2k 格的連接就斷 → k = round(bridgeMm / (2·cell))。
+    //    格網外面當成沒料（素材邊緣本來就是空氣），所以貼著素材邊的橋只從一側被吃、等於算寬了一倍——
+    //    可接受：使用者調 bridgeMm 本來就是「大概」，猜錯了點記號更快。
+    //    每一輪都掃整張圖：bridgeMm 在 normalizeScrap 夾到 SCRAP_MAX.bridgeMm，但格距細時 k 仍可上百；
+    //    素材比 2k 格還窄的話幾輪就吃光了，之後每輪都在掃全 0 的圖——數一下剩幾格、0 就停。
+    const k = Math.round(s.bridgeMm / (2 * cellX));
+    let core = solid;
+    if (k > 0) {
+      const bufA = new Uint8Array(n), bufB = new Uint8Array(n);
+      let src = solid, dst = bufA;
+      for (let it = 0; it < k; it++) {
+        let left = 0;
+        for (let iy = 0; iy < ny; iy++) {
+          for (let ix = 0; ix < nx; ix++) {
+            const i = iy * nx + ix;
+            const v = (src[i]
+              && ix > 0 && src[i - 1] && ix < nx - 1 && src[i + 1]
+              && iy > 0 && src[i - nx] && iy < ny - 1 && src[i + nx]) ? 1 : 0;
+            dst[i] = v; left += v;
+          }
+        }
+        src = dst; dst = (src === bufA) ? bufB : bufA;   // 第一輪的來源是 solid（第 4 步還要用），不能寫回去
+        if (left === 0) break;   // 整張吃光了，再侵蝕也是 0
+      }
+      core = src;
+    }
+
+    // 3. 四鄰 flood fill 標號。自己的堆疊：每格最多進去一次（進去時就標號），所以 n 個位子夠。
+    //    fill(grid)：grid 裡是 1 且還沒標號的格，每個連通區域給一個新號。先對 core 跑；第 4b 步再對 solid 跑一次。
+    const labels = new Int32Array(n);
+    const stack = new Int32Array(n);
+    let nLabels = 0;
+    const fill = (grid) => {
+      for (let seed = 0; seed < n; seed++) {
+        if (!grid[seed] || labels[seed]) continue;
+        const lab = ++nLabels;
+        let sp = 0;
+        labels[seed] = lab; stack[sp++] = seed;
+        while (sp > 0) {
+          const i = stack[--sp];
+          const ix = i % nx;
+          const l = i - 1, r = i + 1, u = i - nx, d = i + nx;
+          if (ix > 0 && grid[l] && !labels[l]) { labels[l] = lab; stack[sp++] = l; }
+          if (ix < nx - 1 && grid[r] && !labels[r]) { labels[r] = lab; stack[sp++] = r; }
+          if (u >= 0 && grid[u] && !labels[u]) { labels[u] = lab; stack[sp++] = u; }
+          if (d < n && grid[d] && !labels[d]) { labels[d] = lab; stack[sp++] = d; }
+        }
+      }
+    };
+    fill(core);
+
+    // 4. 侵蝕掉的格長回來：從已標號的格做多源 BFS，只走 solid 格，先到先得＝離哪塊近就跟誰。
+    //    橋因此會從中間分給兩邊（不是 0）。
+    if (k > 0) {
+      const queue = stack;   // flood fill 做完了，重用這塊記憶體
+      let head = 0, tail = 0;
+      for (let i = 0; i < n; i++) if (labels[i]) queue[tail++] = i;
+      while (head < tail) {
+        const i = queue[head++];
+        const lab = labels[i];
+        const ix = i % nx;
+        const l = i - 1, r = i + 1, u = i - nx, d = i + nx;
+        if (ix > 0 && solid[l] && !labels[l]) { labels[l] = lab; queue[tail++] = l; }
+        if (ix < nx - 1 && solid[r] && !labels[r]) { labels[r] = lab; queue[tail++] = r; }
+        if (u >= 0 && solid[u] && !labels[u]) { labels[u] = lab; queue[tail++] = u; }
+        if (d < n && solid[d] && !labels[d]) { labels[d] = lab; queue[tail++] = d; }
+      }
+      // 4b. 長回來之後仍是 solid 但沒標號的格：那一塊每個方向都 ≤ 2k 格、核心整個被吃光，
+      //     旁邊又沒有塊可以長過來（被切穿的溝圍住的孤立小塊，或整張素材都比 2k 格窄）。
+      //     維持 0 的話它既不是工件也不是廢料、畫成一般材料，面積遠大於 minAreaMm2 也一樣——
+      //     使用者看到的是一塊「沒被判定」的料，什麼都不會提示。所以再對 solid 標號一次、把它們當成獨立的塊，
+      //     之後照常過 minAreaMm2 與分類（多半會成為廢料）。這一步之後每個 solid 格都有標號：
+      //     「細橋」只改變塊怎麼切，不會讓任何實料格消失。
+      fill(solid);
+    }
+
+    // 5. 每塊統計。bbox 用格中心的工件座標（跟 heightAt 的節點式格網一致，不外擴半格）。
+    const cnt = new Int32Array(nLabels + 1);
+    const bx0 = new Int32Array(nLabels + 1).fill(nx), bx1 = new Int32Array(nLabels + 1).fill(-1);
+    const by0 = new Int32Array(nLabels + 1).fill(ny), by1 = new Int32Array(nLabels + 1).fill(-1);
+    const zlo = new Float64Array(nLabels + 1).fill(Infinity), zhi = new Float64Array(nLabels + 1).fill(-Infinity);
+    const touch = new Uint8Array(nLabels + 1);
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const i = iy * nx + ix;
+        const lab = labels[i];
+        if (!lab) continue;
+        cnt[lab]++;
+        if (ix < bx0[lab]) bx0[lab] = ix;
+        if (ix > bx1[lab]) bx1[lab] = ix;
+        if (iy < by0[lab]) by0[lab] = iy;
+        if (iy > by1[lab]) by1[lab] = iy;
+        const z = h[i];
+        if (z < zlo[lab]) zlo[lab] = z;
+        if (z > zhi[lab]) zhi[lab] = z;
+        if (fix && !touch[lab]
+          && ((ix > 0 && fix[i - 1]) || (ix < nx - 1 && fix[i + 1]) || (iy > 0 && fix[i - nx]) || (iy < ny - 1 && fix[i + nx]))) touch[lab] = 1;
+      }
+    }
+
+    // 6. 太小的塊不分類：格改回 0、清單不列。剩下的重新編成 1..N（chunks[i].label === i + 1），
+    //    下游做 scrapByLabel 之類的查表才不用管編號有洞。
+    const areaCell = cellX * cellY;
+    const remap = new Int32Array(nLabels + 1);
+    const list = [];
+    for (let lab = 1; lab <= nLabels; lab++) {
+      const areaMm2 = cnt[lab] * areaCell;
+      if (areaMm2 < s.minAreaMm2) continue;
+      const label = list.length + 1;
+      remap[lab] = label;
+      list.push({
+        label, cells: cnt[lab], areaMm2,
+        bbox: {
+          x0: sim.origin.x + bx0[lab] * cellX, y0: sim.origin.y + by0[lab] * cellY,
+          x1: sim.origin.x + bx1[lab] * cellX, y1: sim.origin.y + by1[lab] * cellY,
+        },
+        zMin: zlo[lab], zMax: zhi[lab],
+        part: false, touchesFixture: touch[lab] === 1, why: 'other',
+      });
+    }
+    if (list.length !== nLabels) for (let i = 0; i < n; i++) if (labels[i]) labels[i] = remap[labels[i]];
+    const L = list.length;
+
+    // 7. 分類。先看記號落在哪一塊（落在空氣／夾具／太小的塊上的記號沒有作用）。
+    const partMark = new Uint8Array(L + 1), scrapMark = new Uint8Array(L + 1);
+    let anyPart = false, anyScrap = false;
+    for (const m of s.marks) {
+      const idx = cellIndex(sim, m.x, m.y);
+      const lab = idx < 0 ? 0 : labels[idx];
+      if (!lab) continue;
+      if (m.kind === 'part') { partMark[lab] = 1; anyPart = true; } else { scrapMark[lab] = 1; anyScrap = true; }
+    }
+    // 原點與最大塊都只在「沒被 ✕ 的塊」裡挑：使用者在猜錯的那塊點了 ✕，下一個候選要自動補上，
+    // 否則 auto 下 ✕ 了原點那塊之後會變成一塊工件都沒有，等於要使用者再點一次 ⊙。
+    const oi = cellIndex(sim, 0, 0);
+    let originLabel = oi < 0 ? 0 : labels[oi];
+    if (originLabel && scrapMark[originLabel]) originLabel = 0;
+    let largest = null;
+    for (const c of list) if (!scrapMark[c.label] && (!largest || c.cells > largest.cells)) largest = c;   // 同大 → 編號小的
+    const largestLabel = largest ? largest.label : 0;
+    const anyTouch = list.some((c) => c.touchesFixture && !scrapMark[c.label]);
+
+    let mode = s.anchor;
+    if (mode === 'fixture' && !anyTouch) mode = 'auto';            // 一塊也沒碰到夾具（或根本沒夾具）→ 退回 auto
+    if (mode === 'marks' && !anyPart && !anyScrap) mode = 'auto';  // 完全沒有落在塊上的記號 → 退回 auto
+    const baseLabel = originLabel || largestLabel;
+    const baseWhy = originLabel ? 'origin' : 'largest';
+    for (const c of list) {
+      // 記號在每一種 anchor 下都優先；同一塊兩種都有 → ⊙ 贏（使用者最後多半是想留它）
+      if (partMark[c.label]) { c.part = true; c.why = 'mark'; continue; }
+      if (scrapMark[c.label]) { c.part = false; c.why = 'scrapMark'; continue; }
+      switch (mode) {
+        case 'largest': c.part = c.label === largestLabel; c.why = c.part ? 'largest' : 'other'; break;
+        case 'fixture': c.part = c.touchesFixture; c.why = c.part ? 'fixture' : 'other'; break;
+        // 有任何 ⊙ → 沒標的都是廢料；只有 ✕ → 沒標的都是工件
+        case 'marks': c.part = !anyPart; c.why = 'unmarked'; break;
+        default: c.part = c.label === baseLabel; c.why = c.part ? baseWhy : 'other';   // auto／origin
+      }
+    }
+
+    // 8. 彙總。partTouchesFixture 在「沒有夾具格」與「一塊工件都沒有」時都是 null：
+    //    後者（例如每一塊都被 ✕ 掉）回 false 的話 UI 會警告「工件沒碰到夾具，切斷後會掉落」，可是根本沒有工件。
+    let partCount = 0, scrapCount = 0, scrapAreaMm2 = 0, partTouches = false;
+    for (const c of list) {
+      if (c.part) { partCount++; if (c.touchesFixture) partTouches = true; } else { scrapCount++; scrapAreaMm2 += c.areaMm2; }
+    }
+    return {
+      supported: true, labels, chunks: list, partCount, scrapCount, scrapAreaMm2,
+      partTouchesFixture: (hasFixture && partCount > 0) ? partTouches : null,
+      hasFixture,
+    };
+  }
+
+  /**
+   * 依分類導出給 3D 用的高度陣列（不改原陣列）。
+   *   which 'part'  → 廢料格壓到 floorZ、其餘照抄：主 mesh 只畫工件（「隱藏」模式就是它）
+   *   which 'scrap' → 非廢料格全部壓到 floorZ、廢料格照抄：另一份 mesh 當廢料層淡橘疊上去
+   * labels 為 null（不支援）時 'part' 就是照抄、'scrap' 全是 floorZ——呼叫端不用另外判。
+   * @param {Float32Array} heightArr
+   * @param {Int32Array|null} labels
+   * @param {Chunk[]} chunks
+   * @param {number} floorZ
+   * @param {'part'|'scrap'} which
+   * @returns {Float32Array}
+   */
+  function chunkHeights(heightArr, labels, chunks, floorZ, which) {
+    const n = heightArr.length;
+    const out = new Float32Array(n);
+    const list = Array.isArray(chunks) ? chunks : [];
+    let maxLabel = 0;
+    for (const c of list) if (c.label > maxLabel) maxLabel = c.label;
+    const isScrap = new Uint8Array(maxLabel + 1);
+    for (const c of list) if (!c.part && c.label > 0) isScrap[c.label] = 1;
+    const hasLabels = !!labels && labels.length === n;
+    if (which === 'scrap') {
+      out.fill(floorZ);
+      if (hasLabels) for (let i = 0; i < n; i++) { const l = labels[i]; if (l && isScrap[l]) out[i] = heightArr[i]; }
+    } else {
+      out.set(heightArr);
+      if (hasLabels) for (let i = 0; i < n; i++) { const l = labels[i]; if (l && isScrap[l]) out[i] = floorZ; }
+    }
+    return out;
+  }
+
   NC.sim = {
     create, run, profileFor, selectSegments, heightAt, cellIndex, segLength,
     spansOf, matchSpans, cylSection, cylSectionY,
+    // 廢料判定
+    defaultScrap, normalizeScrap, chunks, chunkHeights, SCRAP_ANCHORS, SCRAP_MAX,
   };
 })(globalThis.NC = globalThis.NC || {});

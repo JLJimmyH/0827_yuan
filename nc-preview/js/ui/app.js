@@ -10,6 +10,19 @@
  *   5. 刀具表 CSV 匯出／匯入（拿給現場用 Excel 填），刀庫設定（機台層級，key = ncPreview.machine）
  *   6. 版面：左欄 Project 子頁（程式／素材／刀具表／刀庫／機台，整欄全高）＝在這裡「改」；
  *      右欄下方的狀態條（總覽／游標行／作業摘要／錯誤清單＋Project 徽章）＝在這裡「看」。兩條分隔線可拖。
+ *   7. 廢料判定（切穿之後跟工件分開的料）的資料流：
+ *      state.scrap（設定，跟素材一起存 STOCK_KEY）＋「目前畫面上那份高度陣列」（最終或某個快照）
+ *      → chunksFor()（NC.sim.chunks，依陣列快取）→ ChunkResult
+ *      → 視圖 setChunks(result, mode)（mode 來自工具列 #selScrap，存 viewPref.scrapMode）
+ *      → 素材子頁「目前結果」那行、總覽素材列的「廢料 N 塊」。
+ *      設定在素材子頁改（onScrapChange，不走 commit，不會把推估素材翻成手動）、顯示開關留在視圖工具列——
+ *      「設定跟顯示分開」。記號（⊙ 工件／✕ 廢料）由視圖 onMark 或素材子頁的迷你預覽點出來，
+ *      都塞進 state.scrap.marks 再走同一條路重算。
+ *      素材子頁只在素材本身變了才整片重畫；分塊結果回來走 stockPanel.setScrapResult、標記模式切換走
+ *      stockPanel.setMarkMode——使用者打到一半的數字不會被洗掉、輸入框不失焦。
+ *   8. 素材的來源 state.stockOrigin：'user'（使用者設的，存 localStorage、換 O 號跟著搬）、
+ *      'sample'（範例附帶的側車素材，不寫 localStorage、換 O 號不搬）、null（推估）。
+ *      對範例按「回到推估」會在 localStorage 留 { estimated: true } 標記，下次載入才不會又套回側車素材。
  *
  * 對 analyze.js / rules.js 尚未載入的情況要容錯：
  *   NC.analyzeSync / NC.analyze 不存在時，本檔自己串 tokenize → interpret → buildSegments（→ sim）。
@@ -29,9 +42,14 @@
   // 第四軸的裝夾參數（迴轉中心、工件直徑）**跟著程式走**，不是機台設定：
   // 現場說「Z 高度不一定，會依案子調整」，放進機台設定的話換一支程式就帶著上一支的值。
   const ROTARY_KEY = 'ncPreview.rotary.v1';
-  // 素材（spec＋夾具）也跟著程式走。只存 spec，min/max 每次由 spec 重算——
+  // 素材（spec＋夾具＋廢料判定設定）也跟著程式走。只存 spec，min/max 每次由 spec 重算——
   // 存包絡盒的話改天改了換算規則，舊資料就跟新規則對不起來。
+  // 項目長相：{ spec?, fixtures?, scrap? }；scrap 是預設值就不寫（loadStock 只看 spec，不受影響）。
   const STOCK_KEY = 'ncPreview.stock.v1';
+  // 廢料的顯示方式（視圖工具列 #selScrap）。預設「標示」不「隱藏」：一料多件的程式
+  // 「工件」不只一塊，隱藏會把真正要的零件藏掉；標示錯了至少看得到、點一下就能改。
+  const SCRAP_MODES = ['off', 'mark', 'hide'];
+  const SCRAP_ANCHORS = ['auto', 'origin', 'largest', 'fixture', 'marks'];
 
   /** 數字顯示（panels.logic.fmt 修掉了 NC.util.fmt 的去尾 0 問題，優先用它）。 */
   const fmt = (NC.ui.panels && NC.ui.panels.logic && NC.ui.panels.logic.fmt)
@@ -124,6 +142,73 @@
     get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
     set(key, val) { try { localStorage.setItem(key, val); return true; } catch (e) { return false; } },
   };
+
+  const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+  // ---------------------------------------------------------------------------
+  // 廢料判定的設定（Scrap，CONTRACT §5）
+  //
+  // 預設值與正規化以 simulation.js 的 NC.sim.defaultScrap／normalizeScrap 為準；
+  // 這裡留一份同義的退路，是因為 app 跟 simulation 分兩個 commit 進——
+  // 舊的 simulation.js 配新的 app.js 時，localStorage 裡存的 scrap 還是得讀得回來、存得進去。
+  // ---------------------------------------------------------------------------
+  function defaultScrap() {
+    if (NC.sim && typeof NC.sim.defaultScrap === 'function') return NC.sim.defaultScrap();
+    return { anchor: 'auto', marks: [], skinMm: 0, bridgeMm: 0, minAreaMm2: 2 };
+  }
+  function normalizeScrap(o) {
+    if (NC.sim && typeof NC.sim.normalizeScrap === 'function') return NC.sim.normalizeScrap(o);
+    const d = defaultScrap();
+    o = (o && typeof o === 'object') ? o : {};
+    // 門檻都是「毫米」或「平方毫米」，負的沒有意義 → 夾到 0；不是數字就回預設
+    const nonNeg = (v, dflt) => { v = Number(v); return Number.isFinite(v) ? Math.max(0, v) : dflt; };
+    const marks = Array.isArray(o.marks)
+      ? o.marks
+        .filter((m) => m && Number.isFinite(Number(m.x)) && Number.isFinite(Number(m.y)))
+        .map((m) => ({ x: Number(m.x), y: Number(m.y), kind: m.kind === 'scrap' ? 'scrap' : 'part' }))
+      : [];
+    return {
+      anchor: SCRAP_ANCHORS.indexOf(o.anchor) >= 0 ? o.anchor : d.anchor,
+      marks,
+      skinMm: nonNeg(o.skinMm, d.skinMm),
+      bridgeMm: nonNeg(o.bridgeMm, d.bridgeMm),
+      minAreaMm2: nonNeg(o.minAreaMm2, d.minAreaMm2),
+    };
+  }
+  /** 設定的指紋：快取鍵、以及「跟預設一不一樣」都用它比（同一個 normalize 出來的欄位順序一致，字串可直接比） */
+  function scrapKey(s) { return JSON.stringify(normalizeScrap(s)); }
+  function isDefaultScrap(s) { return scrapKey(s) === scrapKey(defaultScrap()); }
+  function normalizeScrapMode(m) { return SCRAP_MODES.indexOf(m) >= 0 ? m : 'mark'; }
+  /** 記號要落在素材的 XY 範圍內（含邊）。正本是 panels.logic.markInStock；面板還沒載入時用同義的退路。 */
+  function markInStock(stock, x, y) {
+    const L = NC.ui.panels && NC.ui.panels.logic;
+    if (L && typeof L.markInStock === 'function') return L.markInStock(stock, x, y);
+    if (!stock || !stock.min || !stock.max || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const e = 1e-6;
+    return x >= stock.min.x - e && x <= stock.max.x + e && y >= stock.min.y - e && y <= stock.max.y + e;
+  }
+  /** 記號座標取到 0.01 mm：列表與 localStorage 才不會是一長串小數（迷你預覽點出來的也是這個精度） */
+  function roundMark(v) { return Math.round(v * 100) / 100; }
+  /** 點到素材外面時的提示（素材子頁的迷你預覽用同一句：panels.logic.MARK_OUT_OF_STOCK） */
+  const MARK_OUT_OF_STOCK = '記號要點在素材範圍內';
+  /**
+   * 素材要存進 localStorage 的項目（STOCK_KEY 底下 programKey 那一格）。純函式，方便測。
+   *   stock 帶 spec 且 stockOrigin === 'user'  → { spec, fixtures }（範例附帶的 'sample' 不寫：沒動過的範例不留痕跡）
+   *   否則 sampleDeclined                      → { estimated: true }（範例附了素材、使用者按了「回到推估」）
+   *   scrap 非預設                             → 加 scrap
+   * 什麼都沒有 → null（呼叫端把整格刪掉）
+   */
+  function stockItemOf(o) {
+    const item = {};
+    if (o.stock && o.stock.spec && o.stockOrigin === 'user') {
+      item.spec = o.stock.spec;
+      item.fixtures = o.stock.fixtures || [];
+    } else if (o.sampleDeclined) {
+      item.estimated = true;
+    }
+    if (o.scrap && !isDefaultScrap(o.scrap)) item.scrap = normalizeScrap(o.scrap);
+    return (item.spec || item.estimated || item.scrap) ? item : null;
+  }
 
   // ---------------------------------------------------------------------------
   // 分析：優先用 NC.analyze / NC.analyzeSync，沒有就自己串
@@ -254,6 +339,7 @@
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
       rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'),
       chkRapid: $('chkRapid'), chkFeed: $('chkFeed'), chkStock: $('chkStock'),
+      selScrap: $('selScrap'),   // 廢料顯示 off|mark|hide（index.html 可能還沒加，用到都要守衛）
       toolFilter: $('toolFilter'),
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
@@ -273,6 +359,8 @@
       cell: 0.5,
       userTable: null,   // 使用者編輯過的刀具表（會存 localStorage）
       stock: null,       // null = 用推估；手動值帶 spec，跟著程式存 localStorage（STOCK_KEY）
+      stockOrigin: null, // 'user'（使用者設的）| 'sample'（範例附帶，不存、不搬）| null（推估）
+      sampleDeclined: false,   // 這支範例附了素材、但使用者按過「回到推估」（localStorage 的 estimated 標記）
       result: null,
       hiddenTools: new Set(),
       tableSaved: true,   // 刀具表最後一次寫入 localStorage 是否成功
@@ -284,9 +372,13 @@
       simCache: {},        // 上一輪完整分析的 SimResult（依情境），編輯途中沿用免得成品圖整片消失
       simStale: false,     // 目前畫面上的 heightmap 是不是上一輪的（HUD 會標「更新中」）
       rotary: null,        // 第四軸裝夾參數（跟著程式走，見 ROTARY_KEY）；null = 用推估值
+      scrap: defaultScrap(),   // 廢料判定設定（跟著程式走，存在 STOCK_KEY 的項目裡）
+      markMode: null,          // 'part' | 'scrap' | null：正在等使用者到圖上點哪一塊
+      chunkResult: null,       // 目前畫面那份高度陣列的 ChunkResult（總覽素材列與素材子頁都讀它）
       // 視圖版面偏好（機台層級，跟著 SETTINGS_KEY 一起存）。ratio = 並排時左邊 2D 佔的比例；
-      // leftRatio = 左欄 Project 佔的寬度比例、statusRatio = 下方狀態條佔的高度比例。
-      viewPref: { split: true, clip: true, clipFlip: false, ratio: 0.5, leftRatio: 0.5, statusRatio: 0.3 },
+      // leftRatio = 左欄 Project 佔的寬度比例、statusRatio = 下方狀態條佔的高度比例；
+      // scrapMode = 廢料顯示 off|mark|hide（是「怎麼看」不是「怎麼判」，所以跟版面偏好放一起，不跟程式走）。
+      viewPref: { split: true, clip: true, clipFlip: false, ratio: 0.5, leftRatio: 0.5, statusRatio: 0.3, scrapMode: 'mark' },
     };
 
     /** 手機版（窄螢幕）判定。800px 這個門檻和 app.css 的 @media 是同一份，要一起改。 */
@@ -311,6 +403,7 @@
           if (v.ratio > 0.15 && v.ratio < 0.85) state.viewPref.ratio = Number(v.ratio);
           if (v.leftRatio > 0.25 && v.leftRatio < 0.8) state.viewPref.leftRatio = Number(v.leftRatio);
           if (v.statusRatio > 0.1 && v.statusRatio < 0.7) state.viewPref.statusRatio = Number(v.statusRatio);
+          if (SCRAP_MODES.indexOf(v.scrapMode) >= 0) state.viewPref.scrapMode = v.scrapMode;
         }
       } catch (e) { /* 壞掉就用預設 */ }
     })();
@@ -334,34 +427,66 @@
       all[state.programKey] = state.rotary;
       store.set(ROTARY_KEY, JSON.stringify(all));
     }
-    /** 這支程式存過的素材（沒有、或存的資料壞掉就 null＝用推估） */
-    function loadStock(key) {
-      if (!key || !NC.analysis || typeof NC.analysis.stockFromSpec !== 'function') return null;
+    /** localStorage 裡這支程式的素材項目（原樣；沒有就 null）。長相 { spec?, fixtures?, scrap?, estimated? }，各讀各的欄位。 */
+    function storedStockItem(key) {
+      if (!key) return null;
       try {
         const all = JSON.parse(store.get(STOCK_KEY) || '{}');
         const o = all && all[key];
-        if (!o || !o.spec) return null;
-        return NC.analysis.stockFromSpec(o.spec, o.fixtures);
+        return (o && typeof o === 'object') ? o : null;
       } catch (e) { return null; }
+    }
+    /** 這支程式存過的素材（沒有、或存的資料壞掉就 null＝用推估）。只看 spec：estimated 標記也走這裡回 null。 */
+    function loadStock(key) {
+      if (!NC.analysis || typeof NC.analysis.stockFromSpec !== 'function') return null;
+      const o = storedStockItem(key);
+      if (!o || !o.spec) return null;
+      try { return NC.analysis.stockFromSpec(o.spec, o.fixtures); } catch (e) { return null; }
+    }
+    /** 這支程式存過的廢料判定設定（沒有、或壞掉就 null＝用預設）。 */
+    function loadScrap(key) {
+      const o = storedStockItem(key);
+      if (!o || !o.scrap || typeof o.scrap !== 'object') return null;
+      return normalizeScrap(o.scrap);
+    }
+    /** 使用者對這支範例按過「回到推估」（persistStock 寫的 estimated 標記）→ 載入時不要再套範例附的素材 */
+    function loadSampleDeclined(key) {
+      const o = storedStockItem(key);
+      return !!(o && o.estimated === true && !o.spec);
     }
     function persistStock() {
       if (!state.programKey) return;
       let all = {};
       try { all = JSON.parse(store.get(STOCK_KEY) || '{}') || {}; } catch (e) { all = {}; }
-      if (state.stock && state.stock.spec) {
-        all[state.programKey] = { spec: state.stock.spec, fixtures: state.stock.fixtures || [] };
+      // 廢料判定設定跟素材住同一個項目。預設值不寫：這樣「推估素材＋沒調過廢料」的程式
+      // 在 localStorage 完全不留痕跡，跟以前一樣；有調過的才存 { scrap }（spec 可以不存在）。
+      // 範例附帶的素材（stockOrigin 'sample'）也不寫——沒動過的範例不留痕跡；
+      // 對範例按了「回到推估」才留 { estimated: true }，不然下次載入又套回來，按了等於沒按。
+      const item = stockItemOf({ stock: state.stock, stockOrigin: state.stockOrigin, sampleDeclined: state.sampleDeclined, scrap: state.scrap });
+      if (item) {
+        all[state.programKey] = item;
       } else {
-        delete all[state.programKey];   // 回到推估＝把存過的手動素材一起忘掉
+        delete all[state.programKey];   // 回到推估＋廢料回預設＝把存過的一起忘掉
       }
       state.stockSaved = store.set(STOCK_KEY, JSON.stringify(all)) !== false;
     }
-    /** 素材搬家（O 號出現、key 換名）時清掉舊 key 的記錄，免得下次空白編輯器又冒出來 */
-    function removeStoredStock(key) {
+    /**
+     * 素材搬家（O 號出現、key 換名）時清掉舊 key 的記錄，免得下次空白編輯器又冒出來。
+     * onlyScrap = true 時只拿掉 scrap 欄位（素材沒搬、只有廢料設定搬家的情況），spec 留著。
+     */
+    function removeStoredStock(key, onlyScrap) {
       if (!key) return;
       let all = {};
       try { all = JSON.parse(store.get(STOCK_KEY) || '{}') || {}; } catch (e) { all = {}; }
       if (!(key in all)) return;
-      delete all[key];
+      if (onlyScrap) {
+        const o = all[key];
+        if (!o || !o.scrap) return;
+        delete o.scrap;
+        if (!o.spec && !o.estimated) delete all[key];   // estimated 標記是那支範例的，留著
+      } else {
+        delete all[key];
+      }
       store.set(STOCK_KEY, JSON.stringify(all));
     }
     /**
@@ -449,11 +574,33 @@
     stockPanel = P.stock(el.stockHost, {
       stock: { min: { x: -50, y: -50, z: -10 }, max: { x: 50, y: 50, z: 0 }, source: 'estimated', fixtures: [] },
       onChange: (s) => {
-        state.stock = s;
+        if (s) {
+          state.stock = s;
+          state.stockOrigin = 'user';   // 改了任何一格（含範例附帶的）就是使用者的，存起來、換 O 號跟著搬
+        } else {
+          // 「回到推估」。退掉的是範例附帶的素材要記住（persistStock 寫 estimated 標記），
+          // 不然下次載入這支範例又套回來，按了等於沒按
+          if (state.stockOrigin === 'sample') state.sampleDeclined = true;
+          state.stock = null;
+          state.stockOrigin = null;
+        }
         persistStock();
         syncRotaryFromStock(s);
         refresh();
       },
+      // 廢料判定：設定改了不必重新模擬（高度圖沒變），只重算分塊、重餵視圖——
+      // 走 refresh() 的話等於每改一格數字就重跑 1 秒模擬
+      scrap: state.scrap,
+      scrapResult: null,
+      markMode: null,
+      mobile: isMobileLayout(),   // 手機版右邊沒有視圖，記號提示只指向迷你預覽
+      stockOrigin: null,
+      onScrapChange: (s) => {
+        state.scrap = normalizeScrap(s);
+        persistStock();
+        applyChunks();   // 設定是面板自己改的、面板已經是新值：只把結果那三行換掉，不整片重畫
+      },
+      onMarkMode: (kind) => setMarkMode(kind),
     });
     // 狀態條的「總覽」與分頁列右端的徽章是同一份資料（buildOverviewRows），點了都跳到對應的 Project 子頁
     overviewPanel = P.overview(el.tabOverview, { rows: [], onOpen: (key) => openProjectPage(key) });
@@ -619,7 +766,11 @@
         magPanel.update({ toolTable: { programKey: '', tools: [], offsets: [], updatedAt: '' }, usedTools: [] });
         diagPanel.update({ items: [] });
         opsPanel.update({ ops: [], toolTable: null, time: null });
-        stockPanel.update({ stock: state.stock || null, rotaryUsed: false });
+        // 沒有程式就沒有高度圖，廢料判定跟著清掉（設定留著，先設素材的流程也可以先調廢料）
+        shown.sim = null;
+        shown.index = null;
+        applyChunks({ quiet: true });
+        stockPanel.update({ stock: state.stock || null, rotaryUsed: false, stockOrigin: state.stockOrigin, scrap: state.scrap, scrapResult: null, markMode: state.markMode });
         modalPanel.update(null, null);
         renderMiniModal(0, null);
         renderOverview(null, null, false);
@@ -711,16 +862,33 @@
         state.programKey = key;
         state.rotary = loadRotary(key);
         const savedStock = loadStock(key);
+        const savedScrap = loadScrap(key);
+        state.sampleDeclined = loadSampleDeclined(key);
+        let moveStock = false, moveScrap = false;
         if (savedStock) {
           state.stock = savedStock;
-        } else if (state.stock && state.stock.spec) {
+          state.stockOrigin = 'user';
+        } else if (state.stock && state.stock.spec && state.stockOrigin === 'user') {
           // 先設素材、後寫程式：打字打到 O 號出現時 key 才會變，
           // 剛設好的素材要跟著搬到新 key，不能被「新 key 沒存過」洗成 null
-          removeStoredStock(prevKey);
-          persistStock();
+          moveStock = true;
         } else {
+          // 沒存過就推估。範例附帶的素材（'sample'）不跟著搬：那是範例的，改了 O 號就不是那支範例了
           state.stock = null;
+          state.stockOrigin = null;
         }
+        // 廢料判定設定比照素材：新 key 存過就用存的；沒存過但目前調過 → 跟著搬；否則回預設
+        if (savedScrap) {
+          state.scrap = savedScrap;
+        } else if (!isDefaultScrap(state.scrap)) {
+          moveScrap = true;
+        } else {
+          state.scrap = defaultScrap();
+        }
+        // 素材搬家時整個項目一起搬；只有廢料設定搬家時舊 key 的 spec 要留著（那可能是另一支程式的）
+        if (moveStock) removeStoredStock(prevKey);
+        else if (moveScrap) removeStoredStock(prevKey, true);
+        if (moveStock || moveScrap) persistStock();
         const saved = NC.tools.load(key);
         // saved 是 null 時一定要把舊程式的手填刀具表清掉，否則 O1004 的 Ø49.5
         // 會跟著跑到 O0999，而且下次存檔會把這份錯的資料存進新的 key。
@@ -762,17 +930,25 @@
       };
       eachView((v) => v.setData(viewData));
       if (view3d) view3dFresh = false;   // eachView 已經餵過了，applyViewLayout 不必再重建一次
+      // 視圖 setData 之後顯示的是最終高度；快照由下面的 syncSnapshotSlider → applySnapshot 再改 shown.index
+      shown.sim = simForView;
+      shown.index = null;
       syncRotaryUI(run);
       syncSectionRange(res.stock);
       syncSnapshotSlider(simForView, run.ops, state.simStale);
       renderToolFilter(res.toolTable, sr.geometry.segments);
       applyVisible();
+      // 廢料判定：畫面上那份高度陣列定了才能算。quiet＝面板與總覽由下面自己更新，不要各畫兩次
+      const chunkResult = applyChunks({ quiet: true });
 
       // ---- 面板 ----
       toolsPanel.update({ table: res.toolTable, ops: run.ops });
       diagPanel.update({ items: res.diagnostics });
       opsPanel.update({ ops: run.ops, toolTable: res.toolTable, time: sr.sim ? sr.sim.time : null });
-      stockPanel.update({ stock: res.stock, rotaryUsed: !!rotaryOptOf(run) });
+      stockPanel.update({
+        stock: res.stock, rotaryUsed: !!rotaryOptOf(run), stockOrigin: state.stockOrigin,
+        scrap: state.scrap, scrapResult: withFirstScrap(chunkResult), markMode: state.markMode, mobile: isMobileLayout(),
+      });
       settingsPanel.update({
         settings: Object.assign({}, state.settings, { rotary: effectiveRotary() }),
         scenario: state.scenario, cell: state.cell, rotaryUsed: !!rotaryOptOf(run),
@@ -952,7 +1128,7 @@
         const s = state.stock;
         rows.push({ key: 'program', label: '程式', level: 'muted', text: '尚未載入程式。按「開檔…」、選範例，或直接開始寫', short: '未載入', go: '編輯 ›' });
         rows.push(s
-          ? { key: 'stock', label: '素材', level: 'ok', text: '手動指定 ' + L.stockSummaryText(s), short: '手動' }
+          ? { key: 'stock', label: '素材', level: 'ok', text: stockOriginLabel() + ' ' + L.stockSummaryText(s), short: stockOriginShort() }
           : { key: 'stock', label: '素材', level: 'muted', text: '尚未設定。可以先把素材設好、再開始寫程式，素材會跟著這支程式存', short: '未設' });
         return rows;
       }
@@ -978,15 +1154,15 @@
         if (!st) {
           rows.push({ key: 'stock', label: '素材', level: 'muted', text: '尚未設定', short: '未設' });
         } else if (est) {
-          rows.push({
+          rows.push(decorateStockRow({
             key: 'stock', label: '素材', level: 'warn',
             text: `由程式推估 ${stockSizeText(st)}${k > 0 ? `，${k} 筆判定依此` : ''}`, short: '推估',
             detail: st.kind === 'cylinder'
               ? '第四軸圓棒的直徑是「取切削段離軸心最遠的距離」猜的，不是量出來的；填實際直徑，成品圖與切深才會準。'
               : '推估素材是「用切削範圍往外擴一個刀半徑」猜的，不是真的毛胚；填入真實尺寸，這些判定會重算。',
-          });
+          }));
         } else {
-          rows.push({ key: 'stock', label: '素材', level: 'ok', text: '手動指定 ' + L.stockSummaryText(st), short: '手動' });
+          rows.push(decorateStockRow({ key: 'stock', label: '素材', level: 'ok', text: stockOriginLabel() + ' ' + L.stockSummaryText(st), short: stockOriginShort() }));
         }
       }
 
@@ -1052,10 +1228,38 @@
       return rows;
     }
 
+    /** 總覽素材列的開頭：手動設的寫「手動指定」，範例附帶的寫「範例附帶」（徽章的短字也跟著分） */
+    function stockOriginLabel() { return state.stockOrigin === 'sample' ? '範例附帶' : '手動指定'; }
+    function stockOriginShort() { return state.stockOrigin === 'sample' ? '範例' : '手動'; }
+
+    /**
+     * 素材那列補上廢料判定的結果。切穿之後有料跟工件分開，現場最想知道的是「哪幾塊會掉」——
+     * 這比素材是推估還是手動更急，所以有廢料時這列至少提到琥珀色；工件沒碰到夾具再多提一句。
+     * 說明不提顏色：廢料顯示切到「隱藏」或「照舊」時視圖裡沒有橘色，寫了反而讓人找不到。
+     */
+    function decorateStockRow(row) {
+      const cr = state.chunkResult;
+      if (!cr || !cr.supported || !(cr.scrapCount > 0)) return row;
+      row.text += ` · 廢料 ${cr.scrapCount} 塊`;
+      if (row.level === 'ok' || row.level === 'muted') row.level = 'warn';
+      const lines = [`切穿之後有 ${cr.scrapCount} 塊料跟工件分開，合計 ${fmt(cr.scrapAreaMm2, 0)} mm²；顯示方式在視圖工具列「廢料」下拉。`];
+      // 掉落警告要先有工件：唯一一塊被點成 ✕ 時沒有「工件」可言（核心會給 null，這裡也守一次）
+      if (cr.partCount > 0 && cr.partTouchesFixture === false && cr.hasFixture) lines.push('工件沒有碰到夾具，切斷後會掉落。');
+      lines.push('判定方式在「素材」子頁的「廢料判定」調整；猜錯了在圖上點一下標記。');
+      row.detail = (row.detail ? row.detail + '\n' : '') + lines.join('\n');
+      return row;
+    }
+
+    // 最近一次 renderOverview 的參數：廢料判定變了（設定、記號、快照）要重畫總覽，但分析結果沒變
+    let overviewArgs = null;
     function renderOverview(res, run, hasSim) {
+      overviewArgs = { res, run, hasSim };
       const rows = buildOverviewRows(res, run, hasSim);
       overviewPanel.update({ rows });
       chipsPanel.update({ rows: rows.filter((r) => r.key !== 'program') });
+    }
+    function rerenderOverview() {
+      if (overviewArgs) renderOverview(overviewArgs.res, overviewArgs.run, overviewArgs.hasSim);
     }
 
     /**
@@ -1213,10 +1417,12 @@
       const note = (stale == null ? state.simStale : stale) ? '（更新中）' : '';
       if (v >= snaps.length) {
         eachView((vw) => vw.setSnapshot(null));
+        shown.index = null;
         el.snapVal.textContent = `最終（${snapshotOpCount || snaps.length} 把）` + note;
         return;
       }
       eachView((vw) => vw.setSnapshot(v));
+      shown.index = v;   // 廢料判定要算「畫面上那一份」，不是最終那份
       // 作業數超過快照預算時 simulation 只存部分快照，所以序號要看 afterOpIndex，不能用陣列索引。
       const s = snaps[v];
       const opNo = (s && s.afterOpIndex != null ? s.afterOpIndex : v) + 1;
@@ -1282,6 +1488,152 @@
         tools,
       };
       eachView((v) => v.setVisible(vis));
+    }
+
+    // -------------------------------------------------------------------------
+    // 廢料判定（切穿之後跟工件分開的料；CONTRACT §5 chunks／§8 setChunks）
+    //
+    // 判定是對「畫面上那份高度陣列」算的：拉到第 3 把刀之後就算第 3 把刀之後的分塊，
+    // 跟視圖顯示的一致。設定（state.scrap）改了只重算分塊、不重跑模擬——高度圖沒變。
+    // -------------------------------------------------------------------------
+    /** 視圖目前拿到的 SimResult 與快照序號（null＝最終）。跟 view2d/view3d 的 setData／setSnapshot 同步。 */
+    const shown = { sim: null, index: null };
+    function shownHeights() {
+      const sim = shown.sim;
+      if (!sim) return null;
+      const s = (shown.index != null && Array.isArray(sim.snapshots)) ? sim.snapshots[shown.index] : null;
+      return s ? s.height : sim.height;
+    }
+    /**
+     * 目前生效的廢料顯示方式＝工具列 #selScrap 現在選的。網址 scrap= 只設下拉、不碰 viewPref
+     *（只影響這一次瀏覽）；使用者自己動下拉才寫進 viewPref 存成長期偏好。沒有下拉（舊 index.html）就看偏好。
+     */
+    function scrapMode() { return normalizeScrapMode(el.selScrap ? el.selScrap.value : state.viewPref.scrapMode); }
+
+    // 依高度陣列快取分塊結果（鍵＝陣列本身，值帶設定指紋）。拉快照滑桿來回看時不用每次重算；
+    // 上限 8 份：每份 labels 是一張 Int32Array（0.17 M 格≈ 0.7 MB），照快照數無限留會吃掉幾十 MB。
+    const CHUNK_CACHE_MAX = 8;
+    const chunkCache = new Map();
+    function chunksFor(sim, arr) {
+      if (!sim || !arr) return null;
+      // simulation.js 可能還是舊版（分兩個 commit）：沒有 chunks 就當「沒有判定」，其他功能照常
+      if (!NC.sim || typeof NC.sim.chunks !== 'function') return null;
+      const key = scrapKey(state.scrap);
+      const hit = chunkCache.get(arr);
+      if (hit && hit.key === key) {
+        chunkCache.delete(arr);   // Map 保留插入順序：搬到最後＝最近用過，淘汰時先丟最前面的
+        chunkCache.set(arr, hit);
+        return hit.result;
+      }
+      let result = null;
+      try {
+        result = NC.sim.chunks(sim, arr, state.scrap) || null;
+      } catch (e) {
+        console.warn('廢料判定失敗，這一份不標：', e);
+        result = null;
+      }
+      chunkCache.set(arr, { key, result });
+      while (chunkCache.size > CHUNK_CACHE_MAX) chunkCache.delete(chunkCache.keys().next().value);
+      return result;
+    }
+    /** 視圖只吃算得出來的結果；四軸圓棒的 supported:false 對視圖等於「沒有」（面板另外要它來顯示「尚不支援」） */
+    function chunksForView(result) { return (result && result.supported) ? result : null; }
+
+    /**
+     * 對畫面上那份高度陣列算分塊，餵給視圖、素材子頁與總覽。回傳 ChunkResult（或 null）。
+     * opts.quiet：只餵視圖、不動面板與總覽（applyResult 自己會連同其他欄位一次更新，免得各畫兩次）。
+     * opts.panel：'full' = 素材子頁整片更新——設定是 app 這邊改的（視圖上點了記號），面板要拿到新的 marks；
+     *             預設只換「目前結果」那三行（setScrapResult）：設定是面板自己改的、或只是換了快照／顯示方式，
+     *             整片重畫會把使用者打到一半的數字洗掉、輸入框失焦。
+     */
+    function applyChunks(opts) {
+      opts = opts || {};
+      const result = chunksFor(shown.sim, shownHeights());
+      state.chunkResult = result;
+      const mode = scrapMode();
+      // view3d 的 setChunks 可能還沒進來（分兩個 commit），一律守衛
+      eachView((v) => { if (typeof v.setChunks === 'function') v.setChunks(chunksForView(result), mode); });
+      if (typeof view.setMarks === 'function') view.setMarks(state.scrap.marks || []);
+      if (!opts.quiet) {
+        const shownResult = withFirstScrap(result);
+        if (opts.panel === 'full') {
+          stockPanel.update({ scrap: state.scrap, scrapResult: shownResult, markMode: state.markMode, mobile: isMobileLayout(), stockOrigin: state.stockOrigin });
+        } else {
+          stockPanel.setScrapResult(shownResult);
+        }
+        rerenderOverview();
+      }
+      return result;
+    }
+
+    // ---- 「第 K 把刀之後切斷」----
+    // 逐份掃快照找第一份有廢料的。每份要跑一次 chunks（最多 30 ms），大程式一百多份快照
+    // 一口氣掃會卡住畫面幾秒，所以切成 12 ms 的片段排在 setTimeout(0) 裡，掃完再補進素材子頁。
+    // 以 SimResult 為鍵快取（同一份模擬只掃一次；設定改了指紋不同就重掃）。
+    const firstScrapCache = new WeakMap();   // SimResult → { key, text, done }
+    function withFirstScrap(result) {
+      if (!result) return null;
+      return Object.assign({}, result, { firstScrapText: firstScrapTextFor(shown.sim) });
+    }
+    function firstScrapTextFor(sim) {
+      if (!sim || sim.cylinder || !NC.sim || typeof NC.sim.chunks !== 'function') return '';
+      const key = scrapKey(state.scrap);
+      const c = firstScrapCache.get(sim);
+      if (c && c.key === key) return c.done ? c.text : '';
+      // 最終結果都沒有廢料就不必掃：中途曾經分開、最後又被削光的情況少見，而且面板也不會顯示這句
+      const final = chunksFor(sim, sim.height);
+      if (!final || !final.supported || !(final.scrapCount > 0)) {
+        firstScrapCache.set(sim, { key, text: '', done: true });
+        return '';
+      }
+      const entry = { key, text: '', done: false };
+      firstScrapCache.set(sim, entry);
+      scheduleFirstScrapScan(sim, entry);
+      return '';
+    }
+    function scheduleFirstScrapScan(sim, entry) {
+      const snaps = Array.isArray(sim.snapshots) ? sim.snapshots : [];
+      const scrap = state.scrap;   // 掃到一半設定變了 → entry 會被換掉，下面的守衛會停
+      let i = 0;
+      const finish = (afterOp, tool) => {
+        const ops = (overviewArgs && overviewArgs.run && overviewArgs.run.ops) || [];
+        // 沒有任何快照有廢料＝最後一把刀切斷的（最終高度有、快照裡都沒有）
+        const k = afterOp != null ? afterOp + 1 : ops.length;
+        const t = afterOp != null ? tool : (ops.length ? ops[ops.length - 1].tool : null);
+        entry.text = k > 0 ? `第 ${k} 把刀${t != null ? '（T' + t + '）' : ''}之後切斷` : '';
+        entry.done = true;
+        // 這份模擬還在畫面上才補進面板；換掉了就留在快取裡等它回來。
+        // 只換結果那三行——掃完的時候使用者可能正在改門檻，整片重畫會把他打到一半的數字洗掉
+        if (shown.sim === sim && state.chunkResult) {
+          stockPanel.setScrapResult(withFirstScrap(state.chunkResult));
+        }
+      };
+      const step = () => {
+        if (firstScrapCache.get(sim) !== entry || shown.sim !== sim) return;   // 過時了，白掃
+        const t0 = nowMs();
+        while (i < snaps.length) {
+          const s = snaps[i];
+          let r = null;
+          try { r = NC.sim.chunks(sim, s.height, scrap); } catch (e) { r = null; }
+          // 「切斷」＝工件與廢料都有。只看 scrapCount 的話，使用者對唯一的一塊點了 ✕、再拉到切穿之前，
+          // 那一整塊都是廢料（partCount 0），會被報成「第 1 把刀之後切斷」——其實什麼都還沒切開。
+          if (r && r.supported && r.scrapCount > 0 && r.partCount > 0) { finish(s.afterOpIndex == null ? i : s.afterOpIndex, s.tool); return; }
+          i++;
+          if (nowMs() - t0 > 12) { setTimeout(step, 0); return; }
+        }
+        finish(null, null);
+      };
+      setTimeout(step, 0);
+    }
+
+    /**
+     * 進入／離開標記模式。桌機：俯視圖游標變十字，點一下回 onMark；手機：人在 Project 頁看不到視圖，
+     * 靠素材子頁的迷你預覽點（panels 自己處理），視圖也一併設了，無害。
+     */
+    function setMarkMode(kind) {
+      state.markMode = (kind === 'part' || kind === 'scrap') ? kind : null;
+      if (typeof view.setMarkMode === 'function') view.setMarkMode(state.markMode);
+      stockPanel.setMarkMode(state.markMode);   // 只更新按鈕與提示，不整片重畫
     }
 
     // -------------------------------------------------------------------------
@@ -1385,20 +1737,44 @@
     // -------------------------------------------------------------------------
     // 載入程式
     // -------------------------------------------------------------------------
-    function loadProgram(text, fileName, note) {
+    /**
+     * 範例附的素材（samples.js 的 stock，來自 samples/<name>.stock.json）→ 正準 stock；沒有或不合法就 null（＝推估）。
+     * 為什麼範例要附素材：推估素材的底面故意比最深切削低 5 mm（tools.STOCK_Z_MARGIN），推估下永遠不會「切穿」，
+     * demo-cutout 要示範外框變廢料就非得知道板厚。不寫進 localStorage——沒動過的範例不留痕跡
+     *（stockOrigin 'sample'；只調廢料設定也只存 { scrap }）；使用者改了素材的任何一格才變成 'user' 存起來。
+     */
+    function defaultStockOf(defaults) {
+      const o = defaults && defaults.stock;
+      if (!o || !o.spec || !NC.analysis || typeof NC.analysis.stockFromSpec !== 'function') return null;
+      return NC.analysis.stockFromSpec(o.spec, o.fixtures) || null;
+    }
+
+    /** @param {{stock?:{spec:Object, fixtures?:Object[]}}} [defaults]  沒存過時的預設（目前只有範例附的素材） */
+    function loadProgram(text, fileName, note, defaults) {
       state.text = String(text == null ? '' : text);
       state.fileName = fileName || '';
       state.hiddenTools.clear();
       state.stock = null;
+      state.stockOrigin = null;
+      state.sampleDeclined = false;
       state.rotary = null;   // 第四軸裝夾參數跟著程式走；換程式先清掉，稍後依 programKey 讀回
       state.selectedLine = 0;
       sectionTouched = false;
+      // 換程式＝換一塊料：記號是點在上一塊料上的，一起清掉；標記到一半也直接取消
+      state.markMode = null;
+      if (typeof view.setMarkMode === 'function') view.setMarkMode(null);
 
       let tok = null;
       try { tok = NC.tokenize(state.text); } catch (e) { tok = null; }
       state.programKey = programKeyOf(tok, state.fileName);
       state.rotary = loadRotary(state.programKey);
-      state.stock = loadStock(state.programKey);
+      // 素材：存過的優先（'user'）；沒存過、也沒對這支範例按過「回到推估」才套範例附的（'sample'）；否則推估
+      state.sampleDeclined = loadSampleDeclined(state.programKey);
+      const savedStock = loadStock(state.programKey);
+      const sampleStock = (!savedStock && !state.sampleDeclined) ? defaultStockOf(defaults) : null;
+      state.stock = savedStock || sampleStock || null;
+      state.stockOrigin = savedStock ? 'user' : (sampleStock ? 'sample' : null);
+      state.scrap = loadScrap(state.programKey) || defaultScrap();
       state.userTable = NC.tools.load(state.programKey) || null;
 
       el.fileLabel.textContent = (state.fileName || state.programKey) + (note ? ' · ' + note : '');
@@ -1411,7 +1787,8 @@
       const s = findSample(id);
       if (!s) { setStatus('找不到範例：' + id); return false; }
       el.selSample.value = sampleId(s);
-      loadProgram(s.text, s.name, '內建範例');
+      // 範例可以附素材（demo-cutout 的 120×80×10 板）：使用者存過的優先，沒存過才用範例附的
+      loadProgram(s.text, s.name, '內建範例', { stock: s.stock || null });
       return true;
     }
 
@@ -1559,8 +1936,9 @@
     /** 把左邊那張剖面的位置轉成 3D 的剖面平面；不是剖面模式就整組關掉 */
     function syncSection3D() {
       if (!view3d) return;
-      const shown = el.view3dHost && !el.view3dHost.classList.contains('nc-hidden');
-      const on = sectionMode() && shown;
+      // 區域變數不叫 shown：外層有同名的「畫面上那份高度陣列」物件，撞名會看錯
+      const visible3d = el.view3dHost && !el.view3dHost.classList.contains('nc-hidden');
+      const on = sectionMode() && visible3d;
       view3d.setSection(on
         ? {
           axis: viewMode === 'sectionX' ? 'x' : 'y',
@@ -1586,6 +1964,9 @@
         scenario: state.scenario,
         rotary: rotaryOptOf(sr.run),
       });
+      // 2D 正在看某個快照的話 3D 也要看同一份，廢料的標籤才會跟高度對得上（同一份陣列）
+      if (shown.sim === sim && shown.index != null) view3d.setSnapshot(shown.index);
+      if (typeof view3d.setChunks === 'function') view3d.setChunks(chunksForView(state.chunkResult), scrapMode());
       applyVisible();
     }
 
@@ -1741,8 +2122,39 @@
       snapshotAfterOp = (v >= snaps.length || !snaps[v]) ? null
         : (snaps[v].afterOpIndex == null ? v : snaps[v].afterOpIndex);
       applySnapshot(v);
+      applyChunks();   // 換了一份高度陣列，廢料要對那一份重算（有快取，拉滑桿不會卡）
     });
     for (const c of [el.chkRapid, el.chkFeed, el.chkRef, el.chkStock, el.chkRotary]) c.addEventListener('change', applyVisible);
+    // 廢料顯示開關：只是「怎麼看」，分塊結果不用重算，餵視圖換個 mode 就好。
+    // 只有這裡（使用者自己動下拉）才寫進 viewPref 存成長期偏好；網址 scrap= 只設下拉、不存
+    if (el.selScrap) {
+      el.selScrap.addEventListener('change', () => {
+        state.viewPref.scrapMode = normalizeScrapMode(el.selScrap.value);
+        persistSettings();
+        applyChunks();
+      });
+    }
+    // 標記模式：在俯視圖點一下 → 記號進 state.scrap.marks → 重算。點完就離開標記模式，
+    // 不然使用者接下來想點路徑看行號，會一直被當成在標記。
+    if (typeof view.onMark === 'function') {
+      view.onMark((x, y, kind) => {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        // 記號要落在素材的 XY 範圍內（含邊）：素材外沒有料，點了也沒有東西可標。留在標記模式讓人再點一次
+        const st = (state.result && state.result.stock) || state.stock;
+        if (!markInStock(st, x, y)) { setStatus2(MARK_OUT_OF_STOCK); return; }
+        const marks = Array.isArray(state.scrap.marks) ? state.scrap.marks.slice() : [];
+        marks.push({ x: roundMark(x), y: roundMark(y), kind: kind === 'scrap' ? 'scrap' : 'part' });
+        state.scrap = normalizeScrap(Object.assign({}, state.scrap, { marks }));
+        state.markMode = null;
+        if (typeof view.setMarkMode === 'function') view.setMarkMode(null);
+        persistStock();
+        applyChunks({ panel: 'full' });   // 記號是 app 這邊加的：面板要整片拿到新的 marks（markMode:null 一起）
+      });
+    }
+    // Esc 離開標記模式（按了「＋ 標工件」又反悔，不必再按一次）
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && state.markMode) setMarkMode(null);
+    });
 
     // 下方狀態條的分頁（總覽／游標行／作業摘要／錯誤清單）
     function selectTab(name) {
@@ -1871,7 +2283,8 @@
       }
     })();
 
-    // URL hash：#sample=樣本 C（可再加 &scenario=on&mode=sectionY&section=-20&tab=diag&ptab=tools，供截圖／分享用）
+    // URL hash：#sample=樣本 C（可再加 &scenario=on&mode=sectionY&section=-20&tab=diag&ptab=tools&scrap=hide，
+    // 供截圖／分享用）。scrap=off|mark|hide 是廢料的顯示方式（同工具列 #selScrap），只影響這一次瀏覽、不存偏好。
     function hashParams() {
       const out = {};
       const raw = String(location.hash || '').replace(/^#/, '');
@@ -1893,7 +2306,16 @@
         el.selScenario.value = p.scenario;
         settingsPanel.update({ settings: state.settings, scenario: state.scenario, cell: state.cell });
       }
+      // 廢料顯示（截圖用）：要在載入範例**之前**設好，applyResult 第一次餵視圖就用這個模式。
+      // 只設下拉（scrapMode() 讀的就是它）、不碰 viewPref——網址參數只影響這一次瀏覽，
+      // 不然之後任何 persistSettings 都會把它存成長期偏好
+      let scrapChanged = false;
+      if (p.scrap !== undefined && SCRAP_MODES.indexOf(p.scrap) >= 0 && el.selScrap && p.scrap !== scrapMode()) {
+        el.selScrap.value = p.scrap;
+        scrapChanged = true;
+      }
       const loaded = p.sample ? loadSample(p.sample) : false;
+      if (scrapChanged && !loaded) applyChunks();   // hashchange 只改了 scrap、程式沒換：直接重餵
       // 並排／剖切：截圖時常常要把右半邊關掉，所以也吃網址參數（split=0、clip=0）
       for (const [key, pref, box] of [['split', 'split', el.chkSplit], ['clip', 'clip', el.chkClip]]) {
         if (p[key] === undefined || p[key] === '') continue;
@@ -1926,6 +2348,7 @@
     el.selScenario.value = state.scenario;
     el.chkSplit.checked = state.viewPref.split;
     el.chkClip.checked = state.viewPref.clip;
+    if (el.selScrap) el.selScrap.value = normalizeScrapMode(state.viewPref.scrapMode);   // 長期偏好 → 下拉；之後以下拉為準
     if (!applyHash()) {
       const first = (ui.samples || [])[0];
       if (first) loadSample(sampleId(first));
@@ -1937,12 +2360,15 @@
       panels: { tools: toolsPanel, diag: diagPanel, modal: modalPanel, ops: opsPanel, stock: stockPanel, settings: settingsPanel, magazine: magPanel, overview: overviewPanel },
       loadProgram, loadSample, refresh, exportToolCSV, importToolCSV,
       selectTab, selectProjectTab, openProjectPage,
+      applyChunks, setMarkMode,   // 廢料判定（整合測試用 CDP 直接叫）
     };
   }
 
   ui.createApp = createApp;
   ui.analyzeSyncCompat = analyzeSyncCompat;
   ui.analyzeCompat = analyzeCompat;
+  // 不碰 DOM 的小工具露出來給 Node 測（廢料設定的退路版 normalize、指紋、顯示模式、素材存檔項目、記號範圍）
+  ui.appUtil = { defaultScrap, normalizeScrap, scrapKey, isDefaultScrap, normalizeScrapMode, stockItemOf, markInStock, roundMark, SCRAP_MODES, SCRAP_ANCHORS };
 
   if (typeof document !== 'undefined') {
     const boot = () => {

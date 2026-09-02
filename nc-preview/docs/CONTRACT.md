@@ -147,6 +147,34 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 - 切削量事件：feed 段若「移除體積 / 段長」對應的平均切深 × 刀徑 > 門檻（全刃寬 × > 1.5×刀徑深）→ R28 warning「重切削」；G1 向下段在材料內且 feed > plungeFeedMax → R28 warning；G0 向下終點低於該處高度 → R27 error。
 - 時間：feed 段 長度/feed；rapid 長度/rapidRate；hole 展開段同上；dwell 秒數；`perOp` 與 `total`。
 - 驗收：側面銑掉之後的高度、沒動到的區域維持頂面高度、孔位深度、面銑刀在工件外下刀不該報 R27、實心推估素材下的 G0 深下刀應報 R27，全部用 golden test 驗收，見 `test/simulation.test.mjs`。
+- **廢料判定**（2026-09-02，決議見 §15）。名詞：**工件**＝要留下來的那塊料；**廢料**＝其餘還有料、但跟工件不相連的塊；**塊**＝四鄰連通的實料區域。
+  「沒有料」＝ `height[idx]` 夾在 `floorZ`（create／cutLine／cutArc 把切穿夾在 floorZ；cylZ 圓外初始就是 floorZ）；夾具格 `mask[idx] !== 0` 是不可切材料，**不算料**。
+  全部是純函式、不進 `run()`、第一版也**不進 analyze 的 request**——判定是顯示層的事，由 app 對「目前顯示的高度陣列」呼叫，結果不影響診斷。typedef `Scrap`、`ChunkResult` 在 `ns.js`（同一次把 `SimResult` 補齊 cellX/cellY/wrapY/cylinder/extra/mask/stock/removedVolume/time.pre——盤點時發現缺）。
+  - `defaultScrap() → Scrap`、`normalizeScrap(o) → Scrap`：
+    ```
+    Scrap = { anchor: 'auto'|'origin'|'largest'|'fixture'|'marks',
+              marks: [{ x, y, kind: 'part'|'scrap' }],   // 工件座標 XY
+              skinMm: 0,       // 剩餘厚度 ≤ 此值就當空（底皮薄於 X mm 就當切斷）
+              bridgeMm: 0,     // 細於此寬度的連接算斷
+              minAreaMm2: 2 }  // 小於此面積的塊不分類（label 維持 0，畫成一般材料）
+    ```
+    normalize 補預設、三個門檻夾範圍（`SCRAP_MAX`：skinMm 0～1000、bridgeMm 0～50、minAreaMm2 0～1e6。bridgeMm 的上限是效能——侵蝕是 O(k·n)，手滑打 5000 在 0.25 mm 格距下是一萬輪、主執行緒直接凍住；50 mm 已經比任何留耳都寬）、字串先 trim、全空白視為沒填用預設（`Number('   ')` 是 0，不 trim 的話輸入框只剩空白時門檻會偷偷變 0）、anchor 不合法回 `'auto'`、marks 只留座標是有限數字且 kind 合法的。設定跟程式存（住在 localStorage 的素材項目裡，見 §8 app.js）。
+  - `chunks(sim, heightArr?, scrap?, opts?) → ChunkResult`：`sim` 可以是 `Sim` 或 `SimResult`（只用 nx/ny/cellX/cellY/origin/floorZ/mask/cylinder/wrapY）；heightArr 預設 `sim.height`；scrap 先 normalize。步驟固定，全部 typed array 加自己的堆疊、不遞迴（0.17 M 格 < 30 ms）：
+    1. `solid[idx] = (mask 為 0 或不存在) && (heightArr[idx] − Math.fround(floorZ)) > max(skinMm, 1e-6)`；夾具格另記 fixtureCell。**floorZ 要先過 `Math.fround`**：高度圖是 Float32Array，夾在 floorZ 的格存的是 fround(floorZ)，直接跟 float64 的 floorZ 相減會剩 1e-6 等級的殘差（|Z| 越大越大）——floorZ 不是 float32 可表示的數（例如 −100.3）時，整圈切穿的格會被誤判成還有料、永遠切不斷。
+    2. `k = round(bridgeMm / (2·cellX))`；k > 0 對 solid 做 k 次四鄰侵蝕得 core，k = 0 時 core = solid。每一輪數剩下的實料格，0 就提前結束——素材比 2k 格窄時幾輪就吃光了，後面的輪次都是在掃全 0 的圖。
+    3. 對 core 四鄰 flood fill 標號（`Int32Array labels`，0 = 未標）。
+    4. k > 0 時從已標號的格做多源 BFS，把 solid 裡沒標的填成最近的號（只走 solid 格）——所以細橋本身最後仍有標號，只是不再把兩邊黏成一塊。長回來之後**仍是 solid 但 label 0 的格再標號一次、當成獨立的塊**（每個方向都 ≤ 2k 格、核心整個被吃光、旁邊又沒有塊可以長過來的孤立塊，或整張素材都比 2k 格窄）：維持 0 的話它既不是工件也不是廢料、畫成一般材料，面積遠大於 minAreaMm2 也一樣，使用者看到的是一塊「沒被判定」的料而且什麼都不會提示。這一步之後每個 solid 格都有標號；細橋設定只改變塊怎麼切，不會讓任何實料格消失。
+    5. 每塊算 cells、`areaMm2 = cells·cellX·cellY`、bbox（工件座標 x0,y0,x1,y1）、zMin/zMax、touchesFixture（四鄰有夾具格）；`areaMm2 < minAreaMm2` 的塊把格全部改回 0 並從清單移除（不分類）。
+    6. 依 anchor 與 marks 決定每塊 `part`（布林）與 `why`。
+    - anchor 語意：`auto`＝原點 (0,0) 所在的塊是工件，原點不在任何塊上就取面積最大的塊；`origin`＝只用原點，找不到 → 最大塊；`largest`＝最大塊；`fixture`＝四鄰碰到夾具格的塊**都是**工件（一塊也沒碰到 → 退回 auto）；`marks`＝只看記號：含 ⊙(part) 的塊是工件、含 ✕(scrap) 的塊是廢料，沒被標的塊——有任何 ⊙ 時算廢料、只有 ✕ 時算工件、完全沒記號 → 退回 auto。
+    - **記號在每一種 anchor 下都優先**：含 ⊙ 的塊一定是工件、含 ✕ 的塊一定是廢料（同一塊兩種都有 → ⊙ 贏）。
+    - **原點塊與最大塊都只在「沒被 ✕ 的塊」裡挑**：原點所在的塊被 ✕ 了就當原點找不到，由（沒被 ✕ 的）最大塊遞補；`fixture` 也只數沒被 ✕ 的塊碰不碰夾具，唯一碰到夾具的塊被 ✕ 就退回 auto。不這樣做的話 auto 下 ✕ 了原點那塊會變成一塊工件都沒有，等於要使用者再點一次 ⊙。
+    - 記號落在空氣、夾具格、格網外、被 minAreaMm2 剔除的塊上都沒有作用；`marks` 下沒有任何有效記號 → 退回 auto。
+    - 原點格：`ix = round((0 − origin.x)/cellX)`、iy 同理；不在格網內就視為找不到。
+    - 回傳 `{ supported:true, labels, chunks:[{label, cells, areaMm2, bbox, zMin, zMax, part, touchesFixture, why}], partCount, scrapCount, scrapAreaMm2, partTouchesFixture, hasFixture }`；`why ∈ 'origin'|'largest'|'fixture'|'mark'|'scrapMark'|'unmarked'|'other'`；`partTouchesFixture`＝任一工件塊碰到夾具，格網裡沒有夾具格、或 partCount 為 0（例如每一塊都被 ✕）時為 `null`（UI 用 `=== false` 提示「工件沒碰到夾具，切斷後會掉落」——沒有工件時不能是 false，否則會警告一個不存在的工件會掉）。
+    - `sim.cylinder`（四軸圓棒）→ `{ supported:false, labels:null, chunks:[], partCount:0, scrapCount:0, scrapAreaMm2:0, partTouchesFixture:null, hasFixture:false }`。
+  - `chunkHeights(heightArr, labels, chunks, floorZ, which) → Float32Array`（新陣列，不改原本的）：`which === 'part'` 把廢料格（labels > 0 且該塊 part = false）設成 floorZ、其餘照抄；`'scrap'` 把非廢料格全部設成 floorZ、廢料格照抄。3D 用它導出「工件層／廢料層」兩份，Node 可測。
+  - 驗收（`test/simulation.test.mjs`，用 `create` 建小格網直接改 height，不跑 run）：外圈切穿 → 2 塊且 auto 下原點那塊是 part；留耳 → 1 塊；底皮 0.2 mm 在 skinMm 0／0.3 下分別 1／2 塊；1 格寬細橋在 bridgeMm 0／2·cell 下分別 1／2 塊且橋上格最後仍有標號；孤立 1 格 label 0；記號優先與 `marks` 各種情況；夾具錨、`partTouchesFixture`、`hasFixture`；cylinder 不支援；`chunkHeights` 兩種 which；`normalizeScrap` 夾值、全空白字串用預設、三個上限；bridgeMm 大到整張圖吃光時提前結束、不炸、剩下的實料由重新標號補上（答案跟 bridgeMm 0 一致）；核心被吃光的孤立小塊重新標號成一塊並照常過 minAreaMm2；partCount 0 → partTouchesFixture null；格外／被剔除小塊上的記號無效、同塊 ⊙✕ 共存 ⊙ 贏、fixture 唯一候選被 ✕ 後退回 auto。
 
 ## 6. `rules.js` — `NC.rules`
 
@@ -161,13 +189,23 @@ interpreter 負責的診斷：R02、R03、R04（含第四軸的「度」版本�
 
 素材的解析順序（`resolveStock`）：四軸（A 真的轉過）→ 圓棒（`cylinderStock`，`request.stock.spec.shape === 'cylX'` 時直徑／長度／位置以 spec 為準）；否則 `request.stock` 有 `spec` 或 `min/max` → `normalizeStock`（**spec 為正準**，有 spec 就由它重算 min/max）；否則 `estimateStock`。spec 的語意見 §14；換算函式 `NC.analysis.stockFromSpec(spec, fixtures?)`、反算 `NC.analysis.specFromStock(stock)`、正規化 `NC.analysis.normalizeSpec(spec)` 都對外，UI 與測試共用同一份。
 
+廢料設定（`Scrap`，§5）**第一版不進 request**：analyze 只負責把材料切出來，哪一塊是廢料由 app 對顯示中的高度陣列呼叫 `NC.sim.chunks` 算，結果不進診斷（碰撞判定照舊把廢料當實料，§15）。
+
 ## 8. UI（`js/ui/*.js`）
 
 - `editor.js` — `NC.ui.createEditor(container) → Editor`：textarea + 左側 gutter（行號、錯誤標記）+ 右側行旁資訊欄（每行執行後 `G0/G1 · G90/91 · G41 D · F · Z`，由 app 提供 `lineInfo(line) → string`）；`setText(text)`, `getText()`, `onChange(cb)`（300 ms debounce）, `setDiagnostics(diags)`, `setLineInfo(fn)`, `highlightLine(n)`, `scrollToLine(n)`, `onCursorLine(cb)`, `getSelectionLines() → [a,b]`, `replaceLines(a,b,text)`。捲動同步：gutter/info 欄用同一個 scrollTop。折疊功能本版不做。
 - `view2d.js` — `NC.ui.createView2D(canvas) → View`：`setData({segments, sim, stock, toolTable, scenario})`, `setMode('top'|'sectionX'|'sectionY'|'unroll')`, `setSection(v)`, `highlightLine(n)`, `highlightTool(t|null)`, `setVisible({rapid, feed, stock, tools:Set})`, `onPick((line, seg) => …)`, `fit()`；滑鼠滾輪縮放、拖曳平移、hover 顯示座標與深度。俯視：素材以色階（頂面淺、深處深）畫 heightmap（`putImageData` 縮放），路徑：rapid 虛線灰、feed 依刀具色、compensated 用實線、programmed 用細線；剖面：畫該位置的高度折線與素材輪廓。第四軸的三張圖（俯視／剖面 X／剖面 Y）改畫在工件座標上，見 §13.7。
-- `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, rotaryUsed?, onChange})`（素材**編輯器**：形狀／尺寸／原點位置／夾具／即時預覽，onChange 給的是帶 spec 的 stock，null = 回到推估；掛在 Project 的素材子頁）、`overview(container, {rows, compact?, onOpen})`（狀態條的 Project 總覽列／分頁列右端的徽章；rows 由 app 算，這裡只畫）、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
-- `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）、設定、素材（`ncPreview.stock.v1`，key = programKey，只存 `{spec, fixtures}`——min/max 每次由 spec 重算，存包絡盒的話改天換算規則改了，舊資料就對不上）；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌四支程式文字，由整合者用腳本產生）。
-- `index.html` — 版面（2026-09-02 改版）：頂列工具列；主體左右兩欄。**左欄** 50%（可拖 30～72%）整欄全高，是 **Project** 面板：標題列放檔名，五個子頁「程式｜素材｜刀具表｜刀庫｜機台」（`data-ptab`，一次一頁），程式頁＝編輯器＋底下一行游標行摘要（`#miniModal`）；**右欄**上面是視圖（含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選），本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1；右欄下面是**狀態條**（佔右欄 30% 高，可拖 12～60%）：分頁「總覽｜游標行｜作業摘要｜錯誤清單」（`data-tab`），分頁列右端四顆 Project 徽章（素材／刀具／刀庫／機台）。設計原則見 §8.2。舊的全螢幕設定頁（`#setupOverlay`）已移除；URL hash `setup=1` 等於 `ptab=stock`，`tab=tools|stock|mag` 這些舊名字會自動落到 Project 子頁。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
+  **廢料（2026-09-02，§15）**：
+  - View API 加 `setChunks(result|null, mode)`（result = `ChunkResult`，mode `'off'|'mark'|'hide'`；內部先算 `scrapByLabel`）、`setMarkMode('part'|'scrap'|null)`（標記模式 canvas 加 class `is-marking`、`cursor: cell`——一般狀態本來就是 crosshair，標記模式要換一個看得出來不一樣的游標，樣式在 `css/view2d.css`）、`onMark(fn(x, y, kind))`（標記模式下 click 且沒拖曳 → 回工件座標，點在素材範圍外不收；**此時不觸發 onPick**）、`setMarks(marks)`（只負責畫 ⊙ 圓＋中心點 `#2e7d32` 與 ✕ `#c62828`，俯視畫、剖面／展開圖不畫）、`getChunkAt(x, y) → chunk|null`（hover 用）。
+  - `buildHeightImage(sim, arr, zTop, zBottom, opts?)` 第 5 參數 `{ labels?, scrapByLabel?: Uint8Array, mode?, air? }`，省略時行為照舊（純函式、向下相容）。`air`（三軸、非圓棒攤平時預設 true）：`h ≤ zBottom + 1e-6` 的格畫成白灰棋盤（`(ix+iy)&1` 選 `[255,255,255]`／`[226,229,233]`，alpha 255）——切穿到底或本來沒料的格不再是一片深藍（看起來像切很深）；圓棒攤平的 NaN 仍 alpha 0。`mark`：廢料格顏色 = mix(原色, `SCRAP_RGB [230,126,34]`, 0.65)、alpha 190；`hide`：廢料格畫成跟 `air` 一樣的白灰棋盤（不是透明——透明會露出底下的背景色，看起來像圖破了一塊；棋盤才是「這裡沒東西」）；`off` 或沒 labels：照舊。heightImage 快取鍵加上 (labels 參考, mode, air)，setChunks／setVisible 變更時清快取。
+  - 剖面（`drawStockSection`，三軸）：**不管有沒有 labels** 都依每欄的類別（一般／廢料／空）用 `sectionRuns` 把 stepped profile 切成 run 分段填——一般用 `C.profileFill`、廢料 `mark` 用 `rgba(230,126,34,0.45)`、`hide` 的廢料當空的畫；空的欄（h ≤ floorZ + 1e-6）從素材底填到素材頂（`stock.max.z`，沒素材用 depthRange 的 zTop）的棋盤 pattern（`airPattern()`：8×8 離屏 canvas 畫 4×4 棋盤 → `ctx.createPattern(…, 'repeat')`，建一次快取在 `S.airPattern`；沒有 createPattern、建不出離屏 canvas 或丟例外都退回純色 `rgb(226,229,233)`）——圖例說棋盤＝切穿，跟廢料判定開不開無關。四軸剖面不動。
+  - hover 文字：滑到廢料格加「　廢料（跟工件不相連）」，碰到夾具的塊加「，碰到夾具」。
+  - 圖例樣式在 `css/view2d.css`：`.nc-view2d-key i.air`（棋盤，兩色 = `AIR_RGB_A/B`）／`i.scrap` 用 `rgb(227,158,94)` = mix(`TOP_RGB`, `SCRAP_RGB`, `SCRAP_MIX` 0.65)，跟俯視廢料格實際畫出來的顏色一致（不是飽和的 #e67e22——圖例跟圖上對不上，使用者會找不到那一塊）；`view2dUtil` 匯出 `TOP_RGB`、`SCRAP_MIX`，`test/view2d.test.mjs` 有一則讀 css 對照；元素由 index.html 放在 `.nc-view2d-scale` 旁。
+- `view3d.js` — `NC.ui.createView3D(host) → View3D`：整體見 §8.1。**廢料**：`setChunks(result|null, mode)`——`'hide'` 把顯示用高度陣列換成 `NC.sim.chunkHeights(arr, labels, chunks, floorZ, 'part')` 走現有 setHeights 路徑（fastUpdateHeights 失敗就 rebuild）；`'mark'` 主 mesh 維持原陣列（整合時改的：主 mesh 也用 part 層的話廢料位置只剩壓到 floorZ 的淡灰底板，半透明橘疊上去看不出廢料本來的高低；疊在原本淺灰的料上才是乾淨的橘，兩份網格同格網同降採樣、座標完全相同不會閃爍），另建第二份 mesh（scrap 層）當廢料層，在主 mesh 之後畫，`uTint = [230,126,34]/255`、`uTintMix 0.65`、`uAlpha 0.55`、`depthMask(false)`，剖切平面對兩份都生效；`'off'`／null 回原陣列並釋放廢料 mesh；`supported:false` 的結果當 null。內部保存「原始顯示陣列」（setData／setSnapshot 給的）與 chunks/mode，任何一邊變了就重新導出；setSnapshot 之後要自己重套 chunks（app 也會再呼叫，但不能依賴）。`MESH_FS` 加 uniform `uTint`（vec3）、`uTintMix`、`uAlpha`：`col = mix(col, uTint, uTintMix)`、`gl_FragColor = vec4(col*lit, uAlpha)`，預設 `[0,0,0]／0／1` 讓主 mesh 行為不變；不新增 attribute。HUD 在 mode ≠ off 且 scrapCount > 0 時多一顆 `<span class="tag warn">廢料 N 塊</span>`。切穿到底（h ≤ floorZ + 1e-6）的格子畫淡灰，跟 2D 的棋盤對應——不然切穿的溝跟最深的切削同色，看不出是「切空了」：`MESH_FS` 另加 uniform `uFloorZ`（float）與 `uAir`（vec3 = `AIR_RGB [232,234,238]`/255），`!back && up > 0.5 && vWorld.z <= uFloorZ + 1e-3` 的片段顏色換成 `uAir`（放在打光與染橘之前；剖切看到的底面內側 `back` 不算，那是實心料的底不是切穿）；`drawMesh` 每次設 `uFloorZ = airFloorZ(S.data.sim)`（純函式：三軸回 `sim.floorZ`，圓棒／沒 sim／NaN 回 -1e30 讓條件永不成立），所以切穿到底與 `hide` 壓到 floorZ 的格在 3D 是淡灰底板不是深藍；廢料層貼地的面仍由既有的 `uFloorCut` 丟掉（兩個機制用途不同，不合併）。匯出 `NC.ui.view3d.airFloorZ`、`AIR_RGB`、`MESH_FS`。純函式 `NC.ui.view3d.chunkLayers(arr, result, floorZ) → { part, scrap }`（呼叫 `NC.sim.chunkHeights`），在 `test/view3d.test.mjs` 測。
+- `panels.js` — `NC.ui.panels`：`toolTable(container, {table, onChange})`（每列：T、註解、型式下拉、直徑、角度、D 號、半徑形狀、半徑摩耗、來源標籤；直徑↔D 連動規則；常駐刀星號；probe 標記）、`diagnostics(container, {items, onJump, filter})`、`modal(container, state, extra)`、`ops(container, {ops, onJump})`、`stock(container, {stock, rotaryUsed?, stockOrigin?, onChange, scrap?, scrapResult?, markMode?, mobile?, onScrapChange?, onMarkMode?})`（素材**編輯器**：形狀／尺寸／原點位置／夾具／即時預覽，onChange 給的是帶 spec 的 stock，null = 回到推估；掛在 Project 的素材子頁。來源徽章 `.nc-badge` 三態（`data-source` = estimated|user|sample）：推估 `nc-badge-est`「由程式推估」、手動 `nc-badge-user`「手動指定」、stock 帶 spec 且 `stockOrigin === 'sample'` → `nc-badge-sample`「範例附帶」＋一句 `.nc-stock-note`「這支範例附了素材尺寸；改任何一格就變成手動指定。」；「回到推估」鈕在手動與範例附帶都有；`commit()` 一改任何一格就把 `opts.stockOrigin` 翻成 `'user'`（app 稍後 update 帶來的也是 'user'）。**廢料判定區**（2026-09-02，§15）：`scrap` 是 `Scrap`、`scrapResult` 是 `ChunkResult|null`（app 另外塞 `firstScrapText` 字串，例如「第 3 把刀之後切斷」，可為空）、`markMode` 是 `'part'|'scrap'|null`、`mobile` 是布林（手機版：右邊沒有視圖，記號的提示改成「按了之後在俯視預覽圖上點那塊料」；桌機是「按了之後到右邊的俯視圖點那塊料，或在預覽圖上點」）；`update(next)` 可帶這四個與 `stockOrigin`。**改廢料設定只呼叫 `onScrapChange(scrap)`，不走 commit()／onChange**——不能把推估素材翻成手動；而且**不整片 render**（整片重畫會讓正在打數字的門檻輸入框失焦、打到一半的值被洗掉），只有記號增減才重畫記號段（`renderScrapMarks`），判定結果由 app 算完用 handle 塞回來：`setScrapResult(result)` 只重畫 `.nc-scrap-status` 那三行（`renderScrapResult`）、`setMarkMode(kind|null)` 只更新記號按鈕的 `is-on`／`.nc-scrap-marking` 那行／預覽游標，**不回呼 onMarkMode**（app 那邊切的：Esc、視圖點完）。區塊 `.nc-scrap`（標題 `.nc-sub-title`「廢料判定」；**「目前結果」那一行放在區塊最上面**——先講判了什麼，再讓人調設定）：radio `input[data-field="scrap.anchor"]`（value auto|origin|largest|fixture|marks，name 每個實例唯一）、記號按鈕 `.nc-scrap-mark-part`／`.nc-scrap-mark-scrap`（markMode 相符時加 `is-on`，按下呼叫 `onMarkMode(kind|null)`）／`.nc-scrap-clear`、列表 `.nc-scrap-marks`（每列 `.nc-btn-danger`「刪」；沒有記號時「（沒有記號）」）、三個門檻各一列 `.nc-scrap-thresholds .nc-row`（標籤「底皮薄於／細於／小於」用 `.nc-row-label` 對齊）`input[data-field="scrap.skinMm"|"scrap.bridgeMm"|"scrap.minAreaMm2"]`（負值只把那一格改回舊值、不送）、結果 `.nc-scrap-result`（null →「尚未模擬」；supported false →「四軸圓棒尚不支援廢料判定」；否則「工件 N 塊、廢料 M 塊（合計 A mm²）」＋ firstScrapText）與 `.nc-scrap-warn`（`partCount > 0 && partTouchesFixture === false && hasFixture` →「工件沒有碰到夾具，切斷後會掉落」——沒有工件時不能警告一個不存在的工件會掉）。迷你預覽俯視畫記號（⊙ `#2e7d32`、✕ `#c62828`，半徑 6px）；markMode 非 null 時 XY 預覽 pointerup（沒拖曳）→ `tfWx/tfWy` 轉工件座標 push 進 marks → `onScrapChange` → `onMarkMode(null)`；點在素材範圍外不收（`logic.markInStock(stock, x, y)`，含邊；app 的俯視圖點記號也過同一關）——記號列表下顯示 `.nc-scrap-note`「記號要點在素材範圍內」（`logic.MARK_OUT_OF_STOCK`）、留在標記模式讓人再點一次。樣式在 `css/panels.css`）、`overview(container, {rows, compact?, onOpen})`（狀態條的 Project 總覽列／分頁列右端的徽章；rows 由 app 算，這裡只畫）、`toolbar` 的 block skip 選單（off/on/multiIgnored）與情境差異切換。
+- `app.js` — 狀態：`{text, fileName, settings, toolTable, stock, scenario, result}`；開檔：`<input type=file>` + 整頁拖放（`dragover`/`drop`），解碼先 UTF-8（fatal）失敗改 `TextDecoder('big5')`；存檔：`Blob` 下載，檔名 = 原檔名（無副檔名亦可）；`localStorage` 存刀具表（key = programNumber 或檔名）、設定、素材（`ncPreview.stock.v1`，key = programKey，只存 `{spec?, fixtures?, scrap?, estimated?}`——min/max 每次由 spec 重算，存包絡盒的話改天換算規則改了，舊資料就對不上；`scrap` 是 §5 的 Scrap，spec 不存在且 scrap 等於預設 → 整個項目刪掉，spec 不存在但 scrap 非預設 → 只存 `{scrap}`；`loadStock` 只看 spec、`loadScrap(key)` 另外讀；程式號變動時 scrap 的 key 搬移比照 stock。存檔項目由純函式 `stockItemOf({stock, stockOrigin, sampleDeclined, scrap})` 決定（`ui.appUtil` 匯出、Node 可測）：stock 帶 spec 且 `stockOrigin === 'user'` 才寫 `{spec, fixtures}`；否則 `sampleDeclined` 寫 `{estimated:true}`；scrap 非預設才帶；全空回 null＝整個項目刪掉。`state.stockOrigin`：`'user'`（使用者設的：存、換 O 號跟著搬）| `'sample'`（範例附帶的側車素材：不寫 localStorage、換 O 號不搬、換 key 時歸 null）| null（推估）；在範例上按「回到推估」→ `state.sampleDeclined = true` → 項目寫 `{estimated:true, scrap?}`，`loadStock` 遇到這個標記回 null、`loadSampleDeclined` 為 true 時 `loadSample` 不再套側車；範例上只調廢料設定時 spec **不**跟著存（只存 `{scrap}`）；`removeStoredStock` 只清 scrap 時 estimated 標記留著）；編輯 → 300 ms 後 `NC.analyzeSync`（更新路徑、診斷、模態），1 s 後 `NC.analyze`（含 sim）並用版本號丟棄過時結果；四個面板的選取同步（行 ↔ 段 ↔ 刀 ↔ 診斷）。內建「載入範例」選單（`js/ui/samples.js` 內嵌示範程式文字，由 `tools/make-samples.mjs` 從 `samples/` 產生，同名的 `<name>.stock.json` 側車檔會內嵌成 `stock:{spec, fixtures?}`（側車 JSON 壞掉時印「<檔名>：不是合法的 JSON（原始訊息）。側車檔長相：…」後 `exit 1`，不噴整頁 stack），`loadSample` 在沒存過素材、也沒按過「回到推估」時拿它當預設（`stockOrigin` 'sample'）——素材子頁的來源徽章叫「範例附帶」，在它上面按「回到推估」會記住「這支用推估」，下次載入不再套側車檔；`demo-cutout` 是整圈切穿讓外框變廢料的那支，附 120×80×10 的素材）。
+  **廢料資料流（2026-09-02，§15）**：`state.scrap`（預設 `NC.sim.defaultScrap()`）、`state.viewPref.scrapMode`（`'off'|'mark'|'hide'`，預設 `mark`，跟並排／剖切一起存進 `SETTINGS_KEY` 的 view 欄；工具列 `#selScrap`——**生效的顯示方式以下拉為準**：`scrapMode()` 讀 `el.selScrap.value`，起始把下拉設成 `viewPref.scrapMode`，只有 selScrap 的 change 才寫回 `viewPref.scrapMode`＋persistSettings；網址參數 `scrap=off|mark|hide` 截圖用、只設下拉——只影響這一次瀏覽、不寫進偏好，貼給別人的截圖網址才不會把對方的預設改掉）。`applyChunks()` 對「目前顯示的高度陣列」（最終 `sim.height` 或 `snapshots[i].height`，跟 applySnapshot 同步）呼叫 `chunksFor(arr)`（快取 `Map<arr, {key, result}>`，key = `JSON.stringify(state.scrap)`；四軸或沒 sim → null），然後 `eachView(v => v.setChunks && v.setChunks(result, mode))`（**一律守衛**，view3d 可能還沒有 setChunks）、`view.setMarks(state.scrap.marks)`、`stockPanel.setScrapResult(shownResult)`（預設：只換「目前結果」三行、不動輸入框；只有 `view.onMark` 走 `applyChunks({panel:'full'})` 整片 `stockPanel.update` 帶新 marks＋`markMode:null`＋`stockOrigin`——記號是 app 這邊加的，面板要拿到新的 marks）、總覽素材列加「 · 廢料 N 塊」（N > 0 時 level 至少 warn，detail「切穿之後有 N 塊料跟工件分開，合計 A mm²；顯示方式在視圖工具列「廢料」下拉。」，`partCount > 0 && partTouchesFixture === false` 才補「切斷後會掉落」那句；素材來源 'sample' 時列首寫「範例附帶」、徽章短字「範例」）。呼叫點：applyResult 之後、applySnapshot 之後、selScrap change、onScrapChange、onMark。`firstScrapText`：最終結果 scrapCount > 0 時在 `setTimeout(0)` 裡切成 12 ms 片段逐份掃 snapshots，每份**直接呼叫 `NC.sim.chunks`、刻意不進 chunkCache**（快取只留 8 份，掃一百多份快照會把使用者正在來回看的那幾份洗掉），找第一份 scrapCount > 0 **且 partCount > 0** 的 afterOpIndex（只看 scrapCount 的話，唯一的一塊被 ✕ 再拉到切穿之前會被報成「第 1 把刀之後切斷」）→「第 K 把刀（Tn）之後切斷」，以 SimResult 為鍵快取（設定指紋不同就重掃），算完再 `stockPanel.setScrapResult` 一次。標記模式：`onMarkMode(kind)` → `state.markMode`，桌機 `view.setMarkMode(kind)`，手機不切頁、只靠素材子頁的迷你預覽；app 這邊切的（Esc、視圖點完）走 `stockPanel.setMarkMode(kind)`，不整片重畫；`view.onMark((x,y,kind))` → 先過 `markInStock`（素材 XY 外不收：狀態列「記號要點在素材範圍內」、留在標記模式）→ 座標 round 到 0.01 push 進 `state.scrap.marks` → `view.setMarkMode(null)` → `persistStock` → `applyChunks({panel:'full'})`；Esc 離開標記模式。`onScrapChange(s)` → `state.scrap = NC.sim.normalizeScrap(s)` → persistStock → applyChunks。
+- `index.html` — 版面（2026-09-02 改版）：頂列工具列；主體左右兩欄。**左欄** 50%（可拖 30～72%）整欄全高，是 **Project** 面板：標題列放檔名，五個子頁「程式｜素材｜刀具表｜刀庫｜機台」（`data-ptab`，一次一頁），程式頁＝編輯器＋底下一行游標行摘要（`#miniModal`）；**右欄**上面是視圖（含俯視/剖面切換、剖面滑桿、模擬到第 N 把刀滑桿、顯示勾選——「顯示」那一列在 `#chkStock` 之後多一顆 `<select id="selScrap">` 廢料 照舊|標示|隱藏，預設標示；視圖頁尾 `.nc-view2d-scale` 後面放圖例 `.nc-view2d-key`：棋盤＝切穿／無料、橘＝廢料），本身是**左 2D／右 3D 並排**（`#viewSplit`，中間那條可拖），見 §8.1；右欄下面是**狀態條**（佔右欄 30% 高，可拖 12～60%）：分頁「總覽｜游標行｜作業摘要｜錯誤清單」（`data-tab`），分頁列右端四顆 Project 徽章（素材／刀具／刀庫／機台）。設計原則見 §8.2。舊的全螢幕設定頁（`#setupOverlay`）已移除；URL hash `setup=1` 等於 `ptab=stock`，`tab=tools|stock|mag` 這些舊名字會自動落到 Project 子頁。`css/app.css` 自訂，淺色為主，錯誤紅／警告琥珀／資訊藍／需輸入黃。
 - 不依賴任何外部資源（無 CDN、無 Google Fonts）。
 
 ### 8.1 視圖區：左 2D／右 3D 並排
@@ -769,3 +807,42 @@ spec = { shape: 'box'|'cylZ'|'cylX', size: {x,y,z}, anchor: {x,y,z}, pos: {x,y,z
   不能被「新 key 沒存過」洗成 null。
 - 素材跟著程式存（`ncPreview.stock.v1`，key = programKey），持久化層級同第四軸
   裝夾參數（§13.8）：換程式先清、依 programKey 讀回。
+
+## 15. 廢料判定（2026-09-02）
+
+需求出處：現場要看「切穿之後跟工件分開的那些料」——輪廓整圈切穿、鋸斷的尾料——能不能在視圖上標出來或不畫。
+沒有這個的話，成品圖上外框那一圈料看起來還好好的，但實際上它早就掉下來了；
+看剖面時也會把廢料的斷面當成工件的一部分去量。使用者的原話：判定不必精準，猜錯了在圖上點一下就好；
+設定放在素材子頁，顯示開關留在視圖工具列（「設定跟顯示分開」）。
+
+名詞（README 與 UI 文字一律用這一組）：**工件**＝要留下來的那塊料；**廢料**＝其餘還有料、但跟工件不相連的塊；
+**塊**＝四鄰連通的實料區域；**記號**＝使用者在圖上點的 ⊙（工件）／✕（廢料）；**底皮**＝切穿前留的薄皮；
+**細橋**＝兩塊料之間只剩很細的連接（留耳）。
+
+34. **廢料判定的規則（整合者裁定，已實作）**：
+    - (a) **判定住在顯示層，不進 analyze 也不進診斷**。`NC.sim.chunks` 是純函式（§5），app 對「目前顯示的高度陣列」呼叫
+      （拉「模擬到第 N 把刀」滑桿時就換成那份快照），設定 `Scrap` 跟程式存在 localStorage 的素材項目裡、第一版不進 request。
+      **碰撞判定不變：廢料仍算實料**——它還在機台上、沒被拿走，刀掃過去一樣會撞；「隱藏」只是不畫。
+    - (b) **預設「標示」，不「隱藏」**。一料多件（一塊素材切出好幾個零件）的程式在「自動」下只會有一塊被認成工件，
+      其餘的零件全部會被判成廢料；預設就藏掉的話，使用者看到的是一張「零件不見了」的成品圖，不知道是判定猜錯還是程式真的沒切。
+      先標成橘色讓人看得到它判了什麼，猜錯再點記號或改設定，才是「不必精準」這句話的正確做法。
+    - (c) **記號在每一種選法下都優先**：含 ⊙ 的塊一定是工件、含 ✕ 的塊一定是廢料，同一塊兩種都有 → ⊙ 贏。
+      記號是使用者親手講的，任何自動規則都不能蓋過它；「只看我標的記號」這個選法只是把**沒被標的塊**的預設值翻過來
+      （有任何 ⊙ 時沒標的都算廢料、只有 ✕ 時沒標的都算工件、完全沒記號退回自動），不是唯一能用記號的模式。
+    - (d) **夾具做成「哪一塊是工件」的選項之一＋提示，不是勾選「碰到夾具＝工件」**。第一版想做成勾選框，退回的理由：
+      外框被四顆螺絲鎖在夾具上、中間零件切穿之後掉出來的情況（`demo-cutout` 就是這種——固定孔在外框、零件在中間），
+      「碰到夾具的是工件」會判反。所以夾具只是五種選法裡的一種（`fixture`，一塊也沒碰到就退回自動），
+      另外每塊算 `touchesFixture`，工件一塊都沒碰到夾具時 UI 提示「工件沒有碰到夾具，切斷後會掉落」——這句話在兩種情況下都對。
+    - (e) **切穿到底的格改畫棋盤**（`buildHeightImage` 的 `air`）。以前切穿的格跟最深的切削同一個深藍，
+      看起來像「切很深」而不是「切空了」；廢料要標成橘色之後，那一圈切穿的溝一定要跟廢料、跟工件都分得開，
+      所以改成白灰棋盤（跟繪圖軟體的透明底同一套視覺語言）；「隱藏」模式下廢料格也畫棋盤，剖面圖切穿的欄填同一種棋盤，3D 的切穿格畫成淡灰底板，同一個意思。圓棒攤平的 NaN 仍然透明，不混用。
+    - (f) **三個門檻的預設**：`skinMm 0`、`bridgeMm 0`（只看有沒有切穿，不猜）、`minAreaMm2 2`（碎屑不分類，
+      免得滿圖橘點）。底皮與細橋是給「現場留薄皮再敲掉」「留耳最後折斷」這兩種寫法用的，要使用者自己填，
+      工具不知道現場的習慣。判定解析度＝模擬格距（0.4 mm 的牆在 0.5 mm 格距下可能判成切穿或沒切穿），
+      推估素材的底面比最深切削再低 5 mm（`tools.STOCK_Z_MARGIN`）所以推估下永遠不會判成切穿——曾考慮改成「推估底面＝最深切削」，
+      但實測 demo-plate／demo-pocket 會把最深的口袋底整片當成切穿、島變廢料（demo-pocket 92% 的格變棋盤），誤報比漏報糟，
+      所以維持餘量，改由素材子頁在「推估＋廢料 0 塊」時提示要填素材高度（`panels.logic.scrapStockHint`）；
+      示範程式 `demo-cutout` 用 `samples/demo-cutout.stock.json` 側車檔附 120×80×10 的素材（`make-samples` 內嵌成
+      `samples[].stock`，app 載入範例時沒存過素材才用它、不寫 localStorage；素材子頁標成「範例附帶」，按「回到推估」會記住「這支用推估」）。這兩條都寫進 README 已知限制，不在程式裡硬補。
+    - (g) **四軸圓棒不支援**：`chunks` 對 `sim.cylinder` 回 `supported:false`，UI 寫「四軸圓棒尚不支援廢料判定」，
+      視圖照舊、不炸。圓棒的「塊」要沿圓周繞回來（wrapY）而且切穿是「穿過軸心」而不是「到底」，語意不同，另案處理。

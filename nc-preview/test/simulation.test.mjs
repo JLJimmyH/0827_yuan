@@ -584,3 +584,371 @@ test('profileFor：新增型式的足跡形狀與錐角', () => {
   assert.deepEqual(['slotmill', 'dovetail', 'lollipop'].map((t) => prof(t).undercut), [true, true, true]);
   assert.equal(prof('endmill').undercut, false);
 });
+
+// ---------------------------------------------------------------------------
+// 廢料判定（chunks）：用 create 建小格網、直接改 height 陣列，不必跑 run
+// ---------------------------------------------------------------------------
+/** 60×40×10、cell 1 → nx 61、ny 41、floorZ −10；原點 (0,0) 在格 (30, 20) */
+const ringSim = (fixtures) => S.create(stock(60, 40, 10, fixtures), 1);
+const idxOf = (sim, ix, iy) => iy * sim.nx + ix;
+/** 把 ix∈[19,41]、iy∈[14,26] 的邊框那一圈（68 格）設成 z，圍出中間 21×11 格（含原點格）；skip = 留一格不切（留耳） */
+function cutRing(sim, z, skip) {
+  for (let iy = 14; iy <= 26; iy++) {
+    for (let ix = 19; ix <= 41; ix++) {
+      if (!(ix === 19 || ix === 41 || iy === 14 || iy === 26)) continue;
+      if (skip && skip.ix === ix && skip.iy === iy) continue;
+      sim.height[idxOf(sim, ix, iy)] = z;
+    }
+  }
+}
+const INNER = 21 * 11, RING = 68, TOTAL = 61 * 41;
+
+test('chunks：整圈切穿 → 2 塊；auto 下原點那塊是工件、外圈是廢料', () => {
+  const sim = ringSim();
+  cutRing(sim, sim.floorZ);
+  const r = S.chunks(sim);
+  assert.equal(r.supported, true);
+  assert.equal(r.chunks.length, 2);
+  assert.equal(r.partCount, 1);
+  assert.equal(r.scrapCount, 1);
+  const inner = r.chunks.find((c) => c.part), outer = r.chunks.find((c) => !c.part);
+  assert.equal(inner.cells, INNER);
+  assert.equal(inner.why, 'origin');
+  assert.equal(outer.cells, TOTAL - INNER - RING);
+  assert.equal(outer.why, 'other');
+  assert.equal(r.scrapAreaMm2, outer.areaMm2);
+  assert.equal(outer.areaMm2, outer.cells);   // cell 1 → 面積 = 格數
+  assert.equal(r.labels[idxOf(sim, 30, 20)], inner.label, '原點格屬於工件');
+  assert.equal(r.labels[idxOf(sim, 0, 0)], outer.label);
+  assert.equal(r.labels[idxOf(sim, 19, 20)], 0, '切穿的那圈 label 0');
+  assert.deepEqual(inner.bbox, { x0: -10, y0: -5, x1: 10, y1: 5 });
+  assert.equal(inner.zMin, 0);
+  assert.equal(inner.zMax, 0);
+  assert.equal(r.hasFixture, false);
+  assert.equal(r.partTouchesFixture, null, '沒有夾具格 → null');
+  r.chunks.forEach((c, i) => assert.equal(c.label, i + 1, 'label 連號且等於索引 + 1'));
+});
+
+test('chunks：留一格沒切（留耳）→ 1 塊、廢料 0', () => {
+  const sim = ringSim();
+  cutRing(sim, sim.floorZ, { ix: 19, iy: 20 });
+  const r = S.chunks(sim);
+  assert.equal(r.chunks.length, 1);
+  assert.equal(r.scrapCount, 0);
+  assert.equal(r.partCount, 1);
+  assert.equal(r.chunks[0].cells, TOTAL - RING + 1);
+});
+
+test('chunks：底皮——剩 0.2 mm 在 skinMm 0 時算有料、skinMm 0.3 時算切斷', () => {
+  const sim = ringSim();
+  cutRing(sim, sim.floorZ + 0.2);
+  assert.equal(S.chunks(sim, null, { skinMm: 0 }).chunks.length, 1);
+  assert.equal(S.chunks(sim, null, { skinMm: 0.3 }).chunks.length, 2);
+});
+
+test('chunks：floorZ 不是 float32 能表示的數時，切穿的格仍要判成沒料', () => {
+  // 高度圖是 Float32Array：夾在 floorZ 的格存的是 fround(floorZ)，直接跟 float64 相減會剩殘差
+  const st = { min: V(-30, -20, -100.3), max: V(30, 20, 0), source: 'user', fixtures: [] };
+  const sim = S.create(st, 1);
+  cutRing(sim, sim.floorZ);
+  assert.equal(S.chunks(sim).chunks.length, 2);
+});
+
+test('chunks：細橋——1 格寬的橋在 bridgeMm 0 時相連、bridgeMm 2·cell 時算斷，橋上的格仍被標號', () => {
+  const sim = ringSim();
+  // 在 ix = 45 切一整條鉛直槽，只留 (45, 20) 一格當橋；原點 (30, 20) 在左邊那塊
+  for (let iy = 0; iy < sim.ny; iy++) if (iy !== 20) sim.height[idxOf(sim, 45, iy)] = sim.floorZ;
+  const r0 = S.chunks(sim, null, { bridgeMm: 0 });
+  assert.equal(r0.chunks.length, 1);
+  assert.equal(r0.chunks[0].cells, TOTAL - 40);
+  const r1 = S.chunks(sim, null, { bridgeMm: 2 });
+  assert.equal(r1.chunks.length, 2);
+  assert.equal(r1.partCount, 1);
+  assert.equal(r1.scrapCount, 1);
+  const left = r1.chunks.find((c) => c.part);
+  assert.equal(r1.labels[idxOf(sim, 30, 20)], left.label, '原點所在的左塊是工件');
+  assert.equal(left.why, 'origin');
+  assert.ok(r1.labels[idxOf(sim, 45, 20)] > 0, '橋上的格長回來後要有標號');
+  // 每一個有料的格都要有標號（侵蝕掉的外圈也要長回來）
+  let solidUnlabeled = 0;
+  for (let i = 0; i < sim.height.length; i++) if (sim.height[i] > sim.floorZ && !r1.labels[i]) solidUnlabeled++;
+  assert.equal(solidUnlabeled, 0);
+  assert.equal(r1.chunks[0].cells + r1.chunks[1].cells, TOTAL - 40);
+});
+
+test('chunks：細橋——核心被吃光、旁邊沒塊可長的孤立小塊仍要標號成一塊（不能維持 0 變成「沒判定」）', () => {
+  const sim = ringSim();
+  // 用切穿的溝圍出 ix 11..12 × iy 11..15 的 2×5 島（10 格 > 預設 minAreaMm2 2）：k = 1 就整個被吃光、旁邊也沒塊可長過來。
+  // 島放在離素材邊夠遠的地方——貼邊的話溝與素材邊之間那條 2 格寬的走道也會被當成細橋（格網外算沒料）
+  for (let iy = 10; iy <= 16; iy++) {
+    for (let ix = 10; ix <= 13; ix++) {
+      if (ix === 10 || ix === 13 || iy === 10 || iy === 16) sim.height[idxOf(sim, ix, iy)] = sim.floorZ;
+    }
+  }
+  const r0 = S.chunks(sim, null, { bridgeMm: 0 });
+  assert.equal(r0.chunks.length, 2);
+  const r1 = S.chunks(sim, null, { bridgeMm: 2 });   // cell 1 → k = 1
+  assert.equal(r1.chunks.length, 2, '島沒有核心也要是一塊');
+  const island = r1.chunks.find((c) => c.label === r1.labels[idxOf(sim, 11, 13)]);
+  assert.ok(island, '島上的格有標號');
+  assert.equal(island.cells, 10);
+  assert.equal(island.part, false);
+  assert.equal(island.why, 'other');
+  assert.equal(r1.partCount, 1);
+  assert.equal(r1.scrapCount, 1);
+  assert.equal(r1.chunks.find((c) => c.part).cells, TOTAL - 18 - 10);
+  let solidUnlabeled = 0;
+  for (let i = 0; i < sim.height.length; i++) if (sim.height[i] > sim.floorZ && !r1.labels[i]) solidUnlabeled++;
+  assert.equal(solidUnlabeled, 0, '每個實料格都要有標號');
+  // 重新標號的塊照常過 minAreaMm2：門檻 20 → 島被剔除、label 0
+  const r2 = S.chunks(sim, null, { bridgeMm: 2, minAreaMm2: 20 });
+  assert.equal(r2.chunks.length, 1);
+  assert.equal(r2.labels[idxOf(sim, 11, 13)], 0);
+});
+
+test('chunks：bridgeMm 大到整張圖被吃光 → 夾到上限、侵蝕提前結束、不炸；剩下的實料由 4b 重新標號', () => {
+  // 120×40、cell 0.25 → nx 481、ny 161（77k 格）；bridgeMm 1e9 夾成 50 → k = 100，素材只有 161 格高：約 80 輪就吃光
+  const sim = S.create(stock(120, 40, 10), 0.25);
+  for (let iy = 0; iy < sim.ny; iy++) sim.height[idxOf(sim, 300, iy)] = sim.floorZ;   // 一條鉛直槽切成兩半；原點格 (240, 80) 在左邊
+  S.chunks(sim);   // 暖機
+  const t0 = performance.now();
+  const r = S.chunks(sim, null, { bridgeMm: 1e9 });
+  const ms = performance.now() - t0;
+  assert.ok(ms < 250, 'k=100 吃光後要提前結束 ' + ms.toFixed(1) + ' ms');
+  assert.equal(r.supported, true);
+  assert.equal(r.chunks.length, 2, '核心全沒了，兩塊都靠 4b 重新標號');
+  assert.equal(r.partCount, 1);
+  assert.equal(r.scrapCount, 1);
+  assert.equal(r.chunks.find((c) => c.part).why, 'origin');
+  let solidUnlabeled = 0;
+  for (let i = 0; i < sim.height.length; i++) if (sim.height[i] > sim.floorZ && !r.labels[i]) solidUnlabeled++;
+  assert.equal(solidUnlabeled, 0);
+  // 跟 bridgeMm 0 的答案一致：吃光＝沒有任何橋被切，塊的切法不變
+  const r0 = S.chunks(sim, null, { bridgeMm: 0 });
+  assert.deepEqual(r.chunks.map((c) => [c.cells, c.part]), r0.chunks.map((c) => [c.cells, c.part]));
+});
+
+test('chunks：minAreaMm2——孤立 1 格不分類（label 0、清單不含）；門檻 0 才算一塊', () => {
+  const sim = ringSim();
+  // 把 (5,5) 的四鄰切掉，讓它孤立
+  for (const [ix, iy] of [[4, 5], [6, 5], [5, 4], [5, 6]]) sim.height[idxOf(sim, ix, iy)] = sim.floorZ;
+  const r = S.chunks(sim);   // 預設 minAreaMm2 2
+  assert.equal(r.chunks.length, 1);
+  assert.equal(r.labels[idxOf(sim, 5, 5)], 0);
+  assert.equal(r.chunks[0].label, 1);
+  assert.equal(r.labels[idxOf(sim, 30, 20)], 1, '剩下的塊重新編成 1');
+  const r0 = S.chunks(sim, null, { minAreaMm2: 0 });
+  assert.equal(r0.chunks.length, 2);
+  assert.ok(r0.labels[idxOf(sim, 5, 5)] > 0);
+});
+
+test('chunks：記號優先——✕ 中間變廢料；anchor marks 只有 ✕ → 外圈變工件；同塊 ⊙ 與 ✕ → 工件', () => {
+  const sim = ringSim();
+  cutRing(sim, sim.floorZ);
+  const at = (r, ix, iy) => r.chunks.find((c) => c.label === r.labels[idxOf(sim, ix, iy)]);
+  // auto + ✕ 中間：中間廢料；原點那塊被 ✕ 了，下一個候選（最大塊）自動補上當工件
+  const rA = S.chunks(sim, null, { marks: [{ x: 0, y: 0, kind: 'scrap' }] });
+  assert.equal(at(rA, 30, 20).part, false);
+  assert.equal(at(rA, 30, 20).why, 'scrapMark');
+  assert.equal(at(rA, 0, 0).part, true);
+  assert.equal(at(rA, 0, 0).why, 'largest');
+  // marks + 只有 ✕：沒被標的都是工件
+  const rB = S.chunks(sim, null, { anchor: 'marks', marks: [{ x: 0, y: 0, kind: 'scrap' }] });
+  assert.equal(at(rB, 0, 0).part, true);
+  assert.equal(at(rB, 0, 0).why, 'unmarked');
+  assert.equal(rB.partCount, 1);
+  assert.equal(rB.scrapCount, 1);
+  // marks + 只有 ⊙ 在外圈：沒被標的都是廢料
+  const rC = S.chunks(sim, null, { anchor: 'marks', marks: [{ x: -29, y: -19, kind: 'part' }] });
+  assert.equal(at(rC, 0, 0).why, 'mark');
+  assert.equal(at(rC, 30, 20).part, false);
+  assert.equal(at(rC, 30, 20).why, 'unmarked');
+  // 同一塊兩種都有 → ⊙ 贏
+  const rD = S.chunks(sim, null, { anchor: 'largest', marks: [{ x: 1, y: 1, kind: 'scrap' }, { x: -1, y: -1, kind: 'part' }] });
+  assert.equal(at(rD, 30, 20).part, true);
+  assert.equal(at(rD, 30, 20).why, 'mark');
+  assert.equal(at(rD, 0, 0).part, true, 'largest 下外圈本來就是工件，中間的記號不影響它');
+  assert.equal(at(rD, 0, 0).why, 'largest');
+  // 記號落在切穿的那圈（空氣）→ 沒有作用；anchor marks 沒有有效記號 → 退回 auto
+  const rE = S.chunks(sim, null, { anchor: 'marks', marks: [{ x: -11, y: 0, kind: 'scrap' }] });
+  assert.equal(rE.labels[idxOf(sim, 19, 20)], 0);
+  assert.equal(at(rE, 30, 20).why, 'origin');
+});
+
+test('chunks：記號的邊界——格外無效、被剔除小塊上的無效、同塊 ⊙✕ 共存 ⊙ 贏、fixture 排除 ✕ 後退回 auto', () => {
+  const sim = ringSim([{ min: V(-28, -18, -10), max: V(-24, -14, 5), name: '壓板' }]);   // 夾具格 ix 2..6、iy 2..6，貼在外圈
+  cutRing(sim, sim.floorZ);
+  const at = (r, ix, iy) => r.chunks.find((c) => c.label === r.labels[idxOf(sim, ix, iy)]);
+  // 格外（素材範圍外）的記號無效：anchor marks 下等於沒有記號 → 退回 auto
+  const rOut = S.chunks(sim, null, { anchor: 'marks', marks: [{ x: 999, y: 999, kind: 'part' }, { x: -31, y: 0, kind: 'scrap' }] });
+  assert.equal(rOut.partCount, 1);
+  assert.equal(at(rOut, 30, 20).why, 'origin');
+  assert.equal(at(rOut, 0, 0).why, 'other');
+  // 被 minAreaMm2 剔除的孤立 1 格（55, 5）＝工件座標 (25, −15)：⊙ 落在上面沒有作用
+  for (const [ix, iy] of [[54, 5], [56, 5], [55, 4], [55, 6]]) sim.height[idxOf(sim, ix, iy)] = sim.floorZ;
+  const rTiny = S.chunks(sim, null, { anchor: 'marks', marks: [{ x: 25, y: -15, kind: 'part' }] });
+  assert.equal(rTiny.labels[idxOf(sim, 55, 5)], 0);
+  assert.equal(at(rTiny, 30, 20).why, 'origin', '沒有有效記號 → 退回 auto');
+  const rTiny0 = S.chunks(sim, null, { anchor: 'marks', minAreaMm2: 0, marks: [{ x: 25, y: -15, kind: 'part' }] });
+  assert.equal(at(rTiny0, 55, 5).why, 'mark', '門檻 0 → 那一格是一塊，⊙ 就生效');
+  assert.equal(at(rTiny0, 30, 20).part, false);
+  assert.equal(at(rTiny0, 30, 20).why, 'unmarked');
+  // 同一塊 ⊙ 與 ✕ 都有 → ⊙ 贏（anchor marks 下也一樣）；另一塊因為存在 ⊙ 而算廢料
+  const rBoth = S.chunks(sim, null, { anchor: 'marks', marks: [{ x: 0, y: 0, kind: 'scrap' }, { x: 2, y: 2, kind: 'part' }] });
+  assert.equal(at(rBoth, 30, 20).part, true);
+  assert.equal(at(rBoth, 30, 20).why, 'mark');
+  assert.equal(at(rBoth, 0, 0).part, false);
+  assert.equal(at(rBoth, 0, 0).why, 'unmarked');
+  // fixture：唯一碰到夾具的外圈被 ✕ → 沒有候選 → 退回 auto（原點塊是工件）；外圈維持 scrapMark
+  const rFix = S.chunks(sim, null, { anchor: 'fixture', marks: [{ x: -29, y: -19, kind: 'scrap' }] });
+  assert.equal(at(rFix, 1, 1).part, false);
+  assert.equal(at(rFix, 1, 1).why, 'scrapMark');
+  assert.equal(at(rFix, 30, 20).part, true);
+  assert.equal(at(rFix, 30, 20).why, 'origin');
+  assert.equal(rFix.partTouchesFixture, false, '工件（中間）沒碰到夾具');
+});
+
+test('chunks：每一塊都被 ✕ → partCount 0、partTouchesFixture null（沒有工件就沒有「會掉落」可講）', () => {
+  const sim = ringSim([{ min: V(-28, -18, -10), max: V(-24, -14, 5), name: '壓板' }]);
+  cutRing(sim, sim.floorZ);
+  const r = S.chunks(sim, null, { marks: [{ x: 0, y: 0, kind: 'scrap' }, { x: 29, y: 19, kind: 'scrap' }] });
+  assert.equal(r.partCount, 0);
+  assert.equal(r.scrapCount, 2);
+  assert.equal(r.hasFixture, true);
+  assert.equal(r.partTouchesFixture, null);
+  assert.ok(r.chunks.every((c) => c.why === 'scrapMark'));
+});
+
+test('chunks：anchor largest／origin', () => {
+  const sim = ringSim();
+  cutRing(sim, sim.floorZ);
+  const rL = S.chunks(sim, null, { anchor: 'largest' });
+  const outerL = rL.chunks.find((c) => c.label === rL.labels[idxOf(sim, 0, 0)]);
+  assert.equal(outerL.part, true);
+  assert.equal(outerL.why, 'largest');
+  assert.equal(rL.scrapAreaMm2, INNER);
+  const rO = S.chunks(sim, null, { anchor: 'origin' });
+  assert.equal(rO.chunks.find((c) => c.part).why, 'origin');
+  // 原點落在空氣上 → 退回最大塊
+  sim.height[idxOf(sim, 30, 20)] = sim.floorZ;
+  const rO2 = S.chunks(sim, null, { anchor: 'origin', minAreaMm2: 0 });
+  assert.equal(rO2.chunks.find((c) => c.part).why, 'largest');
+  assert.equal(rO2.chunks.find((c) => c.part).cells, TOTAL - INNER - RING);
+});
+
+test('chunks：夾具——anchor fixture 時碰到夾具的外圈是工件；auto 下 partTouchesFixture false、hasFixture true', () => {
+  // 夾具貼在外圈左下角：格 ix 2..6、iy 2..6
+  const sim = ringSim([{ min: V(-28, -18, -10), max: V(-24, -14, 5), name: '壓板' }]);
+  cutRing(sim, sim.floorZ);
+  const rA = S.chunks(sim);
+  assert.equal(rA.hasFixture, true);
+  assert.equal(rA.partTouchesFixture, false, '工件（中間）沒碰到夾具');
+  assert.equal(rA.labels[idxOf(sim, 4, 4)], 0, '夾具格不算料');
+  const outerA = rA.chunks.find((c) => !c.part);
+  assert.equal(outerA.touchesFixture, true);
+  assert.equal(rA.chunks.find((c) => c.part).touchesFixture, false);
+  const rF = S.chunks(sim, null, { anchor: 'fixture' });
+  const outerF = rF.chunks.find((c) => c.label === rF.labels[idxOf(sim, 0, 0)]);
+  assert.equal(outerF.part, true);
+  assert.equal(outerF.why, 'fixture');
+  assert.equal(rF.chunks.find((c) => c.label === rF.labels[idxOf(sim, 30, 20)]).part, false);
+  assert.equal(rF.partTouchesFixture, true);
+  // 沒有任何塊碰到夾具（這裡：根本沒夾具）→ 退回 auto
+  const sim2 = ringSim();
+  cutRing(sim2, sim2.floorZ);
+  const rF2 = S.chunks(sim2, null, { anchor: 'fixture' });
+  assert.equal(rF2.chunks.find((c) => c.part).why, 'origin');
+});
+
+test('chunks：四軸圓棒 → supported false、欄位齊全', () => {
+  const sim = S.create({ kind: 'cylinder', radius: 10, xMin: 0, xMax: 50 }, 1);
+  const r = S.chunks(sim);
+  assert.deepEqual(r, { supported: false, labels: null, chunks: [], partCount: 0, scrapCount: 0, scrapAreaMm2: 0, partTouchesFixture: null, hasFixture: false });
+  assert.equal(S.chunks(null).supported, false);
+});
+
+test('chunks：也吃 SimResult（跑真的切穿：整條槽把板切成兩半，原點在槽裡 → 最大塊）', async () => {
+  const sim = S.create(stock(100, 40, 10), 0.5);
+  const segs = [seg({ from: V(0, -30, -10), to: V(0, 30, -10), line: 5 })];   // Ø10 平刀，Z −10 = 素材底
+  const res = await S.run(sim, scenario(segs), TT, settings());
+  const r = S.chunks(res);
+  assert.equal(r.supported, true);
+  assert.equal(r.chunks.length, 2);
+  assert.equal(r.partCount, 1);
+  assert.equal(r.scrapCount, 1);
+  assert.equal(r.labels[S.cellIndex(res, 0, 0)], 0, '槽裡沒料');
+  assert.equal(r.chunks.find((c) => c.part).why, 'largest');
+  // 傳快照的高度陣列也行（這裡只有一個作業，快照 = 最終）
+  assert.equal(S.chunks(res, res.snapshots[0].height).chunks.length, 2);
+});
+
+test('chunkHeights：part 把廢料壓到底、scrap 只留廢料；labels null 時 part 照抄', () => {
+  const sim = ringSim();
+  cutRing(sim, sim.floorZ);
+  const r = S.chunks(sim);
+  const before = sim.height.slice();
+  const part = S.chunkHeights(sim.height, r.labels, r.chunks, sim.floorZ, 'part');
+  const scrap = S.chunkHeights(sim.height, r.labels, r.chunks, sim.floorZ, 'scrap');
+  assert.deepEqual(sim.height, before, '不改原陣列');
+  assert.ok(part instanceof Float32Array && part.length === sim.height.length);
+  assert.equal(part[idxOf(sim, 30, 20)], 0, '工件照抄');
+  assert.equal(part[idxOf(sim, 0, 0)], sim.floorZ, '廢料壓到底');
+  assert.equal(part[idxOf(sim, 19, 20)], sim.floorZ, '切穿的格本來就在底');
+  assert.equal(scrap[idxOf(sim, 0, 0)], 0, '廢料照抄');
+  assert.equal(scrap[idxOf(sim, 30, 20)], sim.floorZ, '工件壓到底');
+  assert.equal(scrap[idxOf(sim, 19, 20)], sim.floorZ);
+  assert.deepEqual(S.chunkHeights(sim.height, null, [], sim.floorZ, 'part'), sim.height);
+  assert.ok(S.chunkHeights(sim.height, null, [], sim.floorZ, 'scrap').every((v) => v === sim.floorZ));
+});
+
+test('normalizeScrap／defaultScrap：負值夾 0、anchor 亂填回 auto、marks 過濾 NaN 與壞 kind', () => {
+  assert.deepEqual(S.defaultScrap(), { anchor: 'auto', marks: [], skinMm: 0, bridgeMm: 0, minAreaMm2: 2 });
+  assert.deepEqual(S.normalizeScrap(null), S.defaultScrap());
+  assert.deepEqual(S.normalizeScrap('x'), S.defaultScrap());
+  const n = S.normalizeScrap({
+    anchor: 'nope', skinMm: -1, bridgeMm: '3', minAreaMm2: null,
+    marks: [{ x: 1, y: 2, kind: 'part' }, { x: NaN, y: 0, kind: 'scrap' }, { x: '4', y: '5', kind: 'scrap' }, { x: 1, y: 1, kind: 'huh' }, null, { x: Infinity, y: 0, kind: 'part' }, { x: null, y: 1, kind: 'part' }, { x: true, y: 1, kind: 'part' }],
+  });
+  assert.equal(n.anchor, 'auto');
+  assert.equal(n.skinMm, 0);
+  assert.equal(n.bridgeMm, 3);
+  assert.equal(n.minAreaMm2, 2, 'null → 預設');
+  assert.equal(S.normalizeScrap({ skinMm: true }).skinMm, 0, '布林不是數字 → 預設');
+  assert.deepEqual(n.marks, [{ x: 1, y: 2, kind: 'part' }, { x: 4, y: 5, kind: 'scrap' }]);
+  assert.equal(S.normalizeScrap({ anchor: 'fixture' }).anchor, 'fixture');
+  assert.equal(S.normalizeScrap({ minAreaMm2: 0 }).minAreaMm2, 0, '0 是合法值，不是「沒填」');
+  assert.deepEqual([...S.SCRAP_ANCHORS], ['auto', 'origin', 'largest', 'fixture', 'marks']);
+  // 全空白字串＝沒填 → 預設（Number('   ') 是 0，不 trim 的話門檻會偷偷變 0）；有數字的字串照樣 trim 後吃
+  assert.equal(S.normalizeScrap({ skinMm: '   ' }).skinMm, 0);
+  assert.equal(S.normalizeScrap({ minAreaMm2: ' \t' }).minAreaMm2, 2);
+  assert.equal(S.normalizeScrap({ bridgeMm: ' 3 ' }).bridgeMm, 3);
+  assert.deepEqual(S.normalizeScrap({ marks: [{ x: '  ', y: 1, kind: 'part' }, { x: ' 2 ', y: ' 3', kind: 'scrap' }] }).marks, [{ x: 2, y: 3, kind: 'scrap' }]);
+  // 上限：bridgeMm 50（侵蝕 O(k·n)，手滑的大數字不能凍住主執行緒）、skinMm 1000、minAreaMm2 1e6
+  assert.deepEqual(S.SCRAP_MAX, { skinMm: 1000, bridgeMm: 50, minAreaMm2: 1e6 });
+  assert.equal(S.normalizeScrap({ bridgeMm: 1e9 }).bridgeMm, 50);
+  assert.equal(S.normalizeScrap({ bridgeMm: 50 }).bridgeMm, 50);
+  assert.equal(S.normalizeScrap({ skinMm: 5000 }).skinMm, 1000);
+  assert.equal(S.normalizeScrap({ minAreaMm2: 1e12 }).minAreaMm2, 1e6);
+});
+
+test('效能：chunks 在 0.17 M 格（含侵蝕 k=2）要夠快', () => {
+  // 601×281 = 168,881 格；切一圈讓它真的有兩塊
+  const sim = S.create({ min: V(-150, -70, -10), max: V(150, 70, 0), source: 'user', fixtures: [] }, 0.5);
+  for (let iy = 40; iy <= 240; iy++) {
+    for (let ix = 100; ix <= 500; ix++) {
+      if (ix === 100 || ix === 500 || iy === 40 || iy === 240) sim.height[iy * sim.nx + ix] = sim.floorZ;
+    }
+  }
+  S.chunks(sim);   // 暖機
+  let t0 = performance.now();
+  const r = S.chunks(sim);
+  const plain = performance.now() - t0;
+  t0 = performance.now();
+  const rb = S.chunks(sim, null, { bridgeMm: 2 });
+  const eroded = performance.now() - t0;
+  assert.equal(r.chunks.length, 2);
+  assert.equal(rb.chunks.length, 2);
+  // 契約目標 30 ms；測試門檻放寬到 150 ms 以免慢機器誤紅
+  assert.ok(plain < 150, '不侵蝕 ' + plain.toFixed(1) + ' ms');
+  assert.ok(eroded < 150, '侵蝕 k=2 ' + eroded.toFixed(1) + ' ms');
+});

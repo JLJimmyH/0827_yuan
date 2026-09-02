@@ -9,7 +9,12 @@
  *   diagnostics(container, {items, onJump, onFix?, filter?})     onJump(line, item)
  *   modal(container, state, extra?)                              純顯示
  *   ops(container, {ops, onJump, time?, toolTable?, selectedIndex?})  onJump(line, op)
- *   stock(container, {stock, rotaryUsed?, onChange})             onChange(stockWithSpec | null)  null = 回到推估
+ *   stock(container, {stock, rotaryUsed?, stockOrigin?, onChange, scrap?, scrapResult?, markMode?, mobile?, onScrapChange?, onMarkMode?})
+ *                                                                stockOrigin 'sample' = 範例附帶的素材（徽章「範例附帶」，改任何一格就變手動）
+ *                                                                onChange(stockWithSpec | null)  null = 回到推估
+ *                                                                onScrapChange(scrap) 廢料判定設定改了（不走 onChange、素材不翻手動）
+ *                                                                onMarkMode('part' | 'scrap' | null) 使用者按了「標工件／標廢料」或點完／取消
+ *                                                                handle.setScrapResult(result) 只換「目前結果」三行；handle.setMarkMode(kind) 只更新按鈕
  *   overview(container, {rows, compact?, onOpen})              Project 總覽列／徽章（狀態條用；rows 由 app 算）
  *   settings(container, {settings, scenario, cell, onChange})    onChange({settings, scenario, cell})
  */
@@ -636,11 +641,98 @@
     return `${STOCK_SHAPE_LABEL[spec.shape]} ${size}・原點在${stockAnchorText(spec)}${off}`;
   }
 
+  // ---------------------------------------------------------------------------
+  // 廢料判定的設定（Scrap）
+  // 正本是 NC.sim.defaultScrap／normalizeScrap（核心）；這裡包一層是因為面板可能在
+  // 核心還沒有這兩個函式（分批 commit、或舊版核心）時就被建立——表單至少要畫得出來、
+  // 值也要落在合理範圍，等核心到位就自動改用核心的。
+  // ---------------------------------------------------------------------------
+  const SCRAP_ANCHORS = ['auto', 'origin', 'largest', 'fixture', 'marks'];
+  const SCRAP_ANCHOR_LABEL = {
+    auto: '自動：原點所在的那塊；找不到就最大的那塊',
+    origin: '原點所在的那塊',
+    largest: '面積最大的那塊',
+    fixture: '碰到夾具的那塊',
+    marks: '只看我標的記號',
+  };
+  const SCRAP_MARK_LABEL = { part: '⊙ 工件', scrap: '✕ 廢料' };
+  function scrapDefaults() {
+    if (NC.sim && typeof NC.sim.defaultScrap === 'function') return NC.sim.defaultScrap();
+    return { anchor: 'auto', marks: [], skinMm: 0, bridgeMm: 0, minAreaMm2: 2 };
+  }
+  /** 補預設、夾範圍（負值夾 0、anchor 亂填回 auto、marks 只留有限數字）。回新物件，不動輸入。 */
+  function scrapNormalize(o) {
+    if (NC.sim && typeof NC.sim.normalizeScrap === 'function') return NC.sim.normalizeScrap(o);
+    const d = scrapDefaults();
+    const src = o && typeof o === 'object' ? o : {};
+    const nonNeg = (v, fb) => { const n = toNumber(v, fb); return n < 0 ? 0 : n; };
+    return {
+      anchor: SCRAP_ANCHORS.includes(src.anchor) ? src.anchor : d.anchor,
+      marks: (Array.isArray(src.marks) ? src.marks : [])
+        .filter((m) => m && Number.isFinite(m.x) && Number.isFinite(m.y) && (m.kind === 'part' || m.kind === 'scrap'))
+        .map((m) => ({ x: m.x, y: m.y, kind: m.kind })),
+      skinMm: nonNeg(src.skinMm, d.skinMm),
+      bridgeMm: nonNeg(src.bridgeMm, d.bridgeMm),
+      minAreaMm2: nonNeg(src.minAreaMm2, d.minAreaMm2),
+    };
+  }
+  /**
+   * 「目前結果」那一行。回 { text, warn }：warn 是「工件沒碰到夾具」的提示（沒有就 null）。
+   * result.firstScrapText 由 app 附上（例如「第 3 把刀（T3）之後切斷」），有廢料時接在後面；
+   * 廢料 0 塊時不寫「合計 0 mm²」——沒有的東西不用報數字。
+   */
+  function scrapResultText(result) {
+    if (!result) return { text: '尚未模擬', warn: null };
+    if (result.supported === false) return { text: '四軸圓棒尚不支援廢料判定', warn: null };
+    const n = result.partCount | 0;
+    const m = result.scrapCount | 0;
+    let text = `工件 ${n} 塊、廢料 ${m} 塊`;
+    if (m > 0) {
+      text += `（合計 ${fmt(result.scrapAreaMm2 || 0, 1)} mm²）`;
+      if (result.firstScrapText) text += `，${result.firstScrapText}`;
+    }
+    // 格網裡沒有夾具格（hasFixture false）就不提——不知道現場怎麼夾的，提了只是嚇人。
+    // 也要先有工件（partCount > 0）：唯一一塊被點成 ✕、或還沒切開的情況沒有「工件」可言，
+    // partTouchesFixture 這時沒意義（核心會給 null，這裡也守一次）
+    const warn = (n > 0 && result.partTouchesFixture === false && result.hasFixture) ? '工件沒有碰到夾具，切斷後會掉落' : null;
+    return { text, warn };
+  }
+  /**
+   * 「目前結果」下面的補充：素材是推估的時候，底面故意比程式最深的切削再低 5 mm（tools.STOCK_Z_MARGIN），
+   * 所以推估素材永遠不會判成切穿——「廢料 0 塊」是因為不知道板厚，不是程式沒切穿，要講清楚，
+   * 不然使用者會以為功能壞了。只在「推估＋算得出來＋沒有廢料」時提；有廢料或不支援時這句只是噪音。
+   * @param {Object|null} result  ChunkResult
+   * @param {'user'|'estimated'} source  素材來源
+   * @returns {string|null}
+   */
+  function scrapStockHint(result, source) {
+    if (source === 'user' || !result || result.supported === false) return null;
+    if ((result.scrapCount | 0) > 0) return null;
+    return '素材是推估的：底面比程式最深的切削再低 5 mm，永遠不會判成切穿。要看切穿後的廢料，請在上面填實際的素材高度。';
+  }
+  /** 迷你預覽上點一下 → 記號。工件座標取到 0.01 mm，列表才不會是一長串小數。 */
+  function previewMark(tf, px, py, kind) {
+    const r = (v) => Math.round(v * 100) / 100;
+    return { x: r(tfWx(tf, px)), y: r(tfWy(tf, py)), kind };
+  }
+  /**
+   * 記號要落在素材的 XY 範圍內（含邊，容 1e-6 的浮點誤差）：素材外沒有料，點了也沒有東西可標。
+   * 迷你預覽與 app 的俯視圖點記號都先過這關，不過就不收、只提示。
+   * @param {{min:{x:number,y:number}, max:{x:number,y:number}}|null} stock
+   */
+  function markInStock(stock, x, y) {
+    if (!stock || !stock.min || !stock.max || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const e = 1e-6;
+    return x >= stock.min.x - e && x <= stock.max.x + e && y >= stock.min.y - e && y <= stock.max.y + e;
+  }
+  const MARK_OUT_OF_STOCK = '記號要點在素材範圍內';
+
   panels.logic = {
     dListByTool, ensureOffsets, toolUsesDefault, countDefaultTools, setToolField, setOffsetField,
     filterDiagnostics, countBySeverity, formatTime, rangeText, listText, toNumber, fmt, clampInt,
     stockAnchorText, stockSummaryText, STOCK_SHAPE_LABEL,
     stockPreviewTransform, stockDragHit, stockDragApply, tfPx, tfPy, tfWx, tfWy,
+    scrapDefaults, scrapNormalize, scrapResultText, scrapStockHint, previewMark, markInStock, MARK_OUT_OF_STOCK, SCRAP_ANCHORS, SCRAP_ANCHOR_LABEL, SCRAP_MARK_LABEL,
     normalizeMagazine, defaultMagazine, magazineStatus, ringPositions, wrapPot,
     withBOM, csvFileName, looksLikeToolCSV, mergeCSVTable, describeImport, importStatusKind,
     csvFieldError, csvUnparsedCells, csvRows, groupUnparsed, CSV_FIELD_LABEL, CSV_NUMERIC_COLUMNS,
@@ -1456,6 +1548,31 @@
         }
       }
     }
+    // 廢料判定的記號（只有俯視）：⊙ 工件綠、✕ 廢料紅——跟右欄 2D 視圖同色同形，
+    // 看到就知道是同一個東西；只畫不能拖（要改就在列表刪掉重點）。
+    if (mode === 'top' && opts && Array.isArray(opts.marks)) {
+      const mr = 6;
+      ctx.lineWidth = 2;
+      for (const m of opts.marks) {
+        if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+        const mx = px(m.x), my = py(m.y);
+        ctx.beginPath();
+        if (m.kind === 'scrap') {
+          ctx.strokeStyle = '#c62828';
+          ctx.moveTo(mx - mr, my - mr); ctx.lineTo(mx + mr, my + mr);
+          ctx.moveTo(mx - mr, my + mr); ctx.lineTo(mx + mr, my - mr);
+          ctx.stroke();
+        } else {
+          ctx.strokeStyle = '#2e7d32';
+          ctx.fillStyle = '#2e7d32';
+          ctx.arc(mx, my, mr, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(mx, my, 1.8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
     // 工件原點 ⊕（畫最後，蓋在外形上）。
     // opts.originW 給定時 ⊕ 改畫在那裡——拖 ⊕ 期間素材固定、原點跟著手指在素材上移動
     // （拖的是「原點在素材的哪裡」，素材本身不能看起來被拖著跑），放開 commit 後
@@ -1639,12 +1756,28 @@
    * 這裡輸入的是 spec（尺寸與原點位置），min/max 由 NC.analysis.stockFromSpec 導出——
    * 現場拿到的是「長寬高＋原點在哪」，不是包絡盒；87.654 這種尺寸的一半不該讓人每次手算。
    *
-   *   stock(container, {stock, rotaryUsed?, onChange})
+   *   stock(container, {stock, rotaryUsed?, stockOrigin?, onChange, scrap?, scrapResult?, markMode?, mobile?, onScrapChange?, onMarkMode?})
+   *     stockOrigin                      'sample' = 這份素材是範例附帶的（徽章「範例附帶」、說明一句、「回到推估」鈕保留）；
+   *                                      其他值不看，徽章照 stock.source 分「手動指定／由程式推估」
    *     onChange(stockWithSpec | null)   null = 回到程式推估
+   *     onScrapChange(scrap)             廢料判定設定改了（只送設定，不碰素材、不翻手動）
+   *     onMarkMode(kind | null)          按了「標工件／標廢料」（kind）、再按一次或點完（null）
+   *     scrapResult                      app 算好的 ChunkResult（可加 firstScrapText），面板只顯示
+   *     mobile                           手機版：記號提示只指向迷你預覽（右邊沒有視圖）
+   *   handle.update(next)                整片重畫（素材、rotaryUsed、stockOrigin、scrap、scrapResult、markMode、mobile 都可帶）
+   *   handle.setScrapResult(result)      只換「目前結果」那三行——app 每算一次分塊、掃完快照都叫這個，
+   *                                      表單其他節點一個都不動，使用者打到一半的數字不會被洗掉、輸入框不失焦
+   *   handle.setMarkMode(kind | null)    只更新記號按鈕的 is-on、「標記模式」那行與預覽的十字游標
    */
+  let stockSeq = 0;   // radio 的 name 要每個實例唯一，同一頁有兩個素材面板時才不會互相搶勾選
   panels.stock = function stock(container, opts) {
     const A = NC.analysis || {};
-    const state = { opts: Object.assign({}, opts), stock: null, spec: null, fixtures: [], source: 'estimated' };
+    const state = {
+      opts: Object.assign({}, opts), stock: null, spec: null, fixtures: [], source: 'estimated',
+      scrap: scrapDefaults(), scrapResult: null, markMode: null,
+      markNote: null,   // 記號區的短提示（點到素材外面那句），下一次成功標記或切換標記模式就清掉
+    };
+    const uid = ++stockSeq;
     const root = h('div', { class: 'nc-panel nc-panel-stock' });
     mount(container, root);
 
@@ -1657,10 +1790,44 @@
     }
     function commit() {
       state.source = 'user';
+      state.opts.stockOrigin = 'user';   // 改了任何一格就不再是「範例附帶」（app 稍後 update 帶來的也是 'user'）
       call(state.opts.onChange, builtStock());
       render();
     }
     function setSpec(fn) { fn(state.spec); commit(); }
+    /**
+     * 廢料設定改了：只走 onScrapChange，不走 commit()——commit 會把素材翻成「手動指定」，
+     * 但廢料判定跟素材是推估還是手動無關，翻了會讓人以為素材尺寸被動過。
+     * 也**不整片 render()**：radio／數字欄位本身已經是新值，整片重畫只會把使用者正要打的下一格洗掉、
+     * 輸入框失焦；記號有增減（marksChanged）才重畫記號列表與預覽。判定結果由 app 算完用 setScrapResult 塞回來。
+     */
+    function scrapChange(marksChanged) {
+      state.opts.scrap = state.scrap;   // 之後 update({stock}) 沒帶 scrap 時，還是要拿到最新的
+      call(state.opts.onScrapChange, U.deepClone(state.scrap));
+      if (marksChanged) { renderScrapMarks(); redrawPreviews(); }
+    }
+    /**
+     * 標記模式開／關（只動跟它有關的節點：按鈕 is-on、「標記模式：…」那行、俯視預覽的十字游標）。
+     * 按鈕按下走 userSetMarkMode（多告訴 app 一聲去切視圖的游標）；app 那邊切的（Esc、視圖點完）走 handle.setMarkMode。
+     */
+    function applyMarkMode(kind) {
+      state.markMode = (kind === 'part' || kind === 'scrap') ? kind : null;
+      state.opts.markMode = state.markMode;
+      state.markNote = null;
+      renderScrapMarks();
+      syncMarkingCanvas();
+    }
+    function userSetMarkMode(kind) {
+      applyMarkMode(kind);
+      call(state.opts.onMarkMode, state.markMode);
+    }
+    /** 俯視預覽在標記模式要換十字游標＋藍框，讓人知道「現在點下去是標記號」，不是拖 ⊕ */
+    function syncMarkingCanvas() {
+      const cv = cvs.top;
+      if (!cv) return;
+      if (state.markMode) { cv.classList.add('is-marking'); cv.style.cursor = 'crosshair'; }
+      else { cv.classList.remove('is-marking'); cv.style.cursor = 'default'; }
+    }
 
     // ---- 預覽拖曳：⊕ 移原點（磁吸九宮格）、邊改尺寸 ----
     // 拖曳中不 commit（commit 會整片重建表單，pointer capture 就斷了），
@@ -1693,6 +1860,7 @@
           snapDots: dragOrigin,
           dragging: !!(drag && drag.mode === m),
           originW,
+          marks: state.scrap.marks,   // 廢料判定的記號（只有俯視會畫）
         });
       }
       if (cvs.iso) drawStock3D(cvs.iso, shown, { originW, view: view3d });
@@ -1708,7 +1876,16 @@
     }
     function attachDrag(cv, mode) {
       if (typeof cv.getContext !== 'function' || typeof cv.setPointerCapture !== 'function') return;   // Node 假 DOM
+      // 標記模式（只在俯視）：按下的那一點不是要拖 ⊕ 或拖邊，是「點那塊料」；
+      // 放開時沒移動才算點一下——手指按著滑走多半是想捲頁或改變主意，不記。
+      const marking = () => !!state.markMode && mode === 'top';
+      let markDown = null;
       cv.addEventListener('pointerdown', (ev) => {
+        if (marking()) {
+          markDown = { x: ev.clientX, y: ev.clientY };
+          ev.preventDefault();
+          return;
+        }
         const s = builtStock();
         const tf = stockPreviewTransform(s, cv.width, cv.height, mode);
         const p = canvasPoint(cv, ev);
@@ -1720,6 +1897,7 @@
         redrawPreviews();
       });
       cv.addEventListener('pointermove', (ev) => {
+        if (marking()) { cv.style.cursor = 'crosshair'; return; }
         if (drag && drag.mode === mode) {
           const p = canvasPoint(cv, ev);
           state.spec = stockDragApply(drag.spec0, drag.tf, drag.hit, tfWx(drag.tf, p.x), tfWy(drag.tf, p.y));
@@ -1742,8 +1920,34 @@
         drag = null;
         if (cancelled) redrawPreviews(); else commit();
       };
-      cv.addEventListener('pointerup', (ev) => finish(ev, false));
-      cv.addEventListener('pointercancel', (ev) => finish(ev, true));
+      cv.addEventListener('pointerup', (ev) => {
+        if (markDown) {
+          const down = markDown;
+          markDown = null;
+          if (marking() && Math.hypot(ev.clientX - down.x, ev.clientY - down.y) < 6) {
+            const s = builtStock();
+            const tf = stockPreviewTransform(s, cv.width, cv.height, mode);
+            const p = canvasPoint(cv, ev);
+            const m = previewMark(tf, p.x, p.y, state.markMode);
+            if (!markInStock(s, m.x, m.y)) {
+              // 點到素材外面：那裡沒有料，記號沒有意義。不收、留在標記模式讓人再點一次，只在面板提示
+              state.markNote = MARK_OUT_OF_STOCK;
+              renderScrapMarks();
+              return;
+            }
+            state.scrap.marks.push(m);
+            state.markMode = null;
+            state.opts.markMode = null;
+            state.markNote = null;
+            syncMarkingCanvas();
+            scrapChange(true);                   // 先把記號送出去（app 會重算廢料），順便重畫記號列表與預覽
+            call(state.opts.onMarkMode, null);   // 再告訴 app 標記模式結束（右欄視圖的十字游標要收）
+          }
+          return;
+        }
+        finish(ev, false);
+      });
+      cv.addEventListener('pointercancel', (ev) => { markDown = null; finish(ev, true); });
     }
     /** 3D 檢視的軌道旋轉：橫拖轉方位、直拖調俯仰。只轉視角，不動任何設定值。 */
     function attachOrbit(cv) {
@@ -1794,14 +1998,24 @@
       clear(root);
       const sp = state.spec;
       const isUser = state.source === 'user';
+      // 三態徽章：由程式推估／手動指定／範例附帶。「範例附帶」是手動的一種（stock 帶 spec），只是來源是範例的側車檔，
+      // 沒存進瀏覽器——講清楚，不然使用者會以為自己設過、或者按了「回到推估」又跑回來是壞掉
+      const origin = (isUser && state.opts.stockOrigin === 'sample') ? 'sample' : (isUser ? 'user' : 'estimated');
+      const BADGE = { estimated: ['nc-badge-est', '由程式推估'], user: ['nc-badge-user', '手動指定'], sample: ['nc-badge-sample', '範例附帶'] };
       const rotary = !!state.opts.rotaryUsed;
       const preview = builtStock();
 
       root.appendChild(h('div', { class: 'nc-stock-head' },
-        h('span', { class: 'nc-badge ' + (isUser ? 'nc-badge-user' : 'nc-badge-est'), dataset: { source: isUser ? 'user' : 'estimated' } }, isUser ? '手動指定' : '由程式推估'),
+        h('span', { class: 'nc-badge ' + BADGE[origin][0], dataset: { source: origin } }, BADGE[origin][1]),
         h('span', { class: 'nc-muted nc-stock-brief' }, ' ' + stockSummaryText(preview)),
-        isUser ? h('button', { type: 'button', class: 'nc-btn nc-btn-small nc-btn-reset', title: '丟掉手動值，改用程式推估', onclick: () => call(state.opts.onChange, null) }, '回到推估') : null));
-      if (!isUser) {
+        isUser ? h('button', {
+          type: 'button', class: 'nc-btn nc-btn-small nc-btn-reset',
+          title: origin === 'sample' ? '不用範例附的素材，改用程式推估' : '丟掉手動值，改用程式推估',
+          onclick: () => call(state.opts.onChange, null),
+        }, '回到推估') : null));
+      if (origin === 'sample') {
+        root.appendChild(h('div', { class: 'nc-muted nc-stock-note' }, '這支範例附了素材尺寸；改任何一格就變成手動指定。'));
+      } else if (!isUser) {
         root.appendChild(h('div', { class: 'nc-muted nc-stock-note' },
           '下面的欄位已帶入程式推估的反算值（用切削範圍猜的，不是真的毛胚）。'
           + '把尺寸改成實際毛胚、選好原點位置，改任何一格就轉為手動；碰撞與下刀判定會全部重算。'));
@@ -1878,6 +2092,9 @@
       }, '＋ 新增夾具'));
       form.appendChild(fx);
 
+      // ---- 廢料判定 ----
+      form.appendChild(renderScrap());
+
       // ---- 預覽 ----
       // 兩種互動模式分成兩個明確區塊：可「調整」的圖（拖 ⊕、拖邊）歸一組放前面，
       // 3D 是「檢視」（只能轉視角）放後面、標題點明只能旋轉——混在同一疊裡
@@ -1895,7 +2112,136 @@
       attachDrag(cvs.top, 'top');
       attachDrag(cvs.front, 'front');
       attachOrbit(cvs.iso);
+      syncMarkingCanvas();   // 標記模式中重畫的話，俯視預覽的十字游標＋外框要接回來
       redrawPreviews();
+    }
+
+    /**
+     * 「廢料判定」區塊。設定值改了只走 scrapChange()（見上）；判定結果由 app 算好
+     * 用 setScrapResult()／update({scrapResult}) 塞進來——面板不碰模擬結果，只負責顯示與收設定。
+     *
+     * 區塊裡有兩段會單獨重畫（容器留在 scrapEls）：「目前結果」三行（renderScrapResult，app 每算一次就換）
+     * 與記號那一段（renderScrapMarks，按鈕亮不亮、列表增減）。radio 與三個門檻欄位只在整片 render() 時建——
+     * 它們是使用者正在打字的地方，不能因為結果回來了就被重建。
+     */
+    const scrapEls = { status: null, btns: null, marks: null };
+    function renderScrap() {
+      const box = h('div', { class: 'nc-scrap' }, h('div', { class: 'nc-sub-title' }, '廢料判定'));
+
+      // ---- 目前結果（唯讀）：放在標題正下方，改了下面任何一格馬上看得到結果變了 ----
+      scrapEls.status = h('div', { class: 'nc-scrap-status' });
+      box.appendChild(scrapEls.status);
+      renderScrapResult();
+
+      box.appendChild(h('div', { class: 'nc-muted nc-scrap-intro' },
+        '切穿之後跟工件分開的料，會在視圖標成橘色或不畫。判定不必精準，猜錯了就在圖上點一下告訴它。'));
+
+      // ---- 哪一塊是工件 ----
+      const radioName = `nc-scrap-anchor-${uid}`;
+      box.appendChild(h('div', { class: 'nc-scrap-q' }, '哪一塊是工件'));
+      box.appendChild(h('div', { class: 'nc-scrap-radios', attrs: { role: 'radiogroup', 'aria-label': '哪一塊是工件' } },
+        SCRAP_ANCHORS.map((k) => {
+          const input = h('input', { type: 'radio', name: radioName, value: k, checked: state.scrap.anchor === k, dataset: { field: 'scrap.anchor' } });
+          input.addEventListener('change', () => {
+            if (!input.checked || state.scrap.anchor === k) return;
+            state.scrap.anchor = k;
+            scrapChange(false);
+          });
+          return h('label', { class: 'nc-radio' }, input, ' ', SCRAP_ANCHOR_LABEL[k]);
+        })));
+
+      // ---- 圖上的記號 ----
+      box.appendChild(h('div', { class: 'nc-scrap-q' }, '圖上的記號'));
+      scrapEls.btns = h('div', { class: 'nc-scrap-btns' });
+      box.appendChild(scrapEls.btns);
+      // 手機版右邊沒有視圖，提示只指向迷你預覽。不寫「下面」——手機版預覽排在表單前面（app.css 的 order:-1）
+      box.appendChild(h('div', { class: 'nc-muted nc-scrap-hint' }, state.opts.mobile
+        ? '按了之後在俯視預覽圖上點那塊料'
+        : '按了之後到右邊的俯視圖點那塊料，或在預覽圖上點'));
+      scrapEls.marks = h('div', { class: 'nc-scrap-marks-wrap' });
+      box.appendChild(scrapEls.marks);
+      renderScrapMarks();
+
+      // ---- 切斷的判斷 ----
+      // 三個門檻寫成一句話（「底皮薄於 __ mm 就當切斷」），比「skinMm：」好懂；用 .nc-row 排成標籤對齊的三列。
+      // 空白或負值不送——負的厚度沒有意義，送出去核心夾成 0 又跟表單對不上，不如把這一格改回舊值。
+      box.appendChild(h('div', { class: 'nc-scrap-q' }, '切斷的判斷'));
+      const threshold = (field, label, after, step, hint) => {
+        const input = numberInput(state.scrap[field], (n) => {
+          if (n == null || !(n >= 0)) { input.value = String(state.scrap[field]); return; }
+          if (n === state.scrap[field]) return;
+          state.scrap[field] = n;
+          scrapChange(false);
+        }, { attrs: { step, min: '0' }, dataset: { field: `scrap.${field}` } });
+        return [
+          row(label, input, after),
+          hint ? h('div', { class: 'nc-muted nc-scrap-hint nc-scrap-row-hint' }, hint) : null,
+        ];
+      };
+      box.appendChild(h('div', { class: 'nc-scrap-thresholds' },
+        threshold('skinMm', '底皮薄於', ' mm 就當切斷', '0.1', '現場留薄皮再敲掉／磨掉的填 0.2～0.5'),
+        threshold('bridgeMm', '細於', ' mm 的連接算斷', '0.5', '0＝只看有沒有切穿'),
+        threshold('minAreaMm2', '小於', ' mm² 的碎片不標', '1', null)));
+      return box;
+    }
+    /** 「目前結果」三行：結果／掉落警告／推估素材提示。只重畫這一段。 */
+    function renderScrapResult() {
+      const host = scrapEls.status;
+      if (!host) return;
+      clear(host);
+      host.appendChild(h('div', { class: 'nc-scrap-q' }, '目前結果'));
+      const rt = scrapResultText(state.scrapResult);
+      host.appendChild(h('div', { class: 'nc-scrap-result' }, rt.text));
+      if (rt.warn) host.appendChild(h('div', { class: 'nc-scrap-warn' }, rt.warn));
+      const stockHint = scrapStockHint(state.scrapResult, state.source);
+      if (stockHint) host.appendChild(h('div', { class: 'nc-muted nc-scrap-hint nc-scrap-stock-hint' }, stockHint));
+    }
+    /** 記號那一段：三顆按鈕（標記中的那顆亮）、「標記模式：…」、短提示、記號列表。只重畫這一段。 */
+    function renderScrapMarks() {
+      if (!scrapEls.btns || !scrapEls.marks) return;
+      const sc = state.scrap;
+      clear(scrapEls.btns);
+      const markBtn = (kind, cls, text) => {
+        const on = state.markMode === kind;
+        return h('button', {
+          type: 'button',
+          class: `nc-btn nc-btn-small ${cls}` + (on ? ' is-on' : ''),
+          title: on ? '再按一次取消標記' : `按了之後到圖上點那塊料，標成${SCRAP_MARK_LABEL[kind].slice(2)}`,
+          onclick: () => userSetMarkMode(on ? null : kind),
+        }, text);
+      };
+      scrapEls.btns.appendChild(markBtn('part', 'nc-scrap-mark-part', '＋ 標工件 ⊙'));
+      scrapEls.btns.appendChild(markBtn('scrap', 'nc-scrap-mark-scrap', '＋ 標廢料 ✕'));
+      scrapEls.btns.appendChild(h('button', {
+        type: 'button', class: 'nc-btn nc-btn-small nc-scrap-clear', title: '把記號全部拿掉',
+        onclick: () => { if (!state.scrap.marks.length) return; state.scrap.marks = []; scrapChange(true); },
+      }, '清除'));
+
+      clear(scrapEls.marks);
+      if (state.markMode) {
+        scrapEls.marks.appendChild(h('div', { class: 'nc-scrap-marking' },
+          `標記模式：點圖上要標成「${SCRAP_MARK_LABEL[state.markMode].slice(2)}」的那塊料（再按一次按鈕取消）`));
+      }
+      if (state.markNote) scrapEls.marks.appendChild(h('div', { class: 'nc-scrap-note' }, state.markNote));
+      const list = h('div', { class: 'nc-scrap-marks' });
+      if (!sc.marks.length) list.appendChild(h('div', { class: 'nc-muted' }, '（沒有記號）'));
+      sc.marks.forEach((m, i) => {
+        list.appendChild(h('div', { class: 'nc-scrap-mark', dataset: { index: i, kind: m.kind } },
+          h('span', { class: 'nc-scrap-mark-kind is-' + m.kind }, SCRAP_MARK_LABEL[m.kind] || m.kind),
+          h('span', { class: 'nc-scrap-mark-xy' }, `X ${fmt(m.x, 2)}`),
+          h('span', { class: 'nc-scrap-mark-xy' }, `Y ${fmt(m.y, 2)}`),
+          h('button', {
+            type: 'button', class: 'nc-btn nc-btn-small nc-btn-danger', title: '刪除這個記號',
+            onclick: () => { state.scrap.marks.splice(i, 1); scrapChange(true); },
+          }, '刪')));
+      });
+      scrapEls.marks.appendChild(list);
+    }
+    /** 只換判定結果那三行，表單其他節點一個都不動（app 每次重算分塊、掃完快照都叫這個） */
+    function setScrapResult(result) {
+      state.scrapResult = result || null;
+      state.opts.scrapResult = state.scrapResult;
+      renderScrapResult();
     }
 
     function update(next) {
@@ -1906,10 +2252,20 @@
       state.source = state.stock.source === 'user' ? 'user' : 'estimated';
       state.spec = state.stock.spec ? U.deepClone(state.stock.spec)
         : ((typeof A.specFromStock === 'function' && A.specFromStock(state.stock)) || fallbackSpec());
+      // 廢料判定：設定、結果、標記模式都由 app 餵；next 沒帶的沿用上一次（Object.assign 已合併進 opts）。
+      // 設定先深拷貝再正規化——面板會就地改（push 記號、splice），不能動到 app 手上那份。
+      state.scrap = state.opts.scrap ? scrapNormalize(U.deepClone(state.opts.scrap)) : scrapDefaults();
+      state.scrapResult = state.opts.scrapResult || null;
+      state.markMode = (state.opts.markMode === 'part' || state.opts.markMode === 'scrap') ? state.opts.markMode : null;
+      state.markNote = null;
       render();
     }
     update();
-    return { el: root, update, getStock: () => builtStock() };
+    return {
+      el: root, update, setScrapResult,
+      setMarkMode: (kind) => applyMarkMode(kind),   // app 切的（Esc、視圖點完）：不回呼 onMarkMode，免得繞圈
+      getStock: () => builtStock(), getScrap: () => U.deepClone(state.scrap),
+    };
   };
 
   // ---------------------------------------------------------------------------

@@ -5,9 +5,17 @@
  *   setMode('top'|'sectionX'|'sectionY')   setSection(v)   setSnapshot(i|null)
  *   highlightLine(n)   highlightTool(t|null)   setVisible({rapid, feed, stock, tools})
  *   onPick((line, seg) => …)   fit()   render()   destroy()
+ *   setChunks(result|null, 'off'|'mark'|'hide')   setMarkMode('part'|'scrap'|null)   onMark((x, y, kind) => …)
+ *   setMarks([{x, y, kind}])   getChunkAt(x, y)
  * 俯視：素材外框、heightmap 色階（頂面淺灰 → 深處深藍，離屏 canvas putImageData 後 drawImage 縮放）、
  *       路徑（rapid 灰虛線、feed 依刀具色 12 色循環、compensated 實線、programmed 細線、drill 短線＋孔標記）、
  *       目前高亮行（粗亮色）、高亮刀具（其他淡化）。
+ *       切穿到底／本來沒料的格畫成白灰棋盤（不是深藍——那看起來像切很深）。
+ * 廢料：app 把 core 的 ChunkResult（每格所屬的塊、哪些塊跟工件不相連）用 setChunks 餵進來，
+ *       俯視把廢料格混成橘色（mark）或畫成跟切穿一樣的棋盤（hide——「不見了」就該長得像空氣，不是透出素材灰底），
+ *       剖面把切穿的欄填棋盤、廢料的欄填橘（mark）或棋盤（hide）；hover 會說這格是廢料。
+ *       使用者猜錯時可以在圖上點記號（setMarkMode 之後點一下 → onMark 回工件座標，此時不觸發 onPick），
+ *       記號本身只由 setMarks 餵進來畫，判定邏輯全在 core，這裡不算。
  * 剖面：sectionX / sectionY 畫該位置的高度折線、素材輪廓、投影路徑與標尺。
  * 第四軸：俯視／剖面 X／剖面 Y 三張都改畫在工件座標上（圓棒），高度圖先用 cylToCartesian
  *        從 (X, 弧長)→半徑 攤成 (X, Y)→Z 的上下包絡，三張圖與 3D／展開圖同一套座標。
@@ -31,6 +39,21 @@
   const TOP_RGB = [222, 216, 206];
   const DEEP_RGB = [14, 34, 104];
   const FIXTURE_RGB = [196, 160, 120];
+  // 廢料（切穿之後跟工件不相連的塊）：橘。跟色階的灰→藍、治具的土黃、刀具色都分得開，
+  // 而且在 3D／剖面／頁尾圖例用同一個值，看到橘色就知道是「這塊會掉下來」。
+  const SCRAP_RGB = [230, 126, 34];
+  const SCRAP_MIX = 0.65;          // 廢料格：原色與橘色的混合比（留 35% 原色，深淺還看得出來）
+  // 圖例要跟這個混色結果一致：頂面 TOP_RGB 混 SCRAP_RGB 0.65 = [227,158,94]（淡桃色），
+  // css/view2d.css 的 .nc-view2d-key i.scrap 用的就是這個值，不是飽和的橘——圖上根本沒有那種橘。
+  const SCRAP_ALPHA = 190;         // 廢料格的 alpha：稍微透一點，下面的素材填色透出來，跟實心的工件分得開
+  // 切穿到底／本來就沒料的格：白灰棋盤（像影像軟體的透明底）。以前畫成最深的藍，
+  // 現場看了會以為「這裡切得最深」，其實那裡已經沒有東西。
+  const AIR_RGB_A = [255, 255, 255];
+  const AIR_RGB_B = [226, 229, 233];
+  // 記號：⊙ 工件（綠）、✕ 廢料（紅）——跟素材子頁的迷你預覽用同一組色
+  const MARK_PART = '#2e7d32';
+  const MARK_SCRAP = '#c62828';
+  const SCRAP_MODES = ['off', 'mark', 'hide'];
   const C = {
     bg: '#fbfbfb',
     stockFill: 'rgba(214,214,214,0.55)',
@@ -50,6 +73,7 @@
     axis: 'rgba(0,0,0,0.35)',
     section: '#ff9500',
     profileFill: 'rgba(70,120,210,0.28)',
+    profileFillScrap: 'rgba(230,126,34,0.45)',   // 剖面裡廢料那幾欄（同 SCRAP_RGB）
     profileLine: '#1d4ed8',
     zero: 'rgba(0,0,0,0.3)',
   };
@@ -82,13 +106,29 @@
    * 把 heightmap 轉成 RGBA 影像資料（列已上下翻轉：影像第 0 列 = 工件 Y 最大那列）。
    * 高度是 NaN 的格 = 這裡沒有材料（圓棒攤成直角座標之後，四個角就是空的），畫成全透明；
    * 填 floorZ 會變成一片最深的藍，看起來像被挖穿。
+   *
+   * 第 5 參數可省（舊呼叫不受影響）：
+   *   air        （預設 true）h ≤ airZ 的格＝切穿到底／本來沒料，畫成白灰棋盤而不是最深的藍。
+   *              圓棒攤平那份餵的是「離軸心多遠」，0 是鑽到軸心，不是空氣，要傳 false。
+   *   airZ       （預設 zBottom）「沒料」的門檻。模擬把切穿夾在 floorZ，正常情況 zBottom 就是 floorZ；
+   *              素材底比 floorZ 還低的怪情況由呼叫端直接給 floorZ。
+   *   labels     Int32Array，每格所屬的塊號（0 = 沒歸類）；scrapByLabel[label] = 1 表示那塊是廢料。
+   *   mode       'off' 照舊；'mark' 廢料格混橘（SCRAP_MIX）、alpha 190；'hide' 廢料格畫成跟切穿一樣的棋盤（alpha 255）。
+   *              以前 hide 是 alpha 0，透出來的素材灰底跟工件頂面幾乎同色，看起來像「還有一整塊沒切的料」；
+   *              「不見了」就該長得像空氣。判定在 core 做，這裡只負責上色，所以沒有 labels 就跟 'off' 一樣。
    * @returns {{width:number,height:number,data:Uint8ClampedArray}}
    */
-  function buildHeightImage(sim, heightArr, zTop, zBottom) {
+  function buildHeightImage(sim, heightArr, zTop, zBottom, opts) {
+    opts = opts || {};
     const nx = sim.nx, ny = sim.ny;
     const arr = heightArr || sim.height;
     const data = new Uint8ClampedArray(nx * ny * 4);
     const span = zTop - zBottom;
+    const air = opts.air !== false;
+    const airZ = (Number.isFinite(opts.airZ) ? opts.airZ : zBottom) + 1e-6;
+    const mode = SCRAP_MODES.includes(opts.mode) ? opts.mode : 'off';
+    const labels = (mode !== 'off' && opts.labels && opts.scrapByLabel && opts.labels.length === nx * ny) ? opts.labels : null;
+    const scrapByLabel = labels ? opts.scrapByLabel : null;
     // 256 階查表
     const lut = new Uint8ClampedArray(256 * 3);
     for (let i = 0; i < 256; i++) {
@@ -98,19 +138,50 @@
     for (let iy = 0; iy < ny; iy++) {
       const row = ny - 1 - iy;
       for (let ix = 0; ix < nx; ix++) {
-        const h = arr[iy * nx + ix];
+        const idx = iy * nx + ix;
+        const h = arr[idx];
         const o = (row * nx + ix) * 4;
         if (!Number.isFinite(h)) continue;   // 沒有材料 → alpha 維持 0
         if (h > zTop + 1e-6) {
           data[o] = FIXTURE_RGB[0]; data[o + 1] = FIXTURE_RGB[1]; data[o + 2] = FIXTURE_RGB[2];
+        } else if (air && h <= airZ) {
+          // 棋盤用格子的奇偶決定，放大之後每一格是一個方塊，一眼看出「這裡是空的」
+          const c = ((ix + iy) & 1) ? AIR_RGB_B : AIR_RGB_A;
+          data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2];
         } else {
           const k = span > 1e-9 ? clamp(Math.round(((zTop - h) / span) * 255), 0, 255) : 0;
           data[o] = lut[k * 3]; data[o + 1] = lut[k * 3 + 1]; data[o + 2] = lut[k * 3 + 2];
         }
         data[o + 3] = 255;
+        if (!labels) continue;
+        const lb = labels[idx];
+        if (lb <= 0 || lb >= scrapByLabel.length || !scrapByLabel[lb]) continue;
+        if (mode === 'hide') {
+          const c = ((ix + iy) & 1) ? AIR_RGB_B : AIR_RGB_A;
+          data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+          continue;
+        }
+        // 'mark'：混橘但保留一點原色，廢料塊上的口袋深淺還看得出來
+        data[o] = Math.round(data[o] + (SCRAP_RGB[0] - data[o]) * SCRAP_MIX);
+        data[o + 1] = Math.round(data[o + 1] + (SCRAP_RGB[1] - data[o + 1]) * SCRAP_MIX);
+        data[o + 2] = Math.round(data[o + 2] + (SCRAP_RGB[2] - data[o + 2]) * SCRAP_MIX);
+        data[o + 3] = SCRAP_ALPHA;
       }
     }
     return { width: nx, height: ny, data };
+  }
+
+  /**
+   * ChunkResult → 「哪些塊號是廢料」的查表（Uint8Array，索引 = label，1 = 廢料）。
+   * 影像與剖面每格都要查，用 typed array 比 Map 快得多；result 不支援（圓棒）或沒 labels → null。
+   */
+  function scrapLookup(result) {
+    if (!result || !result.supported || !result.labels || !Array.isArray(result.chunks)) return null;
+    let max = 0;
+    for (const c of result.chunks) if (c && c.label > max) max = c.label;
+    const out = new Uint8Array(max + 1);
+    for (const c of result.chunks) if (c && c.label > 0 && !c.part) out[c.label] = 1;
+    return out;
   }
 
   /*
@@ -213,23 +284,53 @@
 
   /**
    * 剖面折線。cutAxis='x' → 在 X=v 切，回傳沿 Y 的 (pos, z)；cutAxis='y' → 在 Y=v 切，沿 X。
-   * @returns {{pos:number[], z:number[]}|null}
+   * idx 是每一欄在高度陣列裡的位置（廢料上色要拿它去查 labels）。
+   * @returns {{pos:number[], z:number[], idx:number[]}|null}
    */
   function sectionProfile(sim, heightArr, cutAxis, v) {
     if (!sim) return null;
     const arr = heightArr || sim.height;
     const { nx, ny, cell, origin } = sim;
-    const pos = [], z = [];
+    const pos = [], z = [], idx = [];
     if (cutAxis === 'x') {
       const ix = Math.round((v - origin.x) / cell);
       if (ix < 0 || ix >= nx) return null;
-      for (let iy = 0; iy < ny; iy++) { pos.push(origin.y + iy * cell); z.push(arr[iy * nx + ix]); }
+      for (let iy = 0; iy < ny; iy++) { const o = iy * nx + ix; pos.push(origin.y + iy * cell); z.push(arr[o]); idx.push(o); }
     } else {
       const iy = Math.round((v - origin.y) / cell);
       if (iy < 0 || iy >= ny) return null;
-      for (let ix = 0; ix < nx; ix++) { pos.push(origin.x + ix * cell); z.push(arr[iy * nx + ix]); }
+      for (let ix = 0; ix < nx; ix++) { const o = iy * nx + ix; pos.push(origin.x + ix * cell); z.push(arr[o]); idx.push(o); }
     }
-    return { pos, z };
+    return { pos, z, idx };
+  }
+
+  /**
+   * 剖面折線依「每欄的類別」切成一段一段（廢料那幾欄要填不同的顏色、空的那幾欄不填）。
+   * 每一段的 pts 是它上緣的點列（含 steppedProfile 的階梯點）；段與段的交界放在兩欄的中線：
+   * 相鄰兩欄差超過兩格（鉛直牆）交界就是牆的上下兩端，緩坡則在中線插值——
+   * 這樣所有段拼起來跟原本那一整條折線完全重合，不會多一塊也不會缺一塊。
+   * 類別全部相同時結果等於 steppedProfile。
+   * @param {number[]} pos 各欄位置  @param {number[]} z 各欄高度  @param {string[]} cats 各欄類別  @param {number} cell 格距
+   * @returns {{cat:string, pts:{x:number,v:number}[]}[]}
+   */
+  function sectionRuns(pos, z, cats, cell) {
+    const out = [];
+    let cur = null;
+    for (let i = 0; i < pos.length; i++) {
+      const wall = i > 0 && Math.abs(z[i] - z[i - 1]) > 2 * cell;
+      const xm = i > 0 ? (pos[i - 1] + pos[i]) / 2 : pos[i];
+      const zm = i > 0 ? (z[i - 1] + z[i]) / 2 : z[i];
+      if (!cur || cats[i] !== cur.cat) {
+        if (cur) cur.pts.push({ x: xm, v: wall ? z[i - 1] : zm });   // 上一段收在中線
+        cur = { cat: cats[i], pts: [] };
+        out.push(cur);
+        if (i > 0) cur.pts.push({ x: xm, v: wall ? z[i] : zm });       // 新的一段從中線開始
+      } else if (wall) {
+        cur.pts.push({ x: xm, v: z[i - 1] }, { x: xm, v: z[i] });
+      }
+      cur.pts.push({ x: pos[i], v: z[i] });
+    }
+    return out;
   }
 
   /**
@@ -365,6 +466,8 @@
     TOOL_COLORS, PAD, PICK_PX, toolColor, depthColor, buildHeightImage, simExtent, heightAt, sectionProfile, niceStep,
     steppedProfile, distPointSeg2D, arcDistance, segDistance2D, pickSegment, topBounds, sectionBounds, fitTransform,
     cylToCartesian,
+    SCRAP_RGB, AIR_RGB_A, AIR_RGB_B, MARK_PART, MARK_SCRAP, scrapLookup, sectionRuns,
+    TOP_RGB, SCRAP_MIX,
   };
 
   // ---------------------------------------------------------------------------
@@ -410,6 +513,7 @@
       pinch: null,              // 雙指縮放進行中：{ d: 兩指距離, c: 中點 }
       needFit: true,
       imageCache: null,
+      airPattern: null,         // 剖面「切穿」欄的棋盤 pattern（建一次就快取；建不出來就存純色字串）
       cylCache: null,           // 圓棒高度圖攤成直角座標的結果（俯視／剖面 Y 用）
       secCache: null,           // 圓棒某個 X 的橫截面輪廓（剖面 X 用）
       secYCache: null,          // 圓棒某個 Y 的縱剖面輪廓（剖面 Y 用）
@@ -419,6 +523,14 @@
       compLines: new Set(),
       byLine: new Map(),
       pickCb: null,
+      // 廢料判定（core 算好餵進來；這裡只上色與查表）
+      chunks: null,             // ChunkResult（supported 且有 labels 才存）
+      chunkByLabel: null,       // Map<label, chunk>，hover／getChunkAt 用
+      scrapByLabel: null,       // Uint8Array：label → 是不是廢料（影像與剖面每格都要查）
+      scrapMode: 'off',         // 'off' 照舊｜'mark' 混橘｜'hide' 畫成棋盤（跟切穿一樣）
+      marks: [],                // 使用者點的記號 [{x, y, kind}]，只負責畫
+      markMode: null,           // 'part'｜'scrap'：下一次點擊是在放記號，不是挑路徑
+      markCb: null,
       scheduled: false,
       destroyed: false,
     };
@@ -438,6 +550,28 @@
       }
       if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
       return null;
+    }
+
+    /**
+     * 剖面「切穿／無料」欄的填色：跟俯視同一套白灰棋盤（8×8 的離屏 canvas 做成 repeat pattern，建一次就快取）。
+     * 假 DOM／舊環境沒有 createPattern（或建不出離屏 canvas）時退回 AIR_RGB_B 純色——圖樣建不出來也不能炸、不能不畫。
+     * @returns {CanvasPattern|string} 可直接指定給 ctx.fillStyle
+     */
+    function airPattern() {
+      if (S.airPattern) return S.airPattern;
+      const fallback = `rgb(${AIR_RGB_B.join(',')})`;
+      let pat = null;
+      try {
+        const off = makeCanvas(8, 8);
+        const octx = off && typeof off.getContext === 'function' ? off.getContext('2d') : null;
+        if (octx && typeof octx.fillRect === 'function' && typeof ctx.createPattern === 'function') {
+          octx.fillStyle = `rgb(${AIR_RGB_A.join(',')})`; octx.fillRect(0, 0, 8, 8);
+          octx.fillStyle = fallback; octx.fillRect(0, 0, 4, 4); octx.fillRect(4, 4, 4, 4);
+          pat = ctx.createPattern(off, 'repeat');
+        }
+      } catch (e) { pat = null; }
+      S.airPattern = pat || fallback;
+      return S.airPattern;
     }
 
     /**
@@ -538,23 +672,54 @@
     /**
      * 取得（快取的）heightmap 離屏 canvas。
      * `grid`/`arr` 不給就用目前的模擬格與高度；四軸俯視傳的是 `cylToCartesian()` 攤好的那一份。
+     * `opts` 是 buildHeightImage 的第 5 參數（labels／mode／air）；快取鍵含 labels 的參考、mode、air，
+     * 所以 setChunks 換了結果或切了顯示方式就會重建，不用另外清。
      */
-    function heightImage(grid, arr, range) {
+    function heightImage(grid, arr, range, opts) {
       grid = grid || S.data.sim;
       arr = arr || S.heightArr;
       if (!grid || !arr) return null;
       const [zTop, zBottom] = range || depthRange();
+      opts = opts || {};
+      const labels = opts.labels || null, mode = opts.mode || 'off', air = opts.air !== false;
       const c = S.imageCache;
-      if (c && c.arr === arr && c.zTop === zTop && c.zBottom === zBottom) return c.canvas;
-      const img = buildHeightImage(grid, arr, zTop, zBottom);
+      if (c && c.arr === arr && c.zTop === zTop && c.zBottom === zBottom && c.labels === labels && c.mode === mode && c.air === air) return c.canvas;
+      const img = buildHeightImage(grid, arr, zTop, zBottom, opts);
       const off = makeCanvas(img.width, img.height);
       if (!off) return null;
       const octx = off.getContext('2d');
       const id = octx.createImageData(img.width, img.height);
       id.data.set(img.data);
       octx.putImageData(id, 0, 0);
-      S.imageCache = { arr, zTop, zBottom, canvas: off };
+      S.imageCache = { arr, zTop, zBottom, labels, mode, air, canvas: off };
       return off;
+    }
+
+    /** 廢料的 labels 跟目前的模擬格對得上才用（快照與最終結果同一個格網，長度不合就是餵錯了） */
+    function chunkLabels() {
+      const sim = S.data.sim;
+      const r = S.chunks;
+      if (!sim || !r || !r.labels || r.labels.length !== sim.nx * sim.ny) return null;
+      return r.labels;
+    }
+
+    /** 這個工件座標落在哪一塊（沒歸類的格、格外、沒結果 → null） */
+    function chunkAt(x, y) {
+      const sim = S.data.sim;
+      const labels = chunkLabels();
+      if (!labels || !S.chunkByLabel) return null;
+      const ix = Math.round((x - sim.origin.x) / sim.cell);
+      const iy = Math.round((y - sim.origin.y) / sim.cell);
+      if (ix < 0 || iy < 0 || ix >= sim.nx || iy >= sim.ny) return null;
+      const lb = labels[iy * sim.nx + ix];
+      return lb > 0 ? (S.chunkByLabel.get(lb) || null) : null;
+    }
+
+    /** 給 buildHeightImage 的廢料選項（三軸俯視用；'off' 或沒結果就只剩 air） */
+    function scrapImageOpts() {
+      const sim = S.data.sim;
+      const labels = S.scrapMode !== 'off' ? chunkLabels() : null;
+      return { air: true, airZ: sim ? sim.floorZ : undefined, labels, scrapByLabel: labels ? S.scrapByLabel : null, mode: labels ? S.scrapMode : 'off' };
     }
 
     // ---- 繪圖：共用 ----------------------------------------------------------
@@ -673,6 +838,12 @@
       }
       const z = heightAt(sim, S.heightArr, wx, wy);
       if (z != null) t += `  Z面 ${fmt(z)}（深 ${fmt(zTop - z)}）`;
+      // 廢料：滑到那塊就直說，不用靠顏色猜；「照舊」模式下使用者不想看到這件事，就不加
+      if (S.scrapMode !== 'off') {
+        const ch = chunkAt(wx, wy);
+        if (ch && !ch.part) t += '　廢料（跟工件不相連）' + (ch.touchesFixture ? '，碰到夾具' : '');
+        else if (ch && ch.touchesFixture) t += '　碰到夾具';
+      }
       return t;
     }
 
@@ -726,8 +897,9 @@
       if (cart) {
         const e = simExtent(cart);
         x0 = e.minX; x1 = e.maxX;
-        // 色階吃的是「離軸心多遠」：沒切過的地方一律是表面色，切下去才變深
-        const img = heightImage(cart, cart.radius, [r, 0]);
+        // 色階吃的是「離軸心多遠」：沒切過的地方一律是表面色，切下去才變深。
+        // 這份陣列的 0 是「鑽到軸心」不是空氣，棋盤要關；棒身以外本來就是 NaN → 透明
+        const img = heightImage(cart, cart.radius, [r, 0], { air: false });
         if (img) {
           const [sx, sy] = toScreen(e.minX, e.maxY);
           ctx.imageSmoothingEnabled = false;
@@ -758,7 +930,7 @@
         ctx.fillStyle = C.stockFill; ctx.fillRect(r[0], r[1], r[2], r[3]);
       }
       if (sim && S.heightArr) {
-        const img = heightImage();
+        const img = heightImage(null, null, null, scrapImageOpts());
         if (img) {
           const e = simExtent(sim);
           const [sx, sy] = toScreen(e.minX, e.maxY);
@@ -780,6 +952,33 @@
         const e = simExtent(sim);
         const r = rectW(e.minX, e.minY, e.maxX, e.maxY);
         ctx.strokeStyle = C.stockLine; ctx.strokeRect(r[0], r[1], r[2], r[3]);
+      }
+    }
+
+    /**
+     * 使用者點的記號（俯視才畫；剖面／展開圖沒有 XY 平面，畫上去會對不到位置）。
+     * ⊙ 工件＝圓＋中心點（綠）、✕ 廢料＝叉（紅）；都先用白色描一圈，落在深藍的口袋裡也看得到。
+     * 尺寸固定用螢幕 px，縮放時不跟著變大——它是「標記」不是工件上的東西。
+     */
+    function drawMarksTop() {
+      if (!S.marks.length) return;
+      const R = 7;
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      for (const m of S.marks) {
+        const [sx, sy] = toScreen(m.x, m.y);
+        const scrap = m.kind === 'scrap';
+        for (const pass of [{ w: 5, color: C.halo }, { w: 2, color: scrap ? MARK_SCRAP : MARK_PART }]) {
+          ctx.strokeStyle = pass.color; ctx.fillStyle = pass.color; ctx.lineWidth = pass.w;
+          ctx.beginPath();
+          if (scrap) {
+            ctx.moveTo(sx - R, sy - R); ctx.lineTo(sx + R, sy + R);
+            ctx.moveTo(sx - R, sy + R); ctx.lineTo(sx + R, sy - R);
+            ctx.stroke();
+          } else {
+            ctx.arc(sx, sy, R, 0, TAU); ctx.stroke();
+            ctx.beginPath(); ctx.arc(sx, sy, pass.w * 0.9, 0, TAU); ctx.fill();
+          }
+        }
       }
     }
 
@@ -913,7 +1112,7 @@
       drawGrid();
       drawOriginTop();
       if (rot) { drawSegmentsTopRotary(); drawHighlightTopRotary(); }
-      else { drawSegmentsTop(); drawHighlightTop(); }
+      else { drawSegmentsTop(); drawHighlightTop(); drawMarksTop(); }   // 圓棒不支援廢料判定，記號沒意義
     }
 
     // ---- 展開圖（第四軸）----------------------------------------------------
@@ -1405,13 +1604,37 @@
           const floor = sim.floorZ;
           // 鉛直牆（口袋壁、孔壁）畫成真正的階梯，理由同剖面 Y（見 steppedProfile）
           const pts = steppedProfile(prof.pos, prof.z, sim.cell);
-          ctx.beginPath();
-          let [sx, sy] = toScreen(pts[0].x, floor);
-          ctx.moveTo(sx, sy);
-          for (const p of pts) { [sx, sy] = toScreen(p.x, p.v); ctx.lineTo(sx, sy); }
-          [sx, sy] = toScreen(pts[pts.length - 1].x, floor);
-          ctx.lineTo(sx, sy); ctx.closePath();
-          ctx.fillStyle = C.profileFill; ctx.fill();
+          let sx, sy;
+          const fillRun = (run, style) => {
+            ctx.beginPath();
+            [sx, sy] = toScreen(run[0].x, floor);
+            ctx.moveTo(sx, sy);
+            for (const p of run) { [sx, sy] = toScreen(p.x, p.v); ctx.lineTo(sx, sy); }
+            [sx, sy] = toScreen(run[run.length - 1].x, floor);
+            ctx.lineTo(sx, sy); ctx.closePath();
+            ctx.fillStyle = style; ctx.fill();
+          };
+          // 切穿（或 hide 的廢料）那幾欄：從素材底填到素材頂的棋盤。折線本身貼在 floor，照 fillRun 填是零面積，
+          // 底下的素材淺灰就會透出來裝成「還有料」，跟圖例「棋盤＝切穿」對不上。
+          const zTopAir = stock ? stock.max.z : depthRange()[0];
+          const fillAirRun = (run) => {
+            const r = rectW(run[0].x, floor, run[run.length - 1].x, zTopAir);
+            ctx.fillStyle = airPattern(); ctx.fillRect(r[0], r[1], r[2], r[3]);
+          };
+          // 每欄分類：空（切穿到底＝夾在 floorZ）、廢料（有判定且 mark；hide 的廢料當空的畫）、其餘一般。
+          // 沒有判定也要分空／一般，切穿的欄一樣要填棋盤；輪廓線仍然一整條畫，斷面的形狀不變。
+          const labels = S.scrapMode !== 'off' ? chunkLabels() : null;
+          const hideScrap = S.scrapMode === 'hide';
+          const cats = prof.idx.map((o, i) => {
+            const lb = labels ? labels[o] : 0;
+            if (lb > 0 && S.scrapByLabel && lb < S.scrapByLabel.length && S.scrapByLabel[lb]) return hideScrap ? 'air' : 'scrap';
+            return prof.z[i] <= floor + 1e-6 ? 'air' : 'part';
+          });
+          for (const run of sectionRuns(prof.pos, prof.z, cats, sim.cell)) {
+            if (run.cat === 'air') { fillAirRun(run.pts); continue; }
+            if (run.cat === 'scrap') { fillRun(run.pts, C.profileFillScrap); continue; }
+            fillRun(run.pts, C.profileFill);
+          }
           ctx.beginPath();
           for (let i = 0; i < pts.length; i++) { [sx, sy] = toScreen(pts[i].x, pts[i].v); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
           ctx.strokeStyle = C.profileLine; ctx.lineWidth = 1.5; ctx.stroke();
@@ -1660,8 +1883,31 @@
       S.drag = null;
       setDragClass(false);
       if (ev.pointerId != null && typeof canvas.releasePointerCapture === 'function') { try { canvas.releasePointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ } }
-      if (d && !d.moved) { const [mx, my] = eventPos(ev); pickAt(mx, my); }
+      if (d && !d.moved) {
+        const [mx, my] = eventPos(ev);
+        // 標記模式：這一下是在放記號，不是挑路徑（同一下既放記號又跳到某一行會很吵）
+        if (S.markMode) markAt(mx, my); else pickAt(mx, my);
+      }
       requestRender();
+    }
+
+    /**
+     * 標記模式下的點擊 → 工件座標 → onMark。
+     * 俯視直接就是 (X, Y)；三軸剖面點的是「這一欄」——另一個座標就是剖面位置本身，
+     * 所以在剖面上點某塊料也標得到。展開圖／圓棒沒有對得上的 XY（圓棒也不支援廢料判定），不回。
+     */
+    function markAt(mx, my) {
+      const V = curView();
+      if (!V || !S.markCb) return null;
+      if (S.mode === 'unroll' || rotaryOn()) return null;
+      const [hh, vv] = toWorld(mx, my);
+      let x, y;
+      if (S.mode === 'top') { x = hh; y = vv; }
+      else if (S.mode === 'sectionX') { x = S.section; y = hh; }
+      else { x = hh; y = S.section; }
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      S.markCb(x, y, S.markMode);
+      return { x, y };
     }
     function onLeave(ev) {
       if (ev && ev.pointerId != null) S.pointers.delete(ev.pointerId);
@@ -1719,6 +1965,8 @@
         S.imageCache = null;
         S.cylCache = null;
         S.secCache = null;
+        // 廢料判定是對「那一份 sim」算的，換了資料就作廢；app 會在 setData 之後再 setChunks
+        S.chunks = null; S.chunkByLabel = null; S.scrapByLabel = null;
         rebuildIndex();
         const V = curView();
         if (!V || V.empty) S.needFit = true;
@@ -1765,6 +2013,42 @@
       },
       getVisible() { return { rapid: S.visible.rapid, feed: S.visible.feed, refReturn: S.visible.refReturn, stock: S.visible.stock, rotary: S.visible.rotary, tools: S.visible.tools ? new Set(S.visible.tools) : null }; },
       onPick(cb) { S.pickCb = typeof cb === 'function' ? cb : null; return api; },
+      /**
+       * 廢料判定結果（core 的 ChunkResult）與顯示方式。
+       * result 為 null／supported:false（圓棒）→ 清掉；mode 省略就沿用目前的。
+       * 判定本身不在這裡做：這裡只把「每格屬於哪塊、哪塊是廢料」轉成查表，畫的時候用。
+       */
+      setChunks(result, mode) {
+        if (mode != null) S.scrapMode = SCRAP_MODES.includes(mode) ? mode : 'off';
+        const ok = !!(result && result.supported && result.labels && Array.isArray(result.chunks));
+        S.chunks = ok ? result : null;
+        S.scrapByLabel = ok ? scrapLookup(result) : null;
+        S.chunkByLabel = ok ? new Map(result.chunks.filter((c) => c && c.label > 0).map((c) => [c.label, c])) : null;
+        S.imageCache = null;
+        requestRender();
+        return api;
+      },
+      getChunks() { return S.chunks; },
+      getScrapMode() { return S.scrapMode; },
+      /** 標記模式：'part'｜'scrap' 時下一次點擊回 onMark；null 離開。canvas 加 is-marking 讓游標換樣子 */
+      setMarkMode(kind) {
+        S.markMode = kind === 'part' || kind === 'scrap' ? kind : null;
+        if (canvas.classList && typeof canvas.classList.toggle === 'function') canvas.classList.toggle('is-marking', !!S.markMode);
+        return api;
+      },
+      getMarkMode() { return S.markMode; },
+      onMark(cb) { S.markCb = typeof cb === 'function' ? cb : null; return api; },
+      /** 只負責畫：⊙ 工件、✕ 廢料（俯視）。壞掉的項目（座標不是有限數字）直接丟掉 */
+      setMarks(marks) {
+        S.marks = Array.isArray(marks)
+          ? marks.filter((m) => m && Number.isFinite(m.x) && Number.isFinite(m.y)).map((m) => ({ x: m.x, y: m.y, kind: m.kind === 'scrap' ? 'scrap' : 'part' }))
+          : [];
+        requestRender();
+        return api;
+      },
+      getMarks() { return S.marks.map((m) => ({ x: m.x, y: m.y, kind: m.kind })); },
+      /** 這個工件座標落在哪一塊（hover／app 用）；沒歸類、格外、沒結果 → null */
+      getChunkAt(x, y) { return chunkAt(Number(x), Number(y)); },
       fit() { return fit(true); },
       render() { render(); return api; },
       requestRender() { requestRender(); return api; },

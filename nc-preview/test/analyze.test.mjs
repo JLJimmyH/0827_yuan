@@ -555,8 +555,56 @@ test('samples.js：samples/ 的示範程式都內嵌了，內容一致且分析�
     assert.ok(s, `缺少範例 ${name}`);
     const rawText = fs.readFileSync(path.join(dir, file), 'latin1').replace(/\r\n/g, '\n');
     assert.equal(s.text, rawText, `${name} 內容不一致（跑 node tools/make-samples.mjs 重新產生）`);
+    // 範例附的素材（samples/<name>.stock.json）也要跟內嵌的一致；沒有側車檔就不該有 stock 欄位
+    const sidecar = path.join(dir, name + '.stock.json');
+    if (fs.existsSync(sidecar)) {
+      const o = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+      // samples.js 是在另一個 vm context 跑的，物件原型不同，strict deepEqual 會失敗——先 JSON 往返再比
+      assert.deepEqual(JSON.parse(JSON.stringify(s.stock && s.stock.spec)), o.spec, `${name} 附的素材不一致（跑 node tools/make-samples.mjs 重新產生）`);
+      assert.ok(NC.analysis.stockFromSpec(s.stock.spec, s.stock.fixtures), `${name} 附的素材 spec 要能正規化`);
+    } else {
+      assert.equal(s.stock, undefined, `${name} 沒有側車檔卻有 stock 欄位`);
+    }
     const r = NC.analyzeSync({ text: s.text });
     assert.ok(r.tok.blocks.length > 1, `${name} 範例應該能分析`);
     assert.deepEqual(r.diagnostics.filter((d) => d.severity === 'error'), [], `${name} 示範程式不該有 error`);
   }
+});
+
+// demo-cutout 是廢料判定的示範：用它附的 120×80×10 素材跑完整模擬，外框要判成廢料、原點那塊是工件。
+// 用推估素材則永遠不會切穿（底面比最深切削低 5 mm）——這正是範例要附素材的原因，一起釘住。
+test('samples.js：demo-cutout 用附的素材模擬後外框是廢料、推估素材則不會切穿', async () => {
+  const p = path.join(ROOT, 'js', 'ui', 'samples.js');
+  const sandbox = { globalThis: {} };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(p, 'utf8'), sandbox, { filename: p });
+  const s = sandbox.NC.ui.samples.find((x) => x.name === 'demo-cutout');
+  assert.ok(s && s.stock, 'demo-cutout 要附素材');
+  const stock = NC.analysis.stockFromSpec(s.stock.spec, s.stock.fixtures);
+  const settings = NC.util.defaultSettings();
+  const withStock = await NC.analyze({ text: s.text, settings, toolTable: null, stock, scenarios: ['off'], sim: { enabled: true, cell: 0.5 } });
+  const sim = withStock.scenarios.off.sim;
+  assert.ok(sim && !sim.cylinder);
+  assert.equal(sim.floorZ, -10);
+  const r = NC.sim.chunks(sim, sim.height, NC.sim.defaultScrap());
+  assert.equal(r.supported, true);
+  assert.equal(r.partCount, 1);
+  assert.equal(r.scrapCount, 1);
+  const part = r.chunks.find((c) => c.part), scrap = r.chunks.find((c) => !c.part);
+  assert.equal(part.why, 'origin');
+  assert.ok(part.bbox.x0 > -32 && part.bbox.x1 < 32 && part.bbox.y0 > -22 && part.bbox.y1 < 22, '中間 60×40 的零件是工件');
+  assert.ok(scrap.areaMm2 > part.areaMm2, '外框（廢料）比零件大');
+  // 中間的零件（原點）與外框（角落固定孔旁）各抽一格
+  const at = (x, y) => r.labels[Math.round((y - sim.origin.y) / sim.cell) * sim.nx + Math.round((x - sim.origin.x) / sim.cell)];
+  assert.equal(at(0, 0), part.label);
+  assert.equal(at(-56, 0), scrap.label);
+
+  const estimated = await NC.analyze({ text: s.text, settings, toolTable: null, stock: null, scenarios: ['off'], sim: { enabled: true, cell: 0.5 } });
+  const simE = estimated.scenarios.off.sim;
+  assert.equal(estimated.stock.source, 'estimated');
+  assert.ok(simE.floorZ < -11, '推估底面在最深切削之下');
+  const rE = NC.sim.chunks(simE, simE.height, NC.sim.defaultScrap());
+  assert.equal(rE.scrapCount, 0);
+  assert.equal(rE.partCount, 1);
 });

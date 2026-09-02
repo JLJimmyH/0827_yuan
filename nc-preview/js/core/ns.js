@@ -295,15 +295,64 @@
   /**
    * @typedef {Object} SimResult
    * @property {SkipScenario} scenario
-   * @property {number} cell           格距 mm
+   * @property {number} cell           格距 mm（＝cellX；圓棒的周向格距另見 cellY）
+   * @property {number} cellX          X 向格距
+   * @property {number} cellY          Y 向格距（三軸 = cell；圓棒 = 圓周 / ny，繞一圈剛好接回）
+   * @property {boolean} wrapY         Y 向循環（圓棒周向；索引要繞回來）
    * @property {number} nx
    * @property {number} ny
    * @property {Vec2} origin           格 (0,0) 的中心工件座標（節點式：格 (ix,iy) 的中心 = origin + (ix·cell, iy·cell)，查表用 Math.round）
+   * @property {boolean} cylinder      四軸圓棒素材（格網是 (X, 弧長)，高度是離軸心的距離）
+   * @property {number} [radius]       圓棒：半徑
+   * @property {{y:number,z:number}} [center]  圓棒：軸心在工件座標的 Y／Z
+   * @property {number} [circumference]  圓棒：圓周
    * @property {Float32Array} height   最終高度，索引 = iy*nx + ix
-   * @property {number} floorZ         素材底 Z
-   * @property {{afterOpIndex:number, tool:number|null, height:Float32Array}[]} snapshots
+   * @property {Map<number,number[]>} extra  圓棒：被挖出空洞的格的材料區間 [lo0,hi0,lo1,hi1,…]（升冪）；三軸為空 Map
+   * @property {number} floorZ         素材底 Z（圓棒 = 0，軸心）；切穿的格夾在這個值 → 「沒有料」
+   * @property {{afterOpIndex:number, tool:number|null, height:Float32Array, extra:Map<number,number[]>}[]} snapshots
    * @property {Diagnostic[]} events   碰撞／切入事件（R27 R28 的模擬判定）
-   * @property {{perOp:number[], total:number}} time   秒
+   * @property {{perOp:number[], total:number, pre:number}} time   秒；pre = 第一個作業之前（換刀前）的時間
+   * @property {Uint8Array} mask       每格所屬治具（0 = 不是治具；n = stock.fixtures[n-1]），與 Sim 共用同一份
+   * @property {Stock} stock           實際用的素材
+   * @property {number} removedVolume  移除的材料體積 mm³
+   */
+  /**
+   * @typedef {Object} Scrap  廢料判定的設定。跟程式一起存在 localStorage 的素材項目裡；第一版不進 AnalysisRequest
+   * @property {'auto'|'origin'|'largest'|'fixture'|'marks'} anchor  哪一塊是工件：
+   *   auto＝原點 (0,0) 所在的塊，原點不在任何塊上就取最大塊；origin＝同 auto（保留給日後分家）；largest＝面積最大的塊；
+   *   fixture＝四鄰碰到夾具格的塊都是工件（一塊也沒碰到 → 退回 auto）；
+   *   marks＝只看記號：沒被標的塊——有任何 ⊙ 時算廢料、只有 ✕ 時算工件、完全沒記號 → 退回 auto
+   * @property {{x:number,y:number,kind:'part'|'scrap'}[]} marks  圖上點的記號（工件座標）。每種 anchor 下都優先：含 ⊙(part) 一定是工件、含 ✕(scrap) 一定是廢料（同塊兩種都有 → ⊙ 贏）
+   * @property {number} skinMm      剩餘厚度 ≤ 此值就當沒料（現場留薄皮再敲掉／磨掉的填 0.2～0.5）；normalizeScrap 夾在 0～1000
+   * @property {number} bridgeMm    細於此寬度的連接算斷：侵蝕 round(bridgeMm/(2·cell)) 格再標號、再長回來；0 = 只看有沒有切穿。
+   *   normalizeScrap 夾在 0～50（侵蝕是 O(k·n)，上限是為了不讓手滑的大數字凍住主執行緒）；
+   *   核心被吃光又沒鄰塊可長回來的孤立塊會重新標號成獨立的塊——每個實料格最後都有標號
+   * @property {number} minAreaMm2  小於此面積的塊不分類（label 維持 0、畫成一般材料）；normalizeScrap 夾在 0～1e6
+   */
+  /**
+   * @typedef {Object} Chunk  一塊四鄰連通的實料
+   * @property {number} label        1..N，等於在 ChunkResult.chunks 裡的索引 + 1
+   * @property {number} cells        格數
+   * @property {number} areaMm2      cells · cellX · cellY
+   * @property {{x0:number,y0:number,x1:number,y1:number}} bbox  格中心的工件座標範圍（不外擴半格）
+   * @property {number} zMin         這塊裡最低的頂面
+   * @property {number} zMax
+   * @property {boolean} part        true = 工件、false = 廢料
+   * @property {boolean} touchesFixture  四鄰有夾具格
+   * @property {'origin'|'largest'|'fixture'|'mark'|'scrapMark'|'unmarked'|'other'} why  怎麼判的（hover 提示用）：
+   *   origin/largest/fixture = 依 anchor 選中的工件；mark = 有 ⊙；scrapMark = 有 ✕；unmarked = anchor 'marks' 下沒被標的塊；other = 依 anchor 沒選中 → 廢料
+   */
+  /**
+   * @typedef {Object} ChunkResult  NC.sim.chunks 的結果
+   * @property {boolean} supported   false = 四軸圓棒（其餘欄位是空值：labels null、chunks []、計數 0）
+   * @property {Int32Array|null} labels  每格所屬的塊（0 = 沒料／夾具格／太小的塊），索引同 height
+   * @property {Chunk[]} chunks
+   * @property {number} partCount
+   * @property {number} scrapCount
+   * @property {number} scrapAreaMm2
+   * @property {boolean|null} partTouchesFixture  任一工件塊碰到夾具；格網裡沒有夾具格、或一塊工件都沒有（partCount 0，例如每塊都被 ✕）時 null
+   *   （UI 用 === false 提示「切斷後會掉落」——沒有工件就沒有東西會掉，不能是 false）
+   * @property {boolean} hasFixture  格網裡有夾具格
    */
   /**
    * @typedef {Object} AnalysisRequest

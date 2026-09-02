@@ -34,7 +34,8 @@ function mockCanvas(w = 800, h = 600) {
   const ctx = mockCtx();
   const c = {
     width: w, height: h, clientWidth: w, clientHeight: h, style: { width: '', height: '' },
-    classList: { toggle() {} },
+    // 記下 toggle 的結果，測標記模式有沒有加 is-marking
+    classList: { set: new Set(), toggle(name, on) { if (on) this.set.add(name); else this.set.delete(name); }, contains(name) { return this.set.has(name); } },
     ownerDocument: { createElement: () => mockCanvas(1, 1) },
     ctx,
     getContext: () => ctx,
@@ -624,5 +625,324 @@ test('steppedProfile：鉛直牆畫成階梯，緩坡維持直連', () => {
   ]);
   // 純緩坡完全不插點
   assert.equal(U.steppedProfile([0, 0.5, 1.0], [10, 10.3, 10.6], 0.5).length, 3);
+});
+
+// ---------------------------------------------------------------------------
+// 廢料判定：影像上色、剖面分段、記號、標記模式（判定本身在 core，這裡只吃 ChunkResult）
+// ---------------------------------------------------------------------------
+/** 離屏 canvas 最後一次 putImageData 的像素資料 */
+function lastImageData(off) {
+  const puts = off.ctx.ops.filter((o) => o.op === 'putImageData');
+  return puts.length ? puts[puts.length - 1].args[0].data : null;
+}
+/** 影像裡格 (ix, iy) 的 RGBA（影像列是上下翻轉的） */
+function px(img, nx, ny, ix, iy) {
+  const o = ((ny - 1 - iy) * nx + ix) * 4;
+  return [img[o], img[o + 1], img[o + 2], img[o + 3]];
+}
+
+test('buildHeightImage：切穿到底的格畫成棋盤（不是深藍）；air:false 照舊；NaN 仍透明', () => {
+  const sim = { nx: 3, ny: 2, cell: 1, origin: { x: 0, y: 0 }, height: new Float32Array([-10, -10, 0, NaN, -10, -5]) };
+  const img = U.buildHeightImage(sim, sim.height, 0, -10).data;
+  assert.deepEqual(px(img, 3, 2, 0, 0), [255, 255, 255, 255], '(0,0) 棋盤 A');
+  assert.deepEqual(px(img, 3, 2, 1, 0), [226, 229, 233, 255], '(1,0) 棋盤 B');
+  assert.deepEqual(px(img, 3, 2, 1, 1), [255, 255, 255, 255], '(1,1) 又是 A（ix+iy 偶數）');
+  assert.deepEqual(px(img, 3, 2, 2, 0), [222, 216, 206, 255], '頂面照舊');
+  assert.equal(px(img, 3, 2, 0, 1)[3], 0, 'NaN 仍全透明');
+  assert.ok(px(img, 3, 2, 2, 1)[2] > px(img, 3, 2, 2, 1)[0], '-5 是一般的藍');
+  // air 關掉（圓棒攤平那份的 0 是鑽到軸心，不是空氣）→ 底部深藍
+  const noAir = U.buildHeightImage(sim, sim.height, 0, -10, { air: false }).data;
+  assert.deepEqual(px(noAir, 3, 2, 0, 0), [14, 34, 104, 255]);
+  // airZ 可以另外給：門檻抬到 -5，那格也變棋盤（(2,1) 是奇數格 → B）
+  const hiAir = U.buildHeightImage(sim, sim.height, 0, -10, { airZ: -5 }).data;
+  assert.deepEqual(px(hiAir, 3, 2, 2, 1), [226, 229, 233, 255]);
+});
+
+test('buildHeightImage：mark 廢料格混橘＋alpha 190、hide 畫成棋盤（不是透明）、off 照舊；非廢料的塊與沒歸類的格不動', () => {
+  const sim = { nx: 4, ny: 1, cell: 1, origin: { x: 0, y: 0 }, height: new Float32Array([0, 0, 0, 0]) };
+  const labels = new Int32Array([1, 1, 2, 2]);
+  const scrapByLabel = new Uint8Array([0, 0, 1]);   // 第 2 塊是廢料
+  const plain = U.buildHeightImage(sim, sim.height, 0, -10).data;
+  const mark = U.buildHeightImage(sim, sim.height, 0, -10, { labels, scrapByLabel, mode: 'mark' }).data;
+  // mix(頂面色, 橘, 0.65)：222→227、216→158、206→94
+  assert.deepEqual(px(mark, 4, 1, 2, 0), [227, 158, 94, 190]);
+  assert.deepEqual(px(mark, 4, 1, 0, 0), [222, 216, 206, 255], '工件塊不變');
+  // hide：廢料格跟切穿的格長得一樣——白灰棋盤、alpha 255（透明會透出素材灰底，看起來像還有一整塊料）
+  const hide = U.buildHeightImage(sim, sim.height, 0, -10, { labels, scrapByLabel, mode: 'hide' }).data;
+  assert.deepEqual(px(hide, 4, 1, 2, 0), [255, 255, 255, 255], '(2,0) ix+iy 偶數 → 棋盤 A');
+  assert.deepEqual(px(hide, 4, 1, 3, 0), [226, 229, 233, 255], '(3,0) 奇數 → 棋盤 B');
+  assert.deepEqual(px(hide, 4, 1, 1, 0), [222, 216, 206, 255], '工件塊不變');
+  // label 0（沒歸類）不動
+  const labels0 = new Int32Array([1, 1, 2, 0]);
+  const mark0 = U.buildHeightImage(sim, sim.height, 0, -10, { labels: labels0, scrapByLabel, mode: 'mark' }).data;
+  assert.deepEqual(px(mark0, 4, 1, 3, 0), [222, 216, 206, 255], 'label 0 不變');
+  const hide0 = U.buildHeightImage(sim, sim.height, 0, -10, { labels: labels0, scrapByLabel, mode: 'hide' }).data;
+  assert.deepEqual(px(hide0, 4, 1, 3, 0), [222, 216, 206, 255], 'label 0 在 hide 也不變');
+  const off = U.buildHeightImage(sim, sim.height, 0, -10, { labels, scrapByLabel, mode: 'off' }).data;
+  assert.deepEqual(Array.from(off), Array.from(plain));
+  // labels 長度跟格網對不上 → 當沒有
+  const bad = U.buildHeightImage(sim, sim.height, 0, -10, { labels: new Int32Array([2]), scrapByLabel, mode: 'mark' }).data;
+  assert.deepEqual(Array.from(bad), Array.from(plain));
+});
+
+test('scrapLookup：label → 是否廢料；不支援／沒 labels → null', () => {
+  const r = { supported: true, labels: new Int32Array(1), chunks: [{ label: 1, part: true }, { label: 3, part: false }] };
+  assert.deepEqual(Array.from(U.scrapLookup(r)), [0, 0, 0, 1]);
+  assert.equal(U.scrapLookup({ supported: false, labels: null, chunks: [] }), null);
+  assert.equal(U.scrapLookup(null), null);
+});
+
+test('sectionRuns：類別交界在兩欄中線（鉛直牆取牆的兩端、緩坡插值）；全同類別等於 steppedProfile', () => {
+  // 工件 | 切穿：0,0 → -15,-15 是牆，交界在 x=1.5
+  let runs = U.sectionRuns([0, 1, 2, 3], [0, 0, -15, -15], ['part', 'part', 'air', 'air'], 1);
+  assert.deepEqual(runs, [
+    { cat: 'part', pts: [{ x: 0, v: 0 }, { x: 1, v: 0 }, { x: 1.5, v: 0 }] },
+    { cat: 'air', pts: [{ x: 1.5, v: -15 }, { x: 2, v: -15 }, { x: 3, v: -15 }] },
+  ]);
+  // 緩坡：交界點在中線插值
+  runs = U.sectionRuns([0, 1, 2, 3], [0, -1, -1.5, -1.5], ['part', 'scrap', 'scrap', 'scrap'], 1);
+  assert.deepEqual(runs[0], { cat: 'part', pts: [{ x: 0, v: 0 }, { x: 0.5, v: -0.5 }] });
+  assert.deepEqual(runs[1].pts[0], { x: 0.5, v: -0.5 });
+  assert.equal(runs[1].pts.length, 4);
+  // 全同類別：跟 steppedProfile 一模一樣（含階梯點）
+  const pos = [0, 0.5, 1.0, 1.5], z = [17, 17, 10, 10.3];
+  runs = U.sectionRuns(pos, z, ['part', 'part', 'part', 'part'], 0.5);
+  assert.equal(runs.length, 1);
+  assert.deepEqual(runs[0].pts, U.steppedProfile(pos, z, 0.5));
+});
+
+/**
+ * 假的 ChunkResult：makeData 的素材上，外圈 4 格寬是廢料（label 2、碰到夾具），
+ * 第 5 格那一圈切穿到 floorZ（label 0），中間是工件（label 1）。
+ */
+function chunkData() {
+  const d = makeData();
+  const { nx, ny } = d.sim;
+  const labels = new Int32Array(nx * ny);
+  for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
+    const o = iy * nx + ix;
+    if (ix <= 3 || ix >= nx - 4 || iy <= 3 || iy >= ny - 4) labels[o] = 2;
+    else if (ix === 4 || ix === nx - 5 || iy === 4 || iy === ny - 5) { labels[o] = 0; d.sim.height[o] = d.sim.floorZ; }
+    else labels[o] = 1;
+  }
+  const result = {
+    supported: true, labels,
+    chunks: [
+      { label: 1, cells: 0, areaMm2: 0, part: true, touchesFixture: false, why: 'origin' },
+      { label: 2, cells: 0, areaMm2: 0, part: false, touchesFixture: true, why: 'other' },
+    ],
+    partCount: 1, scrapCount: 1, scrapAreaMm2: 0, partTouchesFixture: false, hasFixture: true,
+  };
+  return { d, result };
+}
+
+test('setChunks：mark 把廢料格混橘、切穿的一圈是棋盤；hide 廢料格也是棋盤；off 照舊；快取只在變更時重建', () => {
+  const { d, result } = chunkData();
+  const { c, view } = makeView(d);
+  const { nx, ny } = d.sim;
+  view.setChunks(result, 'mark'); view.render();
+  let off = c.ctx.ops.filter((o) => o.op === 'drawImage')[0].args[0];
+  let img = lastImageData(off);
+  assert.deepEqual(px(img, nx, ny, 0, 0), [227, 158, 94, 190], '外圈廢料格混橘');
+  assert.deepEqual(px(img, nx, ny, 65, 30), [222, 216, 206, 255], '中間工件照舊');
+  const air = px(img, nx, ny, 4, 30);
+  assert.ok(air[3] === 255 && air[0] >= 226, '切穿的一圈是棋盤（白或淺灰）');
+  // 再 render 一次不重建
+  c.ctx.ops.length = 0; off.ctx.ops.length = 0;
+  view.render();
+  assert.equal(off.ctx.ops.filter((o) => o.op === 'putImageData').length, 0);
+  // hide
+  c.ctx.ops.length = 0;
+  view.setChunks(result, 'hide'); view.render();
+  off = c.ctx.ops.filter((o) => o.op === 'drawImage')[0].args[0];
+  img = lastImageData(off);
+  assert.deepEqual(px(img, nx, ny, 0, 0), [255, 255, 255, 255], 'hide：廢料格畫成棋盤 A（跟切穿一樣，不是透明）');
+  assert.deepEqual(px(img, nx, ny, 1, 0), [226, 229, 233, 255], 'hide：隔壁格棋盤 B');
+  assert.deepEqual(px(img, nx, ny, 65, 30), [222, 216, 206, 255], 'hide：工件照舊');
+  // off：跟沒有 chunks 一樣
+  c.ctx.ops.length = 0;
+  view.setChunks(result, 'off'); view.render();
+  off = c.ctx.ops.filter((o) => o.op === 'drawImage')[0].args[0];
+  img = lastImageData(off);
+  assert.deepEqual(px(img, nx, ny, 0, 0), [222, 216, 206, 255]);
+  assert.equal(view.getScrapMode(), 'off');
+  // 不支援（圓棒）的結果當 null；mode 省略沿用
+  view.setChunks({ supported: false, labels: null, chunks: [], partCount: 0, scrapCount: 0 });
+  assert.equal(view.getChunks(), null);
+  assert.equal(view.getScrapMode(), 'off');
+  view.setChunks(result, 'mark');
+  assert.equal(view.getChunks(), result);
+  // 換資料 → 舊結果作廢
+  view.setData(makeData());
+  assert.equal(view.getChunks(), null);
+});
+
+test('hover 滑到廢料格說「廢料（跟工件不相連）」、碰到夾具也說；off 不說；getChunkAt', () => {
+  const { d, result } = chunkData();
+  const { c, view } = makeView(d);
+  view.setChunks(result, 'mark');
+  let [sx, sy] = view.worldToScreen(-65, -30);   // ix 0, iy 0 → 外圈
+  c.fire('mousemove', { clientX: sx, clientY: sy });
+  c.ctx.ops.length = 0; view.render();
+  let t = texts(c).find((s) => s.startsWith('X '));
+  assert.match(t, /廢料（跟工件不相連），碰到夾具/);
+  [sx, sy] = view.worldToScreen(0, 0);
+  c.fire('mousemove', { clientX: sx, clientY: sy });
+  c.ctx.ops.length = 0; view.render();
+  t = texts(c).find((s) => s.startsWith('X '));
+  assert.ok(!/廢料/.test(t), '工件格不說廢料');
+  // off：照舊，連 hover 也不提
+  view.setChunks(result, 'off');
+  [sx, sy] = view.worldToScreen(-65, -30);
+  c.fire('mousemove', { clientX: sx, clientY: sy });
+  c.ctx.ops.length = 0; view.render();
+  assert.ok(!/廢料/.test(texts(c).find((s) => s.startsWith('X '))));
+  // getChunkAt
+  view.setChunks(result, 'mark');
+  assert.equal(view.getChunkAt(-65, -30).label, 2);
+  assert.equal(view.getChunkAt(0, 0).label, 1);
+  assert.equal(view.getChunkAt(-61, 0), null, '切穿的格沒歸類');
+  assert.equal(view.getChunkAt(999, 0), null);
+  view.setChunks(null);
+  assert.equal(view.getChunkAt(0, 0), null);
+});
+
+test('剖面 Y：廢料那幾欄填橘、切穿的欄填棋盤（素材底到素材頂）、其餘照舊；hide 的廢料也填棋盤；輪廓線仍一整條', () => {
+  const { d, result } = chunkData();
+  const { c, view } = makeView(d);
+  view.setChunks(result, 'mark');
+  view.setMode('sectionY').setSection(0); c.ctx.ops.length = 0; view.render();
+  const fills = (col) => c.ctx.ops.filter((o) => o.op === 'fill' && o.fill === col);
+  // 假 ctx 沒有 createPattern → 退回 AIR_RGB_B 純色；切穿的欄用 fillRect 填一整欄
+  const AIR = `rgb(${U.AIR_RGB_B.join(',')})`;
+  const airRects = () => c.ctx.ops.filter((o) => o.op === 'fillRect' && o.fill === AIR);
+  assert.equal(fills('rgba(230,126,34,0.45)').length, 2, '左右兩邊的外圈各一段橘');
+  assert.equal(fills('rgba(70,120,210,0.28)').length, 1, '中間工件一段藍');
+  assert.equal(airRects().length, 2, '切穿的一圈左右各一塊棋盤');
+  assert.ok(strokes(c).some((o) => o.stroke === '#1d4ed8'), '輪廓線');
+  // 棋盤那一塊要從素材底鋪到素材頂（x 範圍是切穿那幾欄的中線到中線：ix 4 → 3.5～4.5 → 工件座標 -61.5～-60.5）
+  const r = airRects()[0].args;
+  const [x0, yTop] = view.worldToScreen(-61.5, 0), [x1, yBot] = view.worldToScreen(-60.5, -15);
+  assert.ok(Math.abs(r[0] - x0) < 1e-6 && Math.abs(r[2] - (x1 - x0)) < 1e-6, '寬度＝切穿那一欄');
+  assert.ok(Math.abs(r[1] - yTop) < 1e-6 && Math.abs(r[3] - (yBot - yTop)) < 1e-6, '高度＝素材頂到素材底');
+  // hide：橘不填、廢料當空的畫——跟旁邊切穿的欄併成一塊棋盤；藍照舊
+  view.setChunks(result, 'hide'); c.ctx.ops.length = 0; view.render();
+  assert.equal(fills('rgba(230,126,34,0.45)').length, 0);
+  assert.equal(fills('rgba(70,120,210,0.28)').length, 1);
+  assert.equal(airRects().length, 2, 'hide：左右各一塊（廢料＋切穿併成一段）');
+  const hr = airRects()[0].args;
+  const [hx0] = view.worldToScreen(-65, 0), [hx1] = view.worldToScreen(-60.5, 0);
+  assert.ok(Math.abs(hr[0] - hx0) < 1e-6 && Math.abs(hr[2] - (hx1 - hx0)) < 1e-6, 'hide：棋盤從素材邊鋪到切穿欄的內側中線');
+  // off：廢料當一般料——外圈、中間各一段藍，中間隔著切穿的棋盤
+  view.setChunks(result, 'off'); c.ctx.ops.length = 0; view.render();
+  assert.equal(fills('rgba(230,126,34,0.45)').length, 0);
+  assert.equal(fills('rgba(70,120,210,0.28)').length, 3);
+  assert.equal(airRects().length, 2);
+  // 沒有廢料判定（setChunks(null)）切穿的欄一樣要填棋盤——圖例說棋盤＝切穿，跟廢料開不開無關
+  view.setChunks(null); c.ctx.ops.length = 0; view.render();
+  assert.equal(fills('rgba(70,120,210,0.28)').length, 3);
+  assert.equal(airRects().length, 2);
+});
+
+test('剖面棋盤：ctx 有 createPattern 就用 8×8 離屏棋盤做的 pattern（只建一次）；沒有就退回純色，不會炸', () => {
+  const { d } = chunkData();
+  const c = mockCanvas();
+  const patterns = [];
+  c.ctx.createPattern = (img, rep) => { const p = { pattern: true, img, rep }; patterns.push(p); return p; };
+  const view = NC.ui.createView2D(c);
+  view.setData(d).setMode('sectionY').setSection(0); c.ctx.ops.length = 0; view.render();
+  const rects = c.ctx.ops.filter((o) => o.op === 'fillRect' && o.fill && o.fill.pattern);
+  assert.equal(rects.length, 2, '切穿的欄用 pattern 填');
+  assert.equal(patterns.length, 1);
+  assert.equal(patterns[0].rep, 'repeat');
+  // 離屏 8×8：先鋪 A 再用 B 填左上／右下兩格
+  const off = patterns[0].img;
+  assert.equal(off.width, 8); assert.equal(off.height, 8);
+  const offRects = off.ctx.ops.filter((o) => o.op === 'fillRect');
+  assert.deepEqual(offRects.map((o) => o.fill), [`rgb(${U.AIR_RGB_A.join(',')})`, `rgb(${U.AIR_RGB_B.join(',')})`, `rgb(${U.AIR_RGB_B.join(',')})`]);
+  assert.deepEqual(offRects.map((o) => o.args), [[0, 0, 8, 8], [0, 0, 4, 4], [4, 4, 4, 4]]);
+  // 再 render 不再建
+  c.ctx.ops.length = 0; view.render();
+  assert.equal(patterns.length, 1);
+  // createPattern 會炸的環境：退回純色
+  const c2 = mockCanvas();
+  c2.ctx.createPattern = () => { throw new Error('nope'); };
+  const v2 = NC.ui.createView2D(c2);
+  v2.setData(chunkData().d).setMode('sectionY').setSection(0); c2.ctx.ops.length = 0; v2.render();
+  assert.equal(c2.ctx.ops.filter((o) => o.op === 'fillRect' && o.fill === `rgb(${U.AIR_RGB_B.join(',')})`).length, 2);
+});
+
+test('頁尾圖例跟實際畫出來的顏色一致：i.scrap = mix(TOP_RGB, SCRAP_RGB, SCRAP_MIX) 的淡桃色、i.air = AIR_RGB_A/B 棋盤', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'css', 'view2d.css'), 'utf8');
+  const mix = [0, 1, 2].map((k) => Math.round(U.TOP_RGB[k] + (U.SCRAP_RGB[k] - U.TOP_RGB[k]) * U.SCRAP_MIX));
+  assert.deepEqual(mix, [227, 158, 94], '俯視廢料格的實際顏色');
+  const scrap = css.match(/\.nc-view2d-key i\.scrap\s*\{([^}]*)\}/);
+  assert.ok(scrap, '要有 .nc-view2d-key i.scrap');
+  assert.match(scrap[1], new RegExp(`rgb\\(\\s*${mix[0]}\\s*,\\s*${mix[1]}\\s*,\\s*${mix[2]}\\s*\\)`), '圖例不能用飽和的橘，圖上沒有那種顏色');
+  const air = css.match(/\.nc-view2d-key i\.air\s*\{([^}]*)\}/);
+  assert.ok(air);
+  const hex = (rgb) => '#' + rgb.map((v) => v.toString(16).padStart(2, '0')).join('');
+  assert.ok(/#fff\b|#ffffff/i.test(air[1]), '棋盤 A 白');
+  assert.ok(air[1].toLowerCase().includes(hex(U.AIR_RGB_B)), '棋盤 B 淺灰');
+});
+
+test('標記模式：點擊回 onMark 工件座標、不觸發 onPick；拖曳不算；剖面上點也標得到；離開後恢復挑選', () => {
+  const { c, view } = makeView(makeData());
+  const picks = [], marks = [];
+  view.onPick((line) => picks.push(line));
+  view.onMark((x, y, kind) => marks.push([x, y, kind]));
+  assert.equal(view.getMarkMode(), null);
+  view.setMarkMode('scrap');
+  assert.equal(view.getMarkMode(), 'scrap');
+  assert.ok(c.classList.contains('is-marking'), 'canvas 要加 is-marking');
+  // 點在路徑上：只放記號，不挑路徑
+  const [sx, sy] = view.worldToScreen(0, 5);
+  c.fire('mousedown', { clientX: sx, clientY: sy, button: 0 });
+  c.fire('mouseup', { clientX: sx + 1, clientY: sy, button: 0 });
+  assert.equal(marks.length, 1);
+  // 放開時偏 1 px（≈ 0.2 mm，沒超過拖曳門檻）：回的是放開那一點的座標
+  assert.ok(Math.abs(marks[0][0]) < 0.5 && Math.abs(marks[0][1] - 5) < 0.5, String(marks[0]));
+  assert.equal(marks[0][2], 'scrap');
+  assert.equal(picks.length, 0);
+  // 拖曳不算
+  c.fire('mousedown', { clientX: 400, clientY: 300, button: 0 });
+  c.fire('mousemove', { clientX: 450, clientY: 320 });
+  c.fire('mouseup', { clientX: 450, clientY: 320, button: 0 });
+  assert.equal(marks.length, 1);
+  // 剖面 X = -20 上點 (Y=10, Z=-2) → 記號在 (-20, 10)
+  view.setMarkMode('part').setMode('sectionX').setSection(-20); view.render();
+  const [hx, hy] = view.worldToScreen(10, -2);
+  c.fire('mousedown', { clientX: hx, clientY: hy, button: 0 });
+  c.fire('mouseup', { clientX: hx, clientY: hy, button: 0 });
+  assert.equal(marks.length, 2);
+  assert.ok(Math.abs(marks[1][0] + 20) < 1e-9 && Math.abs(marks[1][1] - 10) < 0.1);
+  assert.equal(marks[1][2], 'part');
+  // 離開標記模式 → 又能挑路徑
+  view.setMarkMode(null).setMode('top'); view.render();
+  assert.ok(!c.classList.contains('is-marking'));
+  const [px2, py2] = view.worldToScreen(0, 5);   // 剛才拖曳過，螢幕座標要重算
+  c.fire('mousedown', { clientX: px2, clientY: py2, button: 0 });
+  c.fire('mouseup', { clientX: px2, clientY: py2, button: 0 });
+  assert.equal(picks.length, 1);
+  assert.equal(marks.length, 2);
+  assert.equal(view.setMarkMode('bogus').getMarkMode(), null);
+});
+
+test('setMarks：俯視畫 ⊙（綠）與 ✕（紅）；剖面不畫；座標壞掉的記號丟掉', () => {
+  const { c, view } = makeView(makeData());
+  view.setMarks([{ x: 0, y: 0, kind: 'part' }, { x: 10, y: 5, kind: 'scrap' }, { x: NaN, y: 0, kind: 'part' }, null]);
+  assert.deepEqual(view.getMarks(), [{ x: 0, y: 0, kind: 'part' }, { x: 10, y: 5, kind: 'scrap' }]);
+  view.render();
+  assert.ok(strokes(c).some((o) => o.stroke === '#2e7d32'), '⊙ 綠');
+  assert.ok(c.ctx.ops.some((o) => o.op === 'fill' && o.fill === '#2e7d32'), '⊙ 中心點');
+  assert.ok(strokes(c).some((o) => o.stroke === '#c62828'), '✕ 紅');
+  assert.ok(strokes(c).some((o) => o.stroke === 'rgba(255,255,255,0.95)' && o.width === 5), '白色描邊');
+  // 記號畫在正確的螢幕位置
+  const [mx, my] = view.worldToScreen(0, 0);
+  assert.ok(c.ctx.ops.some((o) => o.op === 'arc' && o.args[2] === 7 && Math.abs(o.args[0] - mx) < 1e-9 && Math.abs(o.args[1] - my) < 1e-9));
+  view.setMode('sectionX').setSection(0); c.ctx.ops.length = 0; view.render();
+  assert.ok(!strokes(c).some((o) => o.stroke === '#2e7d32' || o.stroke === '#c62828'), '剖面不畫記號');
+  view.setMarks(null);
+  assert.deepEqual(view.getMarks(), []);
 });
 

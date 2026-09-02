@@ -282,6 +282,16 @@ html, body {
   height: 14px;
   background: var(--nc-border, #d9dde3);
 }
+/* 廢料顯示開關（#selScrap）：跟「快速 G0／切削／素材」那些勾選框排在同一列，
+ * 所以要比表單裡的 .nc-select（panels.css，padding 2px 4px）矮一號，
+ * 不然「顯示」這一列會被它撐高、跟上下兩列對不齊。字級跟工具列一致（12px）。 */
+.app-scrap select {
+  height: 20px;
+  padding: 0 3px;
+  margin-left: 2px;
+  font-size: 12px;
+  line-height: 18px;
+}
 
 .app-seg {
   display: inline-flex;
@@ -568,7 +578,15 @@ html, body {
   .nc-select, .nc-num, .nc-text { padding: 5px 6px; }
   .app-seg__btn { padding: 6px 10px; }
   .nc-check { min-height: 30px; }
+  /* 廢料開關的 select 桌機是矮一號的，這裡跟其他觸控目標一樣放大（特異度比 .nc-select 高，要另外寫） */
+  .app-scrap select { height: 30px; padding: 0 6px; }
   .app-view-tools input[type=range] { min-height: 30px; }
+  /* 素材子頁「廢料判定」：radio 列與記號按鈕跟其他觸控目標一樣至少 30px 高、列距放大，手指才點得準 */
+  .nc-scrap-radios { gap: 6px; }
+  .nc-radio { min-height: 30px; align-items: center; }
+  .nc-radio input { margin-top: 0; }
+  .nc-scrap-btns { gap: 8px; }
+  .nc-scrap-btns .nc-btn { min-height: 30px; }
 
   /* ---- 主體：一次只顯示一區，分隔線用不到 ---- */
   .app-left, .app-right {

@@ -19,6 +19,8 @@
   outline: none;
 }
 .nc-view2d canvas.is-dragging { cursor: grabbing; }
+/* 標記模式（廢料判定的 ⊙／✕）：平常就是 crosshair，換成 cell（粗十字）才看得出「現在點下去是在放記號」 */
+.nc-view2d canvas.is-marking { cursor: cell; }
 
 /* 刀具色圖例（app / demo 可用）：<span class="chip"><i style="background:#…"></i>T1 10MM</span> */
 .nc-view2d-legend {
@@ -48,3 +50,26 @@
   border: 1px solid #bbb;
   background: linear-gradient(90deg, #ded8ce 0%, #8a98c0 40%, #0e2268 100%);
 }
+
+/* 圖例小色塊（放在色階條旁）：棋盤＝切穿／無料、淡桃色＝廢料
+ * <span class="nc-view2d-key"><i class="air"></i>切穿／無料 <i class="scrap"></i>廢料</span>
+ * 顏色要跟 view2d.js 畫出來的一致，看到圖例就對得上圖：棋盤是 AIR_RGB_A/B；
+ * 廢料不是飽和的 SCRAP_RGB，而是頂面 TOP_RGB 混 SCRAP_RGB 0.65 的結果 [227,158,94]（見 view2d.js SCRAP_MIX 旁的註解） */
+.nc-view2d-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  font: 11px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  color: #555;
+}
+.nc-view2d-key i {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  border: 1px solid #bbb;
+  vertical-align: middle;
+}
+.nc-view2d-key i + i { margin-left: 8px; }
+.nc-view2d-key i.air { background: repeating-conic-gradient(#fff 0 25%, #e2e5e9 0 50%) 0 0/8px 8px; }
+.nc-view2d-key i.scrap { background: rgb(227,158,94); }
