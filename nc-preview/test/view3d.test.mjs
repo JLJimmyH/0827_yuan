@@ -46,7 +46,8 @@ test('view3d：在 Node（無 document）下載入不炸，且掛好純函式', 
   assert.equal(typeof globalThis.document, 'undefined', '這個測試假設 Node 沒有 document');
   for (const fn of ['buildMesh', 'buildMeshAsync', 'planChunks', 'updateHeights', 'canUpdateHeights',
     'buildPathLines', 'buildStockLines', 'buildAxesLines', 'sceneBounds', 'toolColor',
-    'mat4', 'mat4Mul', 'mat4LookAt', 'mat4Perspective', 'projectPoint', 'downsampleHeights', 'resolveDownsample']) {
+    'mat4', 'mat4Mul', 'mat4LookAt', 'mat4Perspective', 'projectPoint', 'downsampleHeights', 'resolveDownsample',
+    'chunkLayers', 'normalizeChunkMode']) {
     assert.equal(typeof V[fn], 'function', `NC.ui.view3d.${fn} 應該是函式`);
   }
   assert.equal(typeof NC.ui.createView3D, 'function');
@@ -891,4 +892,154 @@ test('solidBounds：只看工件，不把換刀點那種高處的路徑算進去
   // 沒有 sim 也沒有素材時退回場景包絡（總比沒有好）
   const b2 = V.solidBounds({ sim: null, stock: null, segments: segs });
   assert.ok(b2 == null || Number.isFinite(b2.max.z));
+});
+
+// ---------------------------------------------------------------------------
+// 廢料分層（chunkLayers）：3D 的「標示／隱藏」都靠這兩份陣列
+// ---------------------------------------------------------------------------
+// core 的 NC.sim.chunkHeights 跟這份是分開實作的；還沒合進來時用同簽名的本地版頂著，
+// 讓這裡的測試只驗 view3d 的導出邏輯（該不該拆、拆成哪兩份），不驗 core 的格分類。
+const usingLocalChunkHeights = typeof NC.sim.chunkHeights !== 'function';
+if (usingLocalChunkHeights) {
+  NC.sim.chunkHeights = function (heightArr, labels, chunks, floorZ, which) {
+    const scrapByLabel = new Uint8Array(chunks.length + 1);
+    for (const c of chunks) if (!c.part) scrapByLabel[c.label] = 1;
+    const out = new Float32Array(heightArr.length);
+    for (let i = 0; i < heightArr.length; i++) {
+      const isScrap = labels[i] > 0 && scrapByLabel[labels[i]] === 1;
+      if (which === 'scrap') out[i] = isScrap ? heightArr[i] : floorZ;
+      else out[i] = isScrap ? floorZ : heightArr[i];
+    }
+    return out;
+  };
+}
+
+/**
+ * 10×6、cell 1 的小板：外圈（ix 0／9 與 iy 0／5）切穿到 floorZ 圍出中間一塊；
+ * 再把 ix ≤ 2 那一條當成另一塊（跟中間被 ix 3 那條切穿隔開）→ 中間 label 1 是工件、左條 label 2 是廢料。
+ */
+function scrapCase() {
+  const nx = 10, ny = 6, floorZ = -10;
+  const arr = new Float32Array(nx * ny).fill(0);
+  const labels = new Int32Array(nx * ny);
+  for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
+    const i = iy * nx + ix;
+    const edge = ix === 0 || ix === nx - 1 || iy === 0 || iy === ny - 1 || ix === 3;
+    if (edge) { arr[i] = floorZ; continue; }
+    arr[i] = ix < 3 ? -2 : -1;           // 左條挖過一點，跟中間的高度分得開
+    labels[i] = ix < 3 ? 2 : 1;
+  }
+  const chunks = [
+    { label: 1, cells: 5 * 4, areaMm2: 20, part: true, why: 'origin' },
+    { label: 2, cells: 2 * 4, areaMm2: 8, part: false, why: 'other' },
+  ];
+  const result = { supported: true, labels, chunks, partCount: 1, scrapCount: 1, scrapAreaMm2: 8, partTouchesFixture: null, hasFixture: false };
+  return { nx, ny, floorZ, arr, labels, chunks, result };
+}
+
+test('chunkLayers：part 把廢料格壓到 floorZ、scrap 只剩廢料格，原陣列不動', () => {
+  const { nx, ny, floorZ, arr, labels, result } = scrapCase();
+  const before = Float32Array.from(arr);
+  const L = V.chunkLayers(arr, result, floorZ);
+  assert.ok(L && L.part instanceof Float32Array && L.scrap instanceof Float32Array);
+  assert.notEqual(L.part, arr, 'part 要是新陣列（原陣列還要給 2D 與 snapshot 用）');
+  assert.deepEqual(Array.from(arr), Array.from(before), '原陣列不能被改');
+  for (let i = 0; i < nx * ny; i++) {
+    if (labels[i] === 2) {
+      assert.equal(L.part[i], floorZ, `廢料格 ${i} 在 part 裡應壓到 floorZ`);
+      assert.equal(L.scrap[i], arr[i], `廢料格 ${i} 在 scrap 裡照抄`);
+    } else {
+      assert.equal(L.part[i], arr[i], `非廢料格 ${i} 在 part 裡照抄`);
+      assert.equal(L.scrap[i], floorZ, `非廢料格 ${i} 在 scrap 裡應壓到 floorZ`);
+    }
+  }
+});
+
+test('chunkLayers：不拆的情況一律回 null（null／不支援／labels 長度對不上／floorZ 不是數）', () => {
+  const { arr, result, floorZ } = scrapCase();
+  assert.equal(V.chunkLayers(arr, null, floorZ), null);
+  assert.equal(V.chunkLayers(null, result, floorZ), null);
+  assert.equal(V.chunkLayers(arr, { supported: false, labels: null, chunks: [], scrapCount: 0 }, floorZ), null, '四軸圓棒');
+  assert.equal(V.chunkLayers(arr, Object.assign({}, result, { labels: new Int32Array(7) }), floorZ), null, '別的格網留下的舊結果');
+  assert.equal(V.chunkLayers(arr, Object.assign({}, result, { chunks: null }), floorZ), null);
+  assert.equal(V.chunkLayers(arr, result, NaN), null);
+});
+
+test('chunkLayers：core 還沒提供 NC.sim.chunkHeights 時回 null，不炸', () => {
+  const { arr, result, floorZ } = scrapCase();
+  const saved = NC.sim.chunkHeights;
+  try {
+    delete NC.sim.chunkHeights;
+    assert.equal(V.chunkLayers(arr, result, floorZ), null);
+  } finally { NC.sim.chunkHeights = saved; }
+});
+
+test('chunkLayers：沒有廢料時 part 跟原陣列內容相同（視圖據此省掉第二份 mesh）', () => {
+  const { arr, result, floorZ } = scrapCase();
+  const allPart = Object.assign({}, result, { chunks: result.chunks.map((c) => Object.assign({}, c, { part: true })), scrapCount: 0 });
+  const L = V.chunkLayers(arr, allPart, floorZ);
+  assert.ok(L);
+  assert.deepEqual(Array.from(L.part), Array.from(arr));
+  assert.ok(L.scrap.every((v) => v === floorZ), '沒有廢料 → scrap 層全部貼底');
+});
+
+test('chunkLayers：用 buildMesh 建廢料層時，非廢料格全在 floorZ、廢料格保留高度（貼地的面交給 shader 的 uFloorCut 丟掉）', () => {
+  const { nx, ny, floorZ, arr, result } = scrapCase();
+  const L = V.chunkLayers(arr, result, floorZ);
+  const sim = flatSim(nx, ny, 1, 0, floorZ);
+  const mesh = V.buildMesh(sim, { height: L.scrap });
+  assert.ok(mesh);
+  assert.equal(mesh.zMin, floorZ);
+  assert.equal(mesh.zMax, -2, '廢料層最高就是那條左邊的料');
+  assert.ok(mesh.counts.skirtQuads > 0, '廢料格與貼地格之間要有裙邊');
+  // 主 mesh 用 part：廢料格已經壓平，zMax 是中間工件的高度
+  const main = V.buildMesh(sim, { height: L.part });
+  assert.equal(main.zMax, -1);
+});
+
+test('normalizeChunkMode：只認 mark／hide，其餘都是 off', () => {
+  assert.equal(V.normalizeChunkMode('mark'), 'mark');
+  assert.equal(V.normalizeChunkMode('hide'), 'hide');
+  assert.equal(V.normalizeChunkMode('off'), 'off');
+  assert.equal(V.normalizeChunkMode(null), 'off');
+  assert.equal(V.normalizeChunkMode(undefined), 'off');
+  assert.equal(V.normalizeChunkMode('MARK'), 'off');
+});
+
+test('廢料層常數：橘色與 view2d.js 的 SCRAP_RGB 相同、染 65%、透明度 0.55', () => {
+  assert.deepEqual(V.SCRAP_RGB, [230, 126, 34]);
+  assert.equal(V.SCRAP_TINT_MIX, 0.65);
+  assert.equal(V.SCRAP_ALPHA, 0.55);
+});
+
+test('切穿到底的頂面畫成淡灰 AIR_RGB（不是 floorZ 深藍）：shader 有 uFloorZ／uAir、只動朝上且不是剖切背面的片段', () => {
+  assert.deepEqual(V.AIR_RGB, [232, 234, 238], '2D 棋盤 [255,255,255]／[226,229,233] 的中間值');
+  const fs = V.MESH_FS;
+  assert.equal(typeof fs, 'string');
+  assert.match(fs, /uniform float uFloorZ;/);
+  assert.match(fs, /uniform vec3 uAir;/);
+  // 條件：朝上（up > 0.5）、z ≤ uFloorZ + 容差、不是剖切看到的背面；顏色直接換成 uAir，之後才打光
+  const cond = fs.match(/if \(!back && up > 0\.5 && vWorld\.z <= uFloorZ \+ 1e-3\) col = uAir;/);
+  assert.ok(cond, '換色那一行');
+  const iLit = fs.indexOf('float lit =');
+  assert.ok(cond.index < iLit, '換色要在打光之前（仍打光，不是一片死平的灰）');
+  assert.ok(cond.index < fs.indexOf('col = mix(col, uTint, uTintMix);'), '在染橘之前，廢料層的規則不受影響');
+});
+
+test('airFloorZ：三軸回 sim.floorZ；圓棒（floorZ 是軸心）、沒 sim、floorZ 不是數 → 極小值讓條件永不成立', () => {
+  assert.equal(V.airFloorZ({ floorZ: -15 }), -15);
+  assert.equal(V.airFloorZ({ floorZ: 0 }), 0);
+  assert.ok(V.airFloorZ({ floorZ: 0, cylinder: true }) < -1e29, '圓棒');
+  assert.ok(V.airFloorZ(null) < -1e29);
+  assert.ok(V.airFloorZ({ floorZ: NaN }) < -1e29);
+  assert.ok(V.airFloorZ({}) < -1e29);
+  // 要塞得進 GLSL 的 float（有限、fround 之後不會溢位成 -Infinity）
+  assert.ok(Number.isFinite(V.airFloorZ(null)) && Number.isFinite(Math.fround(V.airFloorZ(null))));
+});
+
+test('scrapCountOf：優先用 scrapCount，沒有就數 part=false 的塊；null → 0', () => {
+  assert.equal(V.scrapCountOf(null), 0);
+  assert.equal(V.scrapCountOf({ scrapCount: 3, chunks: [] }), 3);
+  assert.equal(V.scrapCountOf({ chunks: [{ part: true }, { part: false }, { part: false }] }), 2);
+  assert.equal(V.scrapCountOf({ supported: false, chunks: [] }), 0);
 });

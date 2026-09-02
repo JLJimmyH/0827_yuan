@@ -4,6 +4,17 @@
  *   NC.ui.createView3D(canvas, options?) → View3D | null   （建立失敗回 null，呼叫端可退回 2D）
  *   NC.ui.view3d.isSupported()                             → 這個環境能不能開 WebGL
  *   NC.ui.view3d.buildMesh(sim, opts) → {positions, normals, indices, counts, …}   純函式、不碰 WebGL
+ *   NC.ui.view3d.chunkLayers(arr, chunkResult, floorZ) → {part, scrap} | null      純函式（廢料分層）
+ *
+ * 廢料（切穿之後跟工件分開的料）：app 把 NC.sim.chunks 的結果丟進 view.setChunks(result, mode)。
+ *   'hide' → 顯示用的高度陣列換成「廢料格壓到 floorZ」的那份（chunkLayers().part），走 setHeights 同一條路；
+ *            壓到 floorZ 的頂面由 shader 畫成淡灰 AIR_RGB（跟切穿到底的格一樣、跟 2D 棋盤同義），
+ *            不是 floorZ 的深藍——深藍平板躺在工件底下看起來像「還有一層料」；
+ *   'mark' → 主 mesh 維持原陣列，另外建第二份 mesh（chunkLayers().scrap，只剩廢料格）當廢料層直接疊在上面，
+ *            染橘、半透明、不寫深度、在主 mesh 之後畫；剖切平面兩份都吃。
+ *   'off'  → 回到原陣列、釋放廢料 mesh。
+ *   視圖自己記著「原始顯示陣列」（setData／setSnapshot／setHeights 給的），換 snapshot 或換模式都從那份重新導出，
+ *   所以 app 不必在每次 setSnapshot 之後再補一次 setChunks（補了也無害）。
  *
  * 成品實體：把 SimResult 的 heightmap 轉成「階梯式」三角網格 —— 每個格點 (ix,iy) 攤成一個
  * cell×cell 的水平頂面方塊（中心在 origin + (ix·cell, iy·cell)，與 simulation.js 的節點式格網一致），
@@ -36,6 +47,14 @@
   const DEEP_RGB = [14, 34, 104];        // 深處深藍
   const FIXTURE_RGB = [196, 160, 120];   // 治具土黃（3D 只用在色階上限之上）
   const CUT_RGB = [188, 178, 164];       // 剖開之後看到的斷面（背面）色：一塊實心的料，不是被光打反的殼
+  // 切穿到底的頂面（z 在 floorZ 上，含「隱藏」壓到 floorZ 的廢料格）：淡灰，跟 2D 棋盤（AIR_RGB_A/B 的中間值）同義。
+  // 以前是 floorZ 的深藍平板，躺在工件底下看起來像「還有一層料」，跟 2D 的棋盤對不上。
+  const AIR_RGB = [232, 234, 238];
+  // 廢料層（與 view2d.js 的 SCRAP_RGB 同一個橘）。染 65%、透明度 0.55：要一眼看得出「這塊是廢料」，
+  // 但又得看得到它底下的路徑與工件輪廓——它是提示，不是另一塊實體。
+  const SCRAP_RGB = [230, 126, 34];
+  const SCRAP_TINT_MIX = 0.65;
+  const SCRAP_ALPHA = 0.55;
   const C = {
     bg: '#fbfbfb',
     rapid: '#9a9a9a',
@@ -1297,9 +1316,59 @@
     return axis === 'x' ? [sign, 0, 0, sign * value] : [0, sign, 0, sign * value];
   }
 
+  // ---------------------------------------------------------------------------
+  // 純函式：廢料分層
+  // ---------------------------------------------------------------------------
+  /**
+   * 依廢料判定結果（NC.sim.chunks 的回傳）把顯示用的高度陣列拆成兩份：
+   *   part  ＝ 廢料格壓到 floorZ、其餘照抄 → 'hide' 的主 mesh（'mark' 不用它：主 mesh 維持原陣列，見 applyDisplay）
+   *   scrap ＝ 只剩廢料格、其餘壓到 floorZ → 'mark' 的廢料層
+   * 格的分類算法在 core（NC.sim.chunkHeights），這裡只決定「什麼情況不拆」：結果不支援（四軸圓棒）、
+   * 沒有 labels、labels 跟陣列長度對不上（不同格網的舊結果）、或 core 還沒提供函式 → 回 null，
+   * 呼叫端就當作沒有廢料判定、照原陣列畫。抽成純函式是因為 WebGL 在 Node 測不到，
+   * 至少要能驗證這段導出邏輯（test/view3d.test.mjs）。
+   * @param {Float32Array} arr        目前顯示的高度陣列（最終 sim.height 或 snapshot.height）
+   * @param {Object|null} result      ChunkResult（{supported, labels, chunks, scrapCount, …}）
+   * @param {number} floorZ           素材底（切穿＝夾在這個值）
+   * @returns {{part:Float32Array, scrap:Float32Array}|null}
+   */
+  function chunkLayers(arr, result, floorZ) {
+    if (!arr || !result || result.supported === false) return null;
+    if (!result.labels || !Array.isArray(result.chunks)) return null;
+    if (result.labels.length !== arr.length) return null;
+    const simNs = NC.sim;
+    if (!simNs || typeof simNs.chunkHeights !== 'function') return null;
+    if (!Number.isFinite(floorZ)) return null;
+    return {
+      part: simNs.chunkHeights(arr, result.labels, result.chunks, floorZ, 'part'),
+      scrap: simNs.chunkHeights(arr, result.labels, result.chunks, floorZ, 'scrap'),
+    };
+  }
+  /** setChunks 收到的 mode 正規化：只認 'mark'／'hide'，其餘（含 null、'off'、亂填）一律 'off' */
+  function normalizeChunkMode(mode) {
+    return (mode === 'mark' || mode === 'hide') ? mode : 'off';
+  }
+  /** 廢料塊數：優先用 result.scrapCount，沒有就自己數（HUD 與 applyDisplay 共用同一個數字） */
+  function scrapCountOf(result) {
+    if (!result) return 0;
+    if (Number.isFinite(result.scrapCount)) return result.scrapCount;
+    return Array.isArray(result.chunks) ? result.chunks.filter((c) => c && !c.part).length : 0;
+  }
+
+  /**
+   * shader 的「切穿到底」門檻（uFloorZ）：三軸用 sim.floorZ（模擬把切穿夾在這個值，隱藏的廢料也壓到這裡）；
+   * 圓棒的 floorZ 是軸心、不是空氣，沒有 sim 也沒得比——回極小值讓 z ≤ uFloorZ 永遠不成立。
+   * @param {Object|null} sim
+   * @returns {number}
+   */
+  function airFloorZ(sim) {
+    if (!sim || sim.cylinder || !Number.isFinite(sim.floorZ)) return -1e30;
+    return sim.floorZ;
+  }
+
   const view3dUtil = {
-    TOOL_COLORS, TOP_RGB, DEEP_RGB, FIXTURE_RGB, CUT_RGB, PICK_PX, ARC_TOL, COLORS: C,
-    buildSectionPlane, clipPlaneFor,
+    TOOL_COLORS, TOP_RGB, DEEP_RGB, FIXTURE_RGB, CUT_RGB, AIR_RGB, SCRAP_RGB, SCRAP_TINT_MIX, SCRAP_ALPHA, PICK_PX, ARC_TOL, COLORS: C,
+    buildSectionPlane, clipPlaneFor, chunkLayers, normalizeChunkMode, scrapCountOf, airFloorZ,
     toolColor, hexRgb, mat4, mat4Mul, mat4Perspective, mat4LookAt, projectPoint, distPointSeg2D,
     resolveDownsample, downsampleHeights, buildMesh, buildMeshAsync, planChunks,
     updateHeights, canUpdateHeights, arcSteps, arcPoints, buildPathLines, buildStockLines, buildAxesLines, sceneBounds,
@@ -1340,9 +1409,22 @@
     'uniform vec4 uClip;',     // xyz = 法線、w = 門檻；dot(pos, n) > w 的片段丟掉
     'uniform float uClipOn;',
     'uniform vec3 uCut;',      // 剖開之後看到的斷面色
+    // 廢料層用的三個旋鈕：主 mesh 一律 uTintMix 0／uAlpha 1，行為與加這段之前完全相同。
+    'uniform vec3 uTint;',     // 整體往這個顏色靠（廢料橘）
+    'uniform float uTintMix;', // 0 = 不染
+    'uniform float uAlpha;',   // 片段透明度
+    // 廢料層的高度陣列是「非廢料格壓到 floorZ」，那些貼地的頂面與底面跟主 mesh 的底面重疊，
+    // 畫出來整片底都會被染橘；所以 x > 0.5 時把 z ≤ y 的片段丟掉，只留真正有料的那些面。
+    'uniform vec2 uFloorCut;',
+    // 切穿到底的頂面：z ≤ uFloorZ 且朝上的片段改畫 uAir（淡灰，2D 棋盤的同義詞），仍打光。
+    // 主 mesh 每次都設成 sim.floorZ（圓棒／沒有 sim 就設成極小值讓條件永不成立）；
+    // 廢料層貼地的面已被 uFloorCut 丟掉，不會走到這裡。
+    'uniform float uFloorZ;',
+    'uniform vec3 uAir;',
     'void main() {',
     '  bool cutting = uClipOn > 0.5;',
     '  if (cutting && dot(vWorld, uClip.xyz) > uClip.w) discard;',
+    '  if (uFloorCut.x > 0.5 && vWorld.z <= uFloorCut.y) discard;',
     '  vec3 n = normalize(vNor);',
     // 剖切時要關背面剔除才看得到內部；那些背面翻過來當成斷面打光，不然會是一層黑殼
     '  bool back = cutting && !gl_FrontFacing;',
@@ -1358,14 +1440,20 @@
     '  vec3 col = mix(base, uDeep, ramp);',
     // 高於素材頂面的格＝治具，換成土黃（與 view2d 的 depthColor 一致）
     '  col = mix(col, uFixture, step(uZRange.x + 1e-4, vWorld.z));',
+    // 切穿到底的頂面（貼在 floorZ、朝上）＝這裡沒有料，畫成淡灰而不是最深的藍。
+    // 剖切時看到的底面內側（back）不算：那是一塊實心料的底，不是切穿。
+    '  if (!back && up > 0.5 && vWorld.z <= uFloorZ + 1e-3) col = uAir;',
     // 斷面（背面）偏向素色的「一塊實心料」，但保留一點深淺，還看得出哪裡切得深
     '  if (back) col = mix(col, uCut, 0.75);',
+    // 染色放在打光之前：廢料層仍看得出亮暗面，不會變成一片平的橘
+    '  col = mix(col, uTint, uTintMix);',
     '  float d = max(dot(n, uLight), 0.0);',
     '  float bk = max(dot(n, -uLight), 0.0);',
     '  float lit = 0.42 + 0.62 * d + 0.10 * bk;',
-    '  gl_FragColor = vec4(col * lit, 1.0);',
+    '  gl_FragColor = vec4(col * lit, uAlpha);',
     '}',
   ].join('\n');
+  NC.ui.view3d.MESH_FS = MESH_FS;   // 純字串，給測試檢查 uFloorZ／uAir 有沒有進 shader
   const LINE_VS = [
     'attribute vec3 aPos;',
     'attribute vec3 aColor;',
@@ -1488,6 +1576,9 @@
       ML.uFixture = gl.getUniformLocation(mp, 'uFixture'); ML.uZRange = gl.getUniformLocation(mp, 'uZRange');
       ML.uClip = gl.getUniformLocation(mp, 'uClip'); ML.uClipOn = gl.getUniformLocation(mp, 'uClipOn');
       ML.uCut = gl.getUniformLocation(mp, 'uCut');
+      ML.uTint = gl.getUniformLocation(mp, 'uTint'); ML.uTintMix = gl.getUniformLocation(mp, 'uTintMix');
+      ML.uAlpha = gl.getUniformLocation(mp, 'uAlpha'); ML.uFloorCut = gl.getUniformLocation(mp, 'uFloorCut');
+      ML.uFloorZ = gl.getUniformLocation(mp, 'uFloorZ'); ML.uAir = gl.getUniformLocation(mp, 'uAir');
       LL.aPos = gl.getAttribLocation(lp, 'aPos'); LL.aColor = gl.getAttribLocation(lp, 'aColor');
       LL.uMVP = gl.getUniformLocation(lp, 'uMVP'); LL.uOffset = gl.getUniformLocation(lp, 'uOffset');
       LL.uViewport = gl.getUniformLocation(lp, 'uViewport'); LL.uTint = gl.getUniformLocation(lp, 'uTint');
@@ -1503,8 +1594,18 @@
 
     const S = {
       data: { sim: null, segments: [], stock: null, toolTable: null, scenario: 'off' },
-      heightArr: null,
+      heightArr: null,         // 真正拿去建主 mesh 的高度陣列（= baseArr 套過廢料判定之後的那份）
+      baseArr: null,           // app 給的「原始顯示陣列」（setData／setSnapshot／setHeights）；換模式時從這份重新導出
       extraMap: null,          // 圓棒的材料區間（跟 heightArr 同一份來源）
+      // 廢料判定：result = NC.sim.chunks 的結果、mode = 'off'|'mark'|'hide'。
+      // layers 是 chunkLayers 的快取（鍵 = layersFor 那份 baseArr ＋ layersRes 那份 result）：
+      // 拉 snapshot 滑桿來回時同一份陣列不用重算兩次。
+      scrap: { result: null, mode: 'off', layers: null, layersFor: null, layersRes: null },
+      scrapArr: null,          // 廢料層用的高度陣列（'mark' 且真的有廢料時才有）
+      scrapChunks: [],         // 廢料層的 GPU 區塊，結構同 meshChunks
+      scrapToken: 0,
+      applyPending: false,     // applyDisplay 已排進 microtask（同一個 tick 內的多次 set* 只導出一次）
+      applyForce: false,
       snapshotIndex: null,
       // rotary = 工件轉動時刀的相對軌跡（那些大弧）。預設關：現場看到會以為刀在轉彎。
       visible: { rapid: true, feed: true, stock: true, surface: true, rotary: false, tools: null },
@@ -1591,6 +1692,12 @@
       S.meshChunks = [];
       S.meshInfo = { vertices: 0, triangles: 0, downsample: 1, chunks: 0 };
     }
+    function freeScrapMesh() {
+      for (const c of S.scrapChunks) {
+        gl.deleteBuffer(c.vbo); gl.deleteBuffer(c.nbo); gl.deleteBuffer(c.ibo);
+      }
+      S.scrapChunks = [];
+    }
     function uploadChunk(mesh) {
       const idx = mesh.indices;
       let arr = idx, type = gl.UNSIGNED_INT;
@@ -1669,20 +1776,101 @@
     }
     /** 只換高度（不重建 index buffer）；拓樸不相容時回 false */
     function fastUpdateHeights(heightArr) {
-      if (!S.meshChunks.length) return false;
-      const pre = downsampleHeights(heightArr, S.data.sim.nx, S.data.sim.ny, S.meshChunks[0].mesh.downsample, 'min');
-      for (const c of S.meshChunks) if (!canUpdateHeightsWith(c.mesh, pre)) return false;
+      if (!fastUpdateChunks(S.meshChunks, heightArr)) return false;
       let zMin = Infinity, zMax = -Infinity;
       for (const c of S.meshChunks) {
-        updateHeights(c.mesh, heightArr, { _pre: pre, force: true });
-        gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo); gl.bufferSubData(gl.ARRAY_BUFFER, 0, c.mesh.positions);
-        gl.bindBuffer(gl.ARRAY_BUFFER, c.nbo); gl.bufferSubData(gl.ARRAY_BUFFER, 0, c.mesh.normals);
         if (c.mesh.zMin < zMin) zMin = c.mesh.zMin;
         if (c.mesh.zMax > zMax) zMax = c.mesh.zMax;
       }
       updateZRange(zMin, zMax);
       requestRender();
       return true;
+    }
+    /**
+     * 快路徑的共用部分：主 mesh 與廢料層是同一種區塊，差別只在主 mesh 換完還要更新色階（zRange）。
+     * 廢料層不動 zRange——它的深淺要跟主 mesh 用同一把尺，不然同一格在兩層會是不同的藍。
+     */
+    function fastUpdateChunks(chunks, heightArr) {
+      if (!chunks.length || !heightArr || !S.data.sim) return false;
+      const pre = downsampleHeights(heightArr, S.data.sim.nx, S.data.sim.ny, chunks[0].mesh.downsample, 'min');
+      for (const c of chunks) if (!canUpdateHeightsWith(c.mesh, pre)) return false;
+      for (const c of chunks) {
+        updateHeights(c.mesh, heightArr, { _pre: pre, force: true });
+        gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo); gl.bufferSubData(gl.ARRAY_BUFFER, 0, c.mesh.positions);
+        gl.bindBuffer(gl.ARRAY_BUFFER, c.nbo); gl.bufferSubData(gl.ARRAY_BUFFER, 0, c.mesh.normals);
+      }
+      return true;
+    }
+    /**
+     * 廢料層網格（'mark' 且真的有廢料時才有）。跟主 mesh 走同一個 buildMeshAsync，降採樣倍率跟著主 mesh
+     * （主 mesh 還在建時用同一個 downsampleOpt——resolveDownsample 只看格數，兩邊算出來一樣），
+     * 兩份的格子才對得齊，不然廢料層會比主 mesh 粗或細一格、邊緣露出鋸齒。
+     * 不報進度、不 fit、不動 zRange：它是附在主 mesh 上的提示層，不是另一件成品。
+     */
+    async function rebuildScrapMesh() {
+      const sim = S.data.sim;
+      const token = ++S.scrapToken;
+      freeScrapMesh();
+      if (!sim || sim.cylinder || !S.scrapArr) { requestRender(); return; }
+      const res = await buildMeshAsync(sim, {
+        height: S.scrapArr,
+        downsample: S.meshChunks.length ? S.meshChunks[0].mesh.downsample : S.downsampleOpt,
+        maxVertsPerChunk: uint32 ? 400000 : 65536,
+        uint16: !uint32,
+        shouldCancel: () => token !== S.scrapToken || S.destroyed,
+      });
+      if (token !== S.scrapToken || S.destroyed || !res) return;
+      for (const m of res.chunks) { const c = uploadChunk(m); if (c) S.scrapChunks.push(c); }
+      requestRender();
+    }
+    /**
+     * 從「原始顯示陣列」＋廢料判定導出真正要畫的兩份陣列，再各自走快路徑或重建。
+     * 所有會換陣列的入口（setData／setHeights／setSnapshot／setChunks／setDownsample／context 還原）
+     * 最後都收斂到這裡，廢料判定才不會因為「先 setSnapshot 再 setChunks」或反過來而漏套。
+     * @param {boolean} [force]  true = 不管有沒有變都重建（context 還原、換降採樣、換資料）
+     */
+    function applyDisplay(force) {
+      if (S.destroyed) return;
+      const sim = S.data.sim;
+      const base = S.baseArr;
+      const sc = S.scrap;
+      let part = base, scrapArr = null;
+      // 四軸圓棒不支援（core 也回 supported:false）；scrapCount 0 時兩份跟原陣列沒差別，省下導出與第二份 mesh
+      if (sim && !sim.cylinder && base && sc.result && sc.mode !== 'off' && scrapCountOf(sc.result) > 0) {
+        if (!(sc.layers && sc.layersFor === base && sc.layersRes === sc.result)) {
+          sc.layers = chunkLayers(base, sc.result, sim.floorZ);
+          sc.layersFor = base; sc.layersRes = sc.result;
+        }
+        if (sc.layers) {
+          // 'hide'：主 mesh 換成「廢料格壓到 floorZ」的那份。
+          // 'mark'：主 mesh 維持原陣列，廢料層直接疊在自己上面——主 mesh 也用 part 的話，廢料位置只剩壓到 floorZ 的
+          //         底板（現在畫成淡灰 AIR_RGB；當初是深藍，0.55 透明的橘牆疊在深藍上是一片濁褐，整合截圖實測），
+          //         疊在原本那塊料上，橘色才是乾淨的、底下的深淺也還看得出來。
+          //         兩份網格同格網、同降採樣，廢料格的頂面與牆座標完全相同，LEQUAL 深度測試下不會閃爍。
+          if (sc.mode === 'hide') part = sc.layers.part;
+          else scrapArr = sc.layers.scrap;
+        }
+      }
+      const partChanged = part !== S.heightArr;
+      const scrapChanged = scrapArr !== S.scrapArr;
+      S.heightArr = part; S.scrapArr = scrapArr;
+      if (force || partChanged) { if (force || !fastUpdateHeights(part)) rebuildMesh(); }
+      if (force || scrapChanged) {
+        if (force || !scrapArr || !fastUpdateChunks(S.scrapChunks, scrapArr)) rebuildScrapMesh();
+        else requestRender();
+      }
+      updateHud();
+    }
+    /**
+     * 把 applyDisplay 排到 microtask：app 換 snapshot 時是 setSnapshot 緊接著 setChunks（兩次呼叫、同一個 tick），
+     * 立刻導出會讓主 mesh 在一次滑桿移動裡更新兩遍。渲染本來就在 rAF，晚到 microtask 對畫面沒有差別。
+     */
+    function scheduleApply(force) {
+      if (force) S.applyForce = true;
+      if (S.applyPending) return;
+      S.applyPending = true;
+      const run = () => { S.applyPending = false; const f = S.applyForce; S.applyForce = false; applyDisplay(f); };
+      if (typeof queueMicrotask === 'function') queueMicrotask(run); else Promise.resolve().then(run);
     }
     function canUpdateHeightsWith(mesh, pre) {
       if (pre.nx !== mesh.nx || pre.ny !== mesh.ny) return false;
@@ -1808,8 +1996,17 @@
       gl.vertexAttribPointer(LL.aColor, 3, gl.FLOAT, false, 0, 0);
       gl.enableVertexAttribArray(LL.aColor);
     }
-    function drawMesh() {
-      if (!S.visible.surface || !S.meshChunks.length) return;
+    /**
+     * 畫一組實體區塊。主 mesh 不給 style；廢料層給 SCRAP_STYLE（染橘、半透明、不寫深度、丟掉貼地的面）。
+     * @param {Array} chunks   S.meshChunks 或 S.scrapChunks
+     * @param {{tint:number[], tintMix:number, alpha:number, floorCut:number|null}|null} style
+     */
+    function drawMesh(chunks, style) {
+      if (!S.visible.surface || !chunks.length) return;
+      const tint = style && style.tint ? style.tint : SCRAP_RGB;
+      const tintMix = style ? style.tintMix : 0;
+      const alpha = style ? style.alpha : 1;
+      const floorCut = style && Number.isFinite(style.floorCut) ? style.floorCut : null;
       gl.useProgram(meshProg);
       gl.uniformMatrix4fv(ML.uMVP, false, S.mvp);
       const L = normalize3([-0.42, -0.55, 0.72]);
@@ -1824,6 +2021,15 @@
       gl.uniform1f(ML.uClipOn, clip ? 1 : 0);
       gl.uniform4f(ML.uClip, clip ? clip[0] : 0, clip ? clip[1] : 0, clip ? clip[2] : 0, clip ? clip[3] : 1e9);
       gl.uniform3f(ML.uCut, CUT_RGB[0] / 255, CUT_RGB[1] / 255, CUT_RGB[2] / 255);
+      gl.uniform3f(ML.uTint, tint[0] / 255, tint[1] / 255, tint[2] / 255);
+      gl.uniform1f(ML.uTintMix, tintMix);
+      gl.uniform1f(ML.uAlpha, alpha);
+      gl.uniform2f(ML.uFloorCut, floorCut == null ? 0 : 1, floorCut == null ? 0 : floorCut);
+      // 切穿到底的頂面畫成淡灰：門檻每次都從目前的 sim 取（換資料不用另外清），圓棒／沒 sim 是極小值
+      gl.uniform1f(ML.uFloorZ, airFloorZ(S.data.sim));
+      gl.uniform3f(ML.uAir, AIR_RGB[0] / 255, AIR_RGB[1] / 255, AIR_RGB[2] / 255);
+      // 半透明的層不寫深度：它後面的路徑與主 mesh 都還要透得過來；主 mesh 照常寫。
+      gl.depthMask(alpha >= 1);
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1.2, 2.0);
       // 背面剔除：所有四邊形（頂面／裙邊／外壁／底面）都是逆時針朝外，見 test 的「繞向一致」那條。
@@ -1834,7 +2040,7 @@
         gl.frontFace(gl.CCW);
         gl.cullFace(gl.BACK);
       } else gl.disable(gl.CULL_FACE);
-      for (const c of S.meshChunks) {
+      for (const c of chunks) {
         gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo);
         gl.vertexAttribPointer(ML.aPos, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(ML.aPos);
@@ -1848,6 +2054,15 @@
       gl.disableVertexAttribArray(ML.aNor);
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
+      gl.depthMask(true);
+    }
+    /** 廢料層：主 mesh 之後、線段之前畫；剖切平面（uClip）在 drawMesh 裡兩份都套 */
+    function drawScrapLayer() {
+      if (!S.scrapChunks.length || S.scrap.mode !== 'mark' || !S.data.sim) return;
+      const sim = S.data.sim;
+      // 貼地門檻用 buildMesh 判階梯的同一個 eps，廢料裙邊的最底那一圈剛好被切掉、其餘保留
+      const eps = Math.max((sim.cell || 0) * 0.02, 1e-4);
+      drawMesh(S.scrapChunks, { tint: SCRAP_RGB, tintMix: SCRAP_TINT_MIX, alpha: SCRAP_ALPHA, floorCut: sim.floorZ + eps });
     }
     function drawPaths() {
       if (!S.pathBuf || !S.path) return;
@@ -1955,7 +2170,8 @@
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       computeMVP();
-      drawMesh();
+      drawMesh(S.meshChunks, null);
+      drawScrapLayer();
       if (S.visible.stock) drawSimpleLines(S.stockBuf, 0.9);
       drawSimpleLines(S.axesBuf, 1);
       drawPaths();
@@ -1998,6 +2214,10 @@
       else if (S.meshInfo.triangles) parts.push('<span class="tag">' + (S.meshInfo.triangles / 1000).toFixed(0) + ' k 三角</span>');
       if (S.meshInfo.downsample > 1) parts.push('<span class="tag warn">已降採樣顯示（1/' + S.meshInfo.downsample + '）</span>');
       if (S.snapshotIndex != null) parts.push('<span class="tag">模擬到第 ' + (S.snapshotIndex + 1) + ' 把刀</span>');
+      // 廢料塊數：只在有開判定（標示／隱藏）而且真的有廢料時顯示——「隱藏」模式下畫面上看不到那些料，
+      // 這顆徽章是唯一提醒「有東西被藏起來了」的地方
+      const nScrap = S.scrap.mode !== 'off' ? scrapCountOf(S.scrap.result) : 0;
+      if (nScrap > 0) parts.push('<span class="tag warn">廢料 ' + nScrap + ' 塊</span>');
       if (S.section.axis) {
         const at = S.section.axis.toUpperCase() + ' = ' + (Math.round(S.section.value * 100) / 100);
         parts.push('<span class="tag">' + (S.section.clip ? '剖切 ' : '剖面 ') + at + '</span>');
@@ -2121,14 +2341,14 @@
       if (S.destroyed) return;
       if (typeof console !== 'undefined') console.warn('[view3d] WebGL context 已還原，重建資源');
       // context 遺失時 program／shader／buffer 全部失效，locations 也不能沿用 → 整組重建。
-      S.meshChunks = []; S.pathBuf = null; S.stockBuf = null; S.axesBuf = null;
+      S.meshChunks = []; S.scrapChunks = []; S.pathBuf = null; S.stockBuf = null; S.axesBuf = null;
       meshProg = lineProg = null;
       if (!linkPrograms()) {
         if (typeof console !== 'undefined') console.error('[view3d] context 還原後著色器重建失敗，3D 停用');
         return;   // S.lost 維持 true，render() 直接跳出，不會畫出壞畫面
       }
       S.lost = false;
-      rebuildPath(); rebuildStock(); rebuildAxes(); rebuildMesh();
+      rebuildPath(); rebuildStock(); rebuildAxes(); applyDisplay(true);
     }
 
     const usePointer = typeof PointerEvent !== 'undefined';
@@ -2175,12 +2395,14 @@
         };
         if (typeof d.onProgress === 'function') S.progressCb = d.onProgress;
         S.snapshotIndex = null;
-        S.heightArr = S.data.sim ? S.data.sim.height : null;
+        S.baseArr = S.data.sim ? S.data.sim.height : null;
         S.extraMap = S.data.sim ? S.data.sim.extra : null;
         S.needFit = true;
         rebuildPath(); rebuildStock(); rebuildAxes(); rebuildSection();
         updateZRange(S.data.sim ? S.data.sim.floorZ : NaN, NaN);
-        rebuildMesh();
+        // 廢料判定結果留著不清：格網對不上時 chunkLayers 自己會回 null，而 app 在 applyResult 之後
+        // 本來就會再 setChunks；先清掉反而讓「setData 之後忘了補 setChunks」的路徑把廢料層弄不見。
+        scheduleApply(true);
         fit(false);
         requestRender();
         return api;
@@ -2188,24 +2410,40 @@
       /** 只換高度（例如改刀具表後重算）；拓樸相容時走「只更新 Z 與法線」的快路徑 */
       setHeights(heightArr) {
         if (!S.data.sim || !heightArr) return api;
-        S.heightArr = heightArr;
-        if (!fastUpdateHeights(heightArr)) rebuildMesh();
+        S.baseArr = heightArr;
+        scheduleApply(false);
         return api;
       },
-      /** 顯示第 i 個 snapshot 的高度（null → 最終高度） */
+      /** 顯示第 i 個 snapshot 的高度（null → 最終高度）；廢料判定會自動重套到這份高度 */
       setSnapshot(i) {
         const sim = S.data.sim;
         if (!sim) return api;
         const snap = (i != null && Array.isArray(sim.snapshots)) ? sim.snapshots[i] : null;
         S.snapshotIndex = snap ? i : null;
         const arr = snap ? snap.height : sim.height;
-        if (arr === S.heightArr) { updateHud(); return api; }
-        S.heightArr = arr;
+        if (arr === S.baseArr) { updateHud(); return api; }
+        S.baseArr = arr;
         S.extraMap = snap ? snap.extra : sim.extra;
-        if (!fastUpdateHeights(arr)) rebuildMesh();
+        scheduleApply(false);
         updateHud();
         return api;
       },
+      /**
+       * 廢料判定：result 是 NC.sim.chunks 的回傳（null 或 supported:false 都當「沒有」），
+       * mode 'off'｜'mark'（廢料層染橘半透明）｜'hide'（廢料格壓到 floorZ，等於不畫；壓下去的頂面 shader 畫成淡灰 AIR_RGB）。
+       * 結果會跟著目前顯示的高度陣列一起保存，換 snapshot 時自動重套（app 再呼叫一次也無害）。
+       * @param {Object|null} result
+       * @param {'off'|'mark'|'hide'|null} mode
+       */
+      setChunks(result, mode) {
+        const ok = !!(result && result.supported !== false && result.labels);
+        S.scrap.result = ok ? result : null;
+        S.scrap.mode = normalizeChunkMode(mode);
+        scheduleApply(false);
+        updateHud();
+        return api;
+      },
+      getChunks() { return { result: S.scrap.result, mode: S.scrap.mode }; },
       setVisible(o) {
         o = o || {};
         if ('rapid' in o) S.visible.rapid = !!o.rapid;
@@ -2247,7 +2485,7 @@
       /** 降採樣：1/2/4… 或 'auto' */
       setDownsample(k) {
         S.downsampleOpt = (k === 'auto' || k == null) ? 'auto' : Math.max(1, Math.round(k));
-        rebuildMesh();
+        scheduleApply(true);   // 主 mesh 與廢料層一起重建，倍率才會一致
         return api;
       },
       getDownsample() { return S.meshInfo.downsample; },
@@ -2280,6 +2518,7 @@
           progress: S.buildProgress, pathVertices: S.path ? S.path.vertexCount : 0,
           reducedMotion: reduced, size: { w: S.size.w, h: S.size.h, dpr: S.dpr },
           snapshotIndex: S.snapshotIndex, zRange: S.zRange.slice(),
+          scrapMode: S.scrap.mode, scrapCount: scrapCountOf(S.scrap.result), scrapChunks: S.scrapChunks.length,
         };
       },
       getSize() { return { w: S.size.w, h: S.size.h, dpr: S.dpr }; },
@@ -2292,13 +2531,13 @@
       dispose() {
         if (S.destroyed) return;
         S.destroyed = true;
-        S.buildToken++;
+        S.buildToken++; S.scrapToken++;
         if (typeof canvas.removeEventListener === 'function') for (const l of listeners) canvas.removeEventListener(l[0], l[1], l[2]);
         if (ro) { try { ro.disconnect(); } catch (e) { /* 忽略 */ } ro = null; }
         if (winResize && typeof window !== 'undefined') { window.removeEventListener('resize', winResize); winResize = null; }
         if (S.hud && S.hud.parentNode) { S.hud.parentNode.removeChild(S.hud); }
         S.hud = null;
-        freeMesh();
+        freeMesh(); freeScrapMesh();
         freeLineBuf(S.pathBuf); freeLineBuf(S.stockBuf); freeLineBuf(S.axesBuf);
         freeLineBuf(S.sectionFillBuf); freeLineBuf(S.sectionEdgeBuf);
         S.pathBuf = S.stockBuf = S.axesBuf = S.sectionFillBuf = S.sectionEdgeBuf = null;
