@@ -1029,25 +1029,31 @@ ${axes.indexOf('Z') >= 0 ? 'G53 G0 Z0. 是最常見的安全退刀寫法（走�
     }
     const dx = (!abs && has('X')) ? val('X') : 0;
     const dy = (!abs && has('Y')) ? val('Y') : 0;
+    // 第四軸也是循環裡可以定位的軸：`G91 A45. K7` 每重複一次再轉 45°（分度鑽孔的標準寫法）。
+    // 只累加 X/Y 的話 7 個孔全疊在同一個角度：畫面只剩兩個孔、R19 誤報「同一個孔鑽兩次」、少算 6 次分度時間。
+    const dA = !abs ? (aTo - aFrom) : 0;
     if (repeatNote) repeatNote();
 
     const out = [];
+    let aPrev = aFrom;
     for (let i = 0; i < reps; i++) {
       const hx = x + dx * i, hy = y + dy * i;
+      const hA = aTo + dA * i;
       const hFrom = i === 0 ? from : { x: st.pos.x, y: st.pos.y, z: st.pos.z };
       const to = { x: hx, y: hy, z: c.retract === 'G98' ? c.initialZ : r };
       const h = {
         kind: 'hole', from: hFrom, to, x: hx, y: hy, z, r,
         initialZ: c.initialZ, q: c.q == null ? undefined : c.q, p: c.p == null ? undefined : c.p,
         cycle: c.code, retract: c.retract, rigid, feed: st.feed,
-        a: aTo,
+        a: hA,
       };
-      // 轉動只發生在這一節的第一個孔（K/L 重複的後續孔角度已經到位）
-      if (i === 0 && !U.eq(aFrom, aTo)) h.aFrom = aFrom;
+      // 每個孔都帶自己的轉動起點：K/L 重複的後續孔各自再轉一次（Fanuc 是先定位到位含旋轉，再鑽）
+      if (!U.eq(aPrev, hA)) h.aFrom = aPrev;
       out.push(h);
       st.pos = { x: to.x, y: to.y, z: to.z };
+      aPrev = hA;
     }
-    st.a = aTo;
+    st.a = aPrev;
     noteCut(ctx, z, false);
     return out;
   }

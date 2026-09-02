@@ -850,6 +850,21 @@ test('R21：G84 要 M3、G74 要 M4，方向反了 → error（會斷絲攻）',
   assert.ok(byRule(stopped.run, 'R21', 'error').some((d) => /停止/.test(d.message)));
 });
 
+test('固定循環 + 第四軸：G91 A45. K7 每重複一次再轉 45°，7 個孔各自帶轉動起點', () => {
+  // 分度鑽孔的標準寫法。以前 K 重複只累加 X/Y，7 個孔全疊在 A45：畫面只剩兩個孔、R19 誤報、少算 6 次分度時間。
+  const p = prog('G0G90X10.Y0.A0.Z60.\nG81R2.Z-1.F65\nG91A45.K7\nG80');
+  assert.equal(acts(p.at(2), 'hole').length, 1);                                    // 第一個孔在 A0
+  const holes = acts(p.at(3), 'hole');
+  assert.equal(holes.length, 7);
+  assert.deepEqual(holes.map((h) => h.a), [45, 90, 135, 180, 225, 270, 315]);
+  assert.deepEqual(holes.map((h) => h.aFrom), [0, 45, 90, 135, 180, 225, 270]);   // 每個孔前面都有一次轉動
+  for (const h of holes) { near(h.x, 10); near(h.y, 0); near(h.z, -1); }
+  assert.equal(p.at(3).after.a, 315);
+  // 同節 X 與 A 一起增量也各自累加；X/Y 陣列孔的既有行為不變
+  const both = prog('G0G90X0.Y0.A0.Z60.\nG91G99G81X10.A90.Z-5.R-8.K3F100\nG80');
+  assert.deepEqual(acts(both.at(2), 'hole').map((h) => [h.x, h.a]), [[10, 90], [20, 180], [30, 270]]);
+});
+
 test('固定循環的重複次數：G91 + K3 → 展開成 3 個孔；G90 + K3 → 1 個孔加 warning', () => {
   const inc = prog('G91G99G81X10.Y0.Z-5.R-8.K3F100\nG80');
   const holes = inc.at(1).actions.filter((a) => a.kind === 'hole');
