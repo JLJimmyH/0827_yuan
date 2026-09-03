@@ -16,13 +16,13 @@
 
   <!-- ==================== 頂列工具列 ==================== -->
   <header class="app-bar">
-    <div class="app-bar__title">NC 預演台</div>
+    <div class="app-bar__title"><span class="app-bar__mark" aria-hidden="true">NC</span>NC 預演台</div>
 
     <!-- 手機版：開檔／存檔／Block skip 收在這顆鈕後面（桌機由 CSS 隱藏這顆鈕、選單常駐） -->
     <button type="button" class="nc-btn app-bar__more" id="btnBarMore" aria-expanded="false" title="開檔、存檔、Block skip 等設定">☰</button>
 
     <div class="app-bar__group">
-      <button type="button" class="nc-btn" id="btnOpen" title="開啟本機的 NC 程式檔或刀具表 CSV（也可以直接把檔案拖進這個視窗）">開檔…</button>
+      <button type="button" class="nc-btn" id="btnOpen" title="開啟本機的 NC 程式檔或刀具表 CSV（也可以直接把檔案拖進這個視窗）"><svg class="app-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.5c0-.7.5-1.2 1.2-1.2h2.6l1.6 1.6h5.8c.7 0 1.2.5 1.2 1.2v.7H4.9c-.5 0-1 .3-1.1.8L2.2 12z"/><path d="M1.8 4.5V12c0 .7.5 1.3 1.2 1.3h9.8c.6 0 1-.4 1.2-.9l1.3-4.1c.2-.6-.3-1.3-1-1.3"/></svg>開檔…</button>
       <input type="file" id="fileInput" class="app-hidden-file" aria-label="選擇 NC 程式檔">
 
       <label class="app-bar__label" for="selSample">範例</label>
@@ -32,8 +32,8 @@
     </div>
 
     <div class="app-bar__group">
-      <button type="button" class="nc-btn" id="btnSave" title="以原檔名下載目前編輯器內容">存檔</button>
-      <button type="button" class="nc-btn" id="btnCopy" title="把整支程式複製到剪貼簿">複製</button>
+      <button type="button" class="nc-btn" id="btnSave" title="以原檔名下載目前編輯器內容"><svg class="app-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h8L13.5 5v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M5 2.5V6h5V2.5M5 14v-4h6v4"/></svg>存檔</button>
+      <button type="button" class="nc-btn" id="btnCopy" title="把整支程式複製到剪貼簿"><svg class="app-ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3 10.5h-.5A1.5 1.5 0 0 1 1 9V3a1.5 1.5 0 0 1 1.5-1.5H9A1.5 1.5 0 0 1 10.5 3v.5"/></svg>複製</button>
     </div>
 
     <div class="app-bar__group">
@@ -101,6 +101,8 @@
       <section class="app-right" id="appRight">
 
       <div class="app-pane app-pane--view">
+        <!-- 工具列一列裝完：顯示圖層與刀具過濾是「調好就不動」的，收進 popover（手機版 CSS 讓它變 bottom sheet）。
+             模擬進度搬到畫布下緣的時間軸（.app-scrub）。 -->
         <div class="app-view-tools" id="viewTools">
           <div class="app-view-tools__row">
             <div class="app-seg" role="group" aria-label="視圖模式">
@@ -111,44 +113,43 @@
               <button type="button" class="app-seg__btn" data-mode="unroll" id="btnModeUnroll" title="第四軸展開圖：把圓柱工件的表面攤平（橫軸＝軸向位置，縱軸＝角度）" disabled>展開圖</button>
             </div>
 
+            <!-- 剖面滑桿只在剖面模式出現（.is-section 由 app.js 跟著視圖模式切） -->
             <label class="app-slider" id="lblSection" title="剖面位置（工件座標）">
               <span class="app-slider__label">剖面</span>
               <input type="range" id="rngSection" min="-100" max="100" step="0.5" value="0" disabled>
               <span class="app-slider__value" id="secVal">—</span>
             </label>
 
+            <span class="app-view-tools__spacer"></span>
+
             <label class="nc-check" id="lblSplit" title="左邊 2D、右邊 3D 並排。拉剖面滑桿時右邊會顯示現在是從哪裡切下去的。"><input type="checkbox" id="chkSplit" checked> 並排 3D</label>
             <label class="nc-check" id="lblClip" title="把 3D 切開一半，直接看斷面——和左邊那張剖面圖是同一刀。切掉哪一邊固定不變，不會自己換。"><input type="checkbox" id="chkClip" checked> 3D 剖切</label>
             <button type="button" class="nc-btn nc-btn-small nc-hidden" id="btnClipFlip" title="換一邊切。剖面拉到工件端面附近時，留下來的那塊會很薄，按這個換成留另一邊。">換邊</button>
 
+            <button type="button" class="nc-btn nc-btn-small app-popbtn" id="btnLayers" aria-expanded="false" aria-controls="popLayers" title="路徑與工件的顯示圖層"><svg class="app-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8l6.2 3.1L8 8 1.8 4.9z"/><path d="M1.8 8L8 11.1 14.2 8"/><path d="M1.8 11.1L8 14.2l6.2-3.1"/></svg>圖層</button>
+            <button type="button" class="nc-btn nc-btn-small app-popbtn" id="btnToolsPop" aria-expanded="false" aria-controls="popTools" title="只顯示勾選的刀">刀具 <span class="app-popbtn__count" id="toolPopCount"></span></button>
             <button type="button" class="nc-btn nc-btn-small" id="btnFit" title="重設縮放，把整個工件放進畫面">全覽</button>
 
-            <!-- 手機版：並排 3D／模擬到／顯示圖層／刀具這些「調好就不動」的選項收在這後面 -->
-            <button type="button" class="nc-btn nc-btn-small app-view-tools__more" id="btnViewMore" aria-expanded="false" title="更多顯示選項（並排 3D、模擬到、顯示圖層、刀具）">選項</button>
+            <!-- 手機版：並排 3D／3D 剖切這些「調好就不動」的選項收在這後面 -->
+            <button type="button" class="nc-btn nc-btn-small app-view-tools__more" id="btnViewMore" aria-expanded="false" title="更多顯示選項（並排 3D、3D 剖切）">選項</button>
           </div>
 
-          <div class="app-view-tools__row app-view-tools__row--snapshot">
-            <label class="app-slider app-slider--wide" title="只顯示模擬到第 N 把刀為止的成品">
-              <span class="app-slider__label">模擬到</span>
-              <input type="range" id="rngSnapshot" min="0" max="0" step="1" value="0" disabled>
-              <span class="app-slider__value" id="snapVal">尚未模擬</span>
-            </label>
-          </div>
-
-          <div class="app-view-tools__row app-view-tools__row--wrap">
-            <span class="app-view-tools__label">顯示</span>
+          <!-- 圖層 popover：畫不畫哪些東西。廢料只管「畫不畫」，判定方式在左欄「素材」子頁調——設定跟顯示分開。
+               預設「標示」而不是「隱藏」：一料多件或判反的時候，隱藏會讓人看不到那塊料跑哪去了。 -->
+          <div class="app-pop nc-hidden" id="popLayers" role="group" aria-label="顯示圖層">
+            <div class="app-pop__title">路徑</div>
             <label class="nc-check"><input type="checkbox" id="chkRapid" checked> 快速 G0</label>
             <label class="nc-check"><input type="checkbox" id="chkFeed" checked> 切削</label>
             <label class="nc-check"><input type="checkbox" id="chkRef"> 回原點路徑</label>
-            <label class="nc-check"><input type="checkbox" id="chkStock" checked> 素材</label>
-            <!-- 廢料：切穿之後跟工件分開的料。這裡只管「畫不畫」，判定方式在左欄「素材」子頁調——設定跟顯示分開。
-                 預設「標示」而不是「隱藏」：一料多件或判反的時候，隱藏會讓人看不到那塊料跑哪去了。 -->
-            <label class="nc-check app-scrap" title="切穿之後跟工件分開的料。判定方式在左欄「素材」子頁的「廢料判定」調整。">廢料 <select class="nc-select" id="selScrap"><option value="off">照舊</option><option value="mark" selected>標示</option><option value="hide">隱藏</option></select></label>
             <label class="nc-check nc-hidden" id="lblRotary" title="工件分度轉動時，刀相對於工件掃過的軌跡。實際上刀沒有動、是工件在轉，所以預設不畫；要看分度會不會掃到刀時才打開。"><input type="checkbox" id="chkRotary"> 工件轉動軌跡</label>
+            <div class="app-pop__title">工件</div>
+            <label class="nc-check"><input type="checkbox" id="chkStock" checked> 素材</label>
+            <label class="nc-check app-scrap" title="切穿之後跟工件分開的料。判定方式在左欄「素材」子頁的「廢料判定」調整。">廢料 <select class="nc-select" id="selScrap"><option value="off">照舊</option><option value="mark" selected>標示</option><option value="hide">隱藏</option></select></label>
           </div>
 
-          <div class="app-view-tools__row app-view-tools__row--tools">
-            <span class="app-view-tools__label app-view-tools__label--tools">刀具</span>
+          <!-- 刀具 popover：只畫勾選的刀 -->
+          <div class="app-pop nc-hidden" id="popTools" role="group" aria-label="刀具過濾">
+            <div class="app-pop__title">只畫勾選的刀</div>
             <div class="app-tool-filter nc-view2d-legend" id="toolFilter"></div>
           </div>
         </div>
@@ -158,6 +159,16 @@
           <div class="nc-view2d" id="viewHost"><canvas id="viewCanvas"></canvas></div>
           <div class="app-view-split__bar" id="viewSplitBar" role="separator" aria-orientation="vertical" title="拖曳調整左右比例（雙擊回到一半一半）"></div>
           <div class="nc-view3d nc-hidden" id="view3dHost"><canvas id="viewCanvas3d"></canvas></div>
+        </div>
+
+        <!-- 模擬進度時間軸：刀次是刻度（app.js 產生），點刻度直接跳到該刀完工 -->
+        <div class="app-scrub" title="只顯示模擬到第 N 把刀為止的成品">
+          <span class="app-scrub__label">模擬到</span>
+          <div class="app-scrub__track">
+            <div class="app-scrub__ticks" id="snapTicks"></div>
+            <input type="range" id="rngSnapshot" min="0" max="0" step="1" value="0" disabled aria-label="模擬到第幾把刀">
+          </div>
+          <span class="app-scrub__val" id="snapVal">尚未模擬</span>
         </div>
 
         <div class="app-view-foot">
@@ -195,6 +206,9 @@
     <button type="button" class="app-mnav__btn is-on" data-mview="view">視圖</button>
     <button type="button" class="app-mnav__btn" data-mview="status">狀態 <span class="app-tab__badge nc-hidden" id="mnavDiagBadge"></span></button>
   </nav>
+
+  <!-- popover 的外點區：桌機透明（點外面關掉），手機版是 bottom sheet 的半透明遮罩 -->
+  <div class="app-popback nc-hidden" id="popBackdrop" aria-hidden="true"></div>
 
   <!-- 整頁拖放提示 -->
   <div class="app-drop" id="dropOverlay" aria-hidden="true"><div class="app-drop__box">放開以載入<br>NC 程式，或刀具表 CSV</div></div>

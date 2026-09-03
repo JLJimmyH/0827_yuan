@@ -337,10 +337,14 @@
       btnMode3d: $('btnMode3d'), chkRef: $('chkRef'), rotaryBanner: $('rotaryBanner'),
       btnModeUnroll: $('btnModeUnroll'), chkRotary: $('chkRotary'), lblRotary: $('lblRotary'),
       rngSection: $('rngSection'), secVal: $('secVal'), btnFit: $('btnFit'),
-      rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'),
+      rngSnapshot: $('rngSnapshot'), snapVal: $('snapVal'), snapTicks: $('snapTicks'),
       chkRapid: $('chkRapid'), chkFeed: $('chkFeed'), chkStock: $('chkStock'),
       selScrap: $('selScrap'),   // 廢料顯示 off|mark|hide（index.html 可能還沒加，用到都要守衛）
       toolFilter: $('toolFilter'),
+      // 圖層／刀具 popover（顯示選項收在這兩個裡面；手機版 CSS 讓它變 bottom sheet）
+      btnLayers: $('btnLayers'), popLayers: $('popLayers'),
+      btnToolsPop: $('btnToolsPop'), popTools: $('popTools'), toolPopCount: $('toolPopCount'),
+      popBackdrop: $('popBackdrop'),
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
       tabOverview: $('tabOverview'), projectChips: $('projectChips'), miniModal: $('miniModal'),
@@ -1382,6 +1386,31 @@
       syncSection3D();
     }
 
+    /** 模擬進度時間軸的刀次刻度：每份快照一個 T 標籤，點了直接跳到該刀完工的畫面。
+     * 位置對齊滑桿值（value i＝snaps[i]）；作業多時抽樣顯示，標籤才不會疊成一團。 */
+    function renderSnapTicks(snaps) {
+      if (!el.snapTicks) return;
+      clearEl(el.snapTicks);
+      if (!snaps || !snaps.length) return;
+      const max = snaps.length;                       // 滑桿 max（value=max 是「最終」）
+      const step = Math.max(1, Math.ceil(max / 12));  // 標籤最多 12 個
+      for (let i = 0; i < max; i += step) {
+        const s = snaps[i];
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'app-scrub__tick';
+        b.style.left = (i / max * 100) + '%';
+        const opNo = (s && s.afterOpIndex != null ? s.afterOpIndex : i) + 1;
+        b.textContent = s && s.tool != null ? 'T' + s.tool : '#' + opNo;
+        b.title = `跳到第 ${opNo} 把完工`;
+        b.addEventListener('click', () => {
+          el.rngSnapshot.value = String(i);
+          el.rngSnapshot.dispatchEvent(new Event('input'));
+        });
+        el.snapTicks.appendChild(b);
+      }
+    }
+
     function syncSnapshotSlider(sim, ops, stale) {
       const snaps = sim && sim.snapshots ? sim.snapshots : [];
       if (!snaps.length) {
@@ -1390,11 +1419,13 @@
         el.rngSnapshot.value = '0';
         el.rngSnapshot.disabled = true;
         el.snapVal.textContent = sim ? '無作業' : '尚未模擬';
+        renderSnapTicks([]);
         return;
       }
       el.rngSnapshot.min = '0';
       el.rngSnapshot.max = String(snaps.length);
       el.rngSnapshot.disabled = false;
+      renderSnapTicks(snaps);
       snapshotOpCount = (ops && ops.length) || snaps.length;
       // 使用者拉過滑桿的話要記住他選的是「第幾把刀之後」（不是陣列索引——
       // 作業數超過預算時快照是抽樣的），重新模擬後找最接近的那一份還原。
@@ -1434,6 +1465,15 @@
       return state.result.scenarios[state.scenario] || state.result.scenarios.off || null;
     }
 
+    /** 「刀具」popover 鈕上的數字（勾了幾把／共幾把）：全開時不用點開就知道沒在過濾 */
+    function updateToolPopCount() {
+      if (!el.toolPopCount) return;
+      const boxes = el.toolFilter ? el.toolFilter.querySelectorAll('input[type=checkbox]') : [];
+      let on = 0;
+      for (const b of boxes) if (b.checked) on++;
+      el.toolPopCount.textContent = boxes.length ? `${on}/${boxes.length}` : '';
+    }
+
     function renderToolFilter(table, segments) {
       const used = new Set();
       for (const s of segments) if (s.tool != null) used.add(s.tool);
@@ -1444,6 +1484,7 @@
         sp.className = 'nc-muted';
         sp.textContent = '（無）';
         el.toolFilter.appendChild(sp);
+        updateToolPopCount();
         return;
       }
       const color = (NC.ui.view2dUtil && NC.ui.view2dUtil.toolColor) ? NC.ui.view2dUtil.toolColor : () => '#888';
@@ -1458,6 +1499,7 @@
           if (cb.checked) state.hiddenTools.delete(t.t); else state.hiddenTools.add(t.t);
           lab.classList.toggle('is-off', !cb.checked);
           applyVisible();
+          updateToolPopCount();
         });
         const swatch = document.createElement('i');
         swatch.style.background = color(t.t);
@@ -1468,6 +1510,7 @@
         lab.appendChild(span);
         el.toolFilter.appendChild(lab);
       }
+      updateToolPopCount();
     }
 
     function applyVisible() {
@@ -2229,6 +2272,33 @@
     }
     wireCollapse(el.btnBarMore, document.querySelector('.app-bar'));
     wireCollapse(el.btnViewMore, el.viewTools);
+
+    // ---- 圖層／刀具 popover ----
+    // 點鈕開關；點外面（#popBackdrop：桌機透明、手機是半透明遮罩）或 Esc 關。一次只開一個。
+    const POPOVERS = [[el.btnLayers, el.popLayers], [el.btnToolsPop, el.popTools]];
+    function setPopover(btn, pop, on) {
+      if (!btn || !pop) return;
+      pop.classList.toggle('nc-hidden', !on);
+      btn.classList.toggle('is-on', on);
+      btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+    }
+    function closePopovers() {
+      for (const [b, p] of POPOVERS) setPopover(b, p, false);
+      if (el.popBackdrop) el.popBackdrop.classList.add('nc-hidden');
+    }
+    for (const [btn, pop] of POPOVERS) {
+      if (!btn || !pop) continue;
+      btn.addEventListener('click', () => {
+        const wantOpen = pop.classList.contains('nc-hidden');
+        closePopovers();
+        if (wantOpen) {
+          setPopover(btn, pop, true);
+          if (el.popBackdrop) el.popBackdrop.classList.remove('nc-hidden');
+        }
+      });
+    }
+    if (el.popBackdrop) el.popBackdrop.addEventListener('click', closePopovers);
+    document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closePopovers(); });
 
     // 整頁拖放（只接檔案；在編輯器內拖曳文字不受影響）
     function dragHasFiles(ev) {
