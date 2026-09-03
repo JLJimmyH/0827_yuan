@@ -210,6 +210,22 @@
   <!-- popover 的外點區：桌機透明（點外面關掉），手機版是 bottom sheet 的半透明遮罩 -->
   <div class="app-popback nc-hidden" id="popBackdrop" aria-hidden="true"></div>
 
+  <!-- 快捷鍵一覽（按 ? 開關，點任何地方關） -->
+  <div class="app-kbd nc-hidden" id="kbdHelp" role="dialog" aria-label="鍵盤快捷鍵">
+    <div class="app-kbd__box">
+      <div class="app-kbd__title">鍵盤快捷鍵</div>
+      <div class="app-kbd__grid">
+        <span><kbd>1</kbd>–<kbd>5</kbd></span><span>俯視／剖面 X／剖面 Y／3D／展開圖</span>
+        <span><kbd>F</kbd></span><span>全覽（把整個工件放進畫面）</span>
+        <span><kbd>Ctrl</kbd>+<kbd>O</kbd></span><span>開檔</span>
+        <span><kbd>Ctrl</kbd>+<kbd>S</kbd></span><span>存檔（下載目前內容）</span>
+        <span><kbd>Esc</kbd></span><span>關閉 popover／離開標記模式</span>
+        <span><kbd>?</kbd></span><span>這張表</span>
+      </div>
+      <div class="app-kbd__hint">點任何地方關閉</div>
+    </div>
+  </div>
+
   <!-- 整頁拖放提示 -->
   <div class="app-drop" id="dropOverlay" aria-hidden="true"><div class="app-drop__box">放開以載入<br>NC 程式，或刀具表 CSV</div></div>
 </div>

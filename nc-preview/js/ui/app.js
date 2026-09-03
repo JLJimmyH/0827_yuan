@@ -344,7 +344,7 @@
       // 圖層／刀具 popover（顯示選項收在這兩個裡面；手機版 CSS 讓它變 bottom sheet）
       btnLayers: $('btnLayers'), popLayers: $('popLayers'),
       btnToolsPop: $('btnToolsPop'), popTools: $('popTools'), toolPopCount: $('toolPopCount'),
-      popBackdrop: $('popBackdrop'),
+      popBackdrop: $('popBackdrop'), kbdHelp: $('kbdHelp'),
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
       tabOverview: $('tabOverview'), projectChips: $('projectChips'), miniModal: $('miniModal'),
@@ -691,9 +691,17 @@
       for (const d of diags) if (by[d.severity] != null) by[d.severity]++;
       for (const sev of ['error', 'warning', 'needsInput', 'info']) {
         if (!by[sev]) continue;
-        const sp = document.createElement('span');
+        // 可點：跳到錯誤清單、只看這一類（清單自己的勾選框可以再改回來）
+        const sp = document.createElement('button');
+        sp.type = 'button';
         sp.className = 'nc-pill nc-pill-' + sev;
         sp.textContent = { error: '錯 ', warning: '警 ', needsInput: '需 ', info: '訊 ' }[sev] + by[sev];
+        sp.title = '打開錯誤清單，只看這一類';
+        sp.addEventListener('click', () => {
+          if (diagPanel) diagPanel.setFilter({ severities: [sev] });
+          selectTab('diag');
+          if (isMobileLayout()) selectMobileView('status');
+        });
         el.statusCounts.appendChild(sp);
       }
       if (pending) {
@@ -2299,6 +2307,38 @@
     }
     if (el.popBackdrop) el.popBackdrop.addEventListener('click', closePopovers);
     document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closePopovers(); });
+
+    // ---- 鍵盤快捷鍵 ----
+    // 1~5 切視圖、F 全覽、? 快捷鍵一覽；Ctrl+O／Ctrl+S 開檔存檔（打字中也吃，蓋掉瀏覽器預設）。
+    // 其餘單鍵在打字中（input/textarea/select）不作用，免得在編輯器打數字變成切視圖。
+    const VIEW_MODE_KEYS = { 1: 'top', 2: 'sectionX', 3: 'sectionY', 4: '3d', 5: 'unroll' };
+    function isTyping(ev) {
+      const t = ev.target;
+      const tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable);
+    }
+    function showKbdHelp(on) {
+      if (el.kbdHelp) el.kbdHelp.classList.toggle('nc-hidden', !on);
+    }
+    if (el.kbdHelp) el.kbdHelp.addEventListener('click', () => showKbdHelp(false));
+    document.addEventListener('keydown', (ev) => {
+      if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey) {
+        const k = ev.key.toLowerCase();
+        if (k === 'o') { ev.preventDefault(); el.btnOpen.click(); }
+        else if (k === 's') { ev.preventDefault(); el.btnSave.click(); }
+        return;
+      }
+      if (ev.ctrlKey || ev.altKey || ev.metaKey || isTyping(ev)) return;
+      if (ev.key === 'Escape') { showKbdHelp(false); return; }
+      if (VIEW_MODE_KEYS[ev.key]) {
+        const b = document.querySelector(`.app-seg__btn[data-mode="${VIEW_MODE_KEYS[ev.key]}"]`);
+        if (b && !b.disabled) b.click();
+      } else if (ev.key === 'f' || ev.key === 'F') {
+        el.btnFit.click();
+      } else if (ev.key === '?') {
+        showKbdHelp(el.kbdHelp && el.kbdHelp.classList.contains('nc-hidden'));
+      }
+    });
 
     // 整頁拖放（只接檔案；在編輯器內拖曳文字不受影響）
     function dragHasFiles(ev) {
