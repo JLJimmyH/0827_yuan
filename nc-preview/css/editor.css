@@ -1,6 +1,6 @@
 /*
  * NC 預演台 — 編輯器樣式（js/ui/editor.js）
- * 結構：.nc-editor > [.nc-editor__gutter | .nc-editor__main(textarea + 目前行底色) | .nc-editor__info] + .nc-editor__tip
+ * 結構：.nc-editor > [.nc-editor__gutter | .nc-editor__main(目前行底色 + 上色鏡像 + textarea) | .nc-editor__info] + .nc-editor__tip
  * 三欄共用同一個行高（--nc-editor-lh），左右欄以 transform 跟隨 textarea 的 scrollTop。
  */
 .nc-editor {
@@ -21,6 +21,12 @@
   --nc-editor-warning: #bf8700;
   --nc-editor-info-c: #0969da;
   --nc-editor-needs: #e3b341;
+  /* 語法淡上色（鏡像層 .nc-editor__crow 的 token 色） */
+  --nc-editor-tk-comment: #188550;   /* (註解) */
+  --nc-editor-tk-g: #1f5fd0;         /* G 碼 */
+  --nc-editor-tk-mt: #8137c9;        /* M／T（換刀類） */
+  --nc-editor-tk-n: #98a2b3;         /* N 序號 */
+  --nc-editor-tk-skip: #b54708;      /* 行首 /（block skip） */
 
   position: relative;
   display: flex;
@@ -130,6 +136,33 @@
   caret-color: var(--nc-editor-fg);
 }
 .nc-editor__text::selection { background: #b6d7ff; }
+
+/* ---- 語法淡上色鏡像層 ----
+ * editor.js 在 hl 與 textarea 之間鋪一層跟字逐格對齊的上色列（同一套虛擬化）。
+ * textarea 的字設透明、caret 留著；透明只掛在 .nc-editor--tinted 底下——
+ * 這個 class 由 editor.js 建好鏡像層後才加，CSS/JS 沒對上時文字照舊可見。 */
+.nc-editor__code {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.nc-editor__crow {
+  padding: 0 8px 0 6px;      /* 跟 .nc-editor__text 的左右 padding 一致，字才對得齊 */
+  overflow: visible;         /* 長行靠 translateX 跟捲，不能被列自己剪掉 */
+  white-space: pre;
+  tab-size: 4;
+}
+.nc-editor--tinted .nc-editor__text { color: transparent; }
+/* 選取底色改半透明：不然不透明的藍塊會把底下鏡像字整段蓋掉 */
+.nc-editor--tinted .nc-editor__text::selection { background: rgba(47, 111, 237, 0.25); }
+.nc-editor__crow .tk-c { color: var(--nc-editor-tk-comment); }
+.nc-editor__crow .tk-g { color: var(--nc-editor-tk-g); }
+.nc-editor__crow .tk-t { color: var(--nc-editor-tk-mt); }
+.nc-editor__crow .tk-n { color: var(--nc-editor-tk-n); }
+.nc-editor__crow .tk-skip { color: var(--nc-editor-tk-skip); font-weight: 600; }
+.nc-editor__crow .tk-o { font-weight: 700; }
 
 /* ---- 右欄：行旁資訊 ---- */
 .nc-editor__info {

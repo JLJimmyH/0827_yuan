@@ -6,6 +6,10 @@
  * 三欄共用同一行高；左右欄只畫可視範圍的列（虛擬化），並用 transform 跟著 textarea 的 scrollTop 走，
  * 所以 2,000 行以上也只維護幾十個 DOM 節點，更新診斷／資訊只需重畫可視列。
  *
+ * 語法淡上色：textarea 的字設成透明（caret 留著），底下鋪一層跟它逐字對齊的上色鏡像
+ * （.nc-editor__code，同一套虛擬化，多跟 scrollLeft）。透明只在 .nc-editor--tinted 之下生效，
+ * 這個 class 由這裡建好鏡像層後才加——CSS 或 JS 任一邊沒跟上時，文字照舊可見，不會整片消失。
+ *
  * 另外把不碰 DOM 的純文字工具掛在 NC.ui.editorText，供 Node 測試。
  */
 (function (NC) {
@@ -139,6 +143,8 @@
     const gutterInner = mk('div', 'nc-editor__col-inner');
     const main = mk('div', 'nc-editor__main');
     const hl = mk('div', 'nc-editor__hl');
+    const code = mk('div', 'nc-editor__code');       // 語法上色鏡像（在 hl 之上、textarea 之下）
+    const codeInner = mk('div', 'nc-editor__col-inner');
     const ta = mk('textarea', 'nc-editor__text');
     const info = mk('div', 'nc-editor__info');
     const infoInner = mk('div', 'nc-editor__col-inner');
@@ -152,7 +158,9 @@
     ta.setAttribute('aria-label', 'NC 程式');
 
     gutter.appendChild(gutterInner);
+    code.appendChild(codeInner);
     main.appendChild(hl);
+    main.appendChild(code);
     main.appendChild(ta);
     info.appendChild(infoInner);
     root.appendChild(gutter);
@@ -160,6 +168,7 @@
     root.appendChild(info);
     root.appendChild(tip);
     container.appendChild(root);
+    root.classList.add('nc-editor--tinted');   // 鏡像層就緒，textarea 文字才可以透明
 
     // ---- 狀態 ----
     let lineEnding = '\n';          // setText 時記下，getText 還原
@@ -179,6 +188,7 @@
     let gutterDigits = 0;
     const gutterPool = [];          // 可重用的列節點
     const infoPool = [];
+    const codePool = [];
     let destroyed = false;
     let tipLine = 0;
 
@@ -268,6 +278,59 @@
       if (row._cur !== cur) { setClassFlag(row, 'is-current', cur); row._cur = cur; }
     }
 
+    // ---- 語法淡上色 ----
+    // 逐行 regex 掃 token：括號註解綠、G 碼藍、M／T（換刀類）紫、N 序號淡灰、
+    // 行首斜線（block skip）琥珀、O 程式號加粗。座標與 F／S 留原色——是「淡上色」不是全彩。
+    const TK_RE = /\([^)]*\)?|[Gg]\d+(?:\.\d+)?|[MmTt]\d+|[NnOo]\d+/g;
+    function renderCodeLine(rowEl, text) {
+      rowEl.textContent = '';
+      let from = 0;
+      const push = (s, cls) => {
+        if (!s) return;
+        if (cls) { const sp = mk('span', cls); sp.textContent = s; rowEl.appendChild(sp); }
+        else rowEl.appendChild(doc.createTextNode(s));
+      };
+      const skip = /^\/+/.exec(text);
+      if (skip) { push(skip[0], 'tk-skip'); from = skip[0].length; }
+      TK_RE.lastIndex = from;
+      let last = from;
+      let m;
+      while ((m = TK_RE.exec(text))) {
+        push(text.slice(last, m.index), null);
+        const c0 = m[0][0];
+        push(m[0],
+          c0 === '(' ? 'tk-c'
+          : (c0 === 'G' || c0 === 'g') ? 'tk-g'
+          : (c0 === 'M' || c0 === 'm' || c0 === 'T' || c0 === 't') ? 'tk-t'
+          : (c0 === 'O' || c0 === 'o') ? 'tk-o' : 'tk-n');
+        last = m.index + m[0].length;
+      }
+      push(text.slice(last), null);
+    }
+
+    function ensureCodeRow(k) {
+      let row = codePool[k];
+      if (!row) {
+        row = mk('div', 'nc-editor__row nc-editor__crow');
+        row._line = 0;
+        row._text = null;
+        codePool[k] = row;
+        codeInner.appendChild(row);
+      }
+      return row;
+    }
+
+    function paintCodeRow(row, line) {
+      const start = lineStarts[line - 1];
+      const end = line < lineCount ? lineStarts[line] - 1 : ta.value.length;
+      const text = ta.value.slice(start, end);
+      if (row._line !== line) {
+        row._line = line;
+        row.style.top = (padTop + (line - 1) * lh) + 'px';
+      }
+      if (row._text !== text) { row._text = text; renderCodeLine(row, text); }
+    }
+
     function paintInfoRow(row, line) {
       let text = '';
       if (lineInfoFn) {
@@ -299,12 +362,18 @@
         const r = ensureRow(infoPool, infoInner, false, k);
         if (r.style.display) r.style.display = '';
         paintInfoRow(r, line);
+        const c = ensureCodeRow(k);
+        if (c.style.display) c.style.display = '';
+        paintCodeRow(c, line);
       }
       for (let k = count; k < gutterPool.length; k++) {
         if (gutterPool[k].style.display !== 'none') { gutterPool[k].style.display = 'none'; gutterPool[k]._line = 0; }
       }
       for (let k = count; k < infoPool.length; k++) {
         if (infoPool[k].style.display !== 'none') { infoPool[k].style.display = 'none'; infoPool[k]._line = 0; }
+      }
+      for (let k = count; k < codePool.length; k++) {
+        if (codePool[k].style.display !== 'none') { codePool[k].style.display = 'none'; codePool[k]._line = 0; codePool[k]._text = null; }
       }
     }
 
@@ -320,6 +389,8 @@
       const tr = 'translateY(' + (-st) + 'px)';
       gutterInner.style.transform = tr;
       infoInner.style.transform = tr;
+      // 上色鏡像要跟字元逐格對齊，橫向捲動也得跟（左右欄不用——它們不跟字對齊）
+      codeInner.style.transform = 'translate(' + (-ta.scrollLeft) + 'px, ' + (-st) + 'px)';
       updateHighlightPos();
       renderRows(false);
       if (tipLine) hideTip();
