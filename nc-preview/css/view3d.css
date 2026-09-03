@@ -39,10 +39,11 @@
 }
 .nc-view3d-hud .tag {
   display: inline-block;
-  padding: 2px 7px;
-  border: 1px solid #d8d8d8;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.86);
+  padding: 2px 9px;
+  border: 1px solid var(--nc-border, #e5e8ee);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: var(--nc-shadow-sm, 0 1px 2px rgba(16, 24, 40, 0.06));
   white-space: nowrap;
 }
 .nc-view3d-hud .tag.warn { border-color: #e0b23c; background: rgba(255, 246, 220, 0.92); color: #7a5300; }
@@ -59,15 +60,17 @@
   font: 12px system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
 }
 .nc-view3d-tools button {
-  padding: 3px 9px;
-  border: 1px solid #cfcfcf;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #333;
+  padding: 3px 10px;
+  border: 1px solid var(--nc-border-strong, #cfd5de);
+  border-radius: var(--nc-r-ctl, 7px);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--nc-text-2, #4a5462);
   cursor: pointer;
+  box-shadow: var(--nc-shadow-sm, 0 1px 2px rgba(16, 24, 40, 0.06));
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
-.nc-view3d-tools button:hover { background: #fff; border-color: #9aa; }
-.nc-view3d-tools button[aria-pressed="true"] { background: #e8f3ff; border-color: #6aa3e0; color: #14508f; }
+.nc-view3d-tools button:hover { background: #fff; border-color: var(--nc-faint, #98a2b3); }
+.nc-view3d-tools button[aria-pressed="true"] { background: var(--nc-selected, #eaf1fe); border-color: var(--nc-accent-border, #bcd2f7); color: var(--nc-accent-strong, #1e5bd8); }
 
 /* 座標軸圖例：紅 X／綠 Y／藍 Z */
 .nc-view3d-axes {

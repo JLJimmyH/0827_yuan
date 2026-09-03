@@ -13,9 +13,9 @@
  */
 :root {
   color-scheme: only light;
-  --app-bar-h: 44px;
+  --app-bar-h: 48px;
   --app-gap: 8px;
-  --app-head-h: 26px;
+  --app-head-h: 30px;
   /* 左欄寬（佔主體）與狀態條高（佔右欄）的預設值；拖分隔線時 app.js 會改寫這兩個變數（存進偏好） */
   --app-left-w: 50%;
   --app-status-h: 30%;
@@ -23,13 +23,16 @@
 
 * { box-sizing: border-box; }
 
+/* 原生控件（勾選框、radio、range）跟著主色走 */
+input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--nc-accent, #2f6fed); }
+
 html, body {
   margin: 0;
   padding: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--nc-bg-alt, #f6f7f9);
-  color: var(--nc-text, #1f2429);
+  background: var(--nc-page, #f4f5f7);
+  color: var(--nc-text, #1a2129);
   font: 13px var(--nc-font, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", Arial, sans-serif);
 }
 
@@ -41,24 +44,25 @@ html, body {
 }
 
 /* ==================== 頂列工具列 ==================== */
+/* 平面白底＋細分隔線（漸層是舊擬物殘留） */
 .app-bar {
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--app-gap);
   min-height: var(--app-bar-h);
-  padding: 5px 10px;
-  background: linear-gradient(#ffffff, #f2f4f7);
-  border-bottom: 1px solid var(--nc-border, #d9dde3);
+  padding: 6px 12px;
+  background: var(--nc-bg, #fff);
+  border-bottom: 1px solid var(--nc-border, #e5e8ee);
   white-space: nowrap;
 }
 .app-bar__title {
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13.5px;
   letter-spacing: 0.02em;
-  color: var(--nc-accent, #2b6cb0);
-  padding-right: 4px;
-  border-right: 1px solid var(--nc-border, #d9dde3);
+  color: var(--nc-text, #1a2129);
+  padding-right: 8px;
+  border-right: 1px solid var(--nc-border, #e5e8ee);
   margin-right: 2px;
 }
 .app-bar__group {
@@ -67,7 +71,7 @@ html, body {
   gap: 4px;
 }
 .app-bar__label {
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   font-size: 12px;
 }
 .app-bar__spacer { flex: 1 1 auto; min-width: 8px; }
@@ -88,7 +92,7 @@ html, body {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   max-width: 46ch;
   overflow: hidden;
 }
@@ -104,14 +108,14 @@ html, body {
   width: 70px;
   height: 5px;
   border-radius: 3px;
-  background: #dfe3e8;
+  background: var(--nc-bg-alt2, #eef0f4);
   overflow: hidden;
 }
 .app-progress__bar {
   display: block;
   height: 100%;
   width: 0;
-  background: var(--nc-accent, #2b6cb0);
+  background: var(--nc-accent, #2f6fed);
   transition: width 0.12s linear;
 }
 
@@ -149,10 +153,11 @@ html, body {
   position: absolute;
   border-radius: 2px;
 }
-.app-vsplit::after { top: 0; bottom: 0; left: 2px; right: 2px; }
-.app-hsplit::after { left: 0; right: 0; top: 2px; bottom: 2px; }
+/* 中央一枚膠囊 grip：平常淡淡的在那裡（才知道能拖），hover／拖曳時變主色 */
+.app-vsplit::after { top: 50%; height: 38px; transform: translateY(-50%); left: 2.5px; right: 2.5px; background: var(--nc-border-strong, #cfd5de); opacity: 0.7; transition: background 0.12s, opacity 0.12s; }
+.app-hsplit::after { left: 50%; width: 38px; transform: translateX(-50%); top: 2.5px; bottom: 2.5px; background: var(--nc-border-strong, #cfd5de); opacity: 0.7; transition: background 0.12s, opacity 0.12s; }
 .app-vsplit:hover::after, .app-vsplit.is-dragging::after,
-.app-hsplit:hover::after, .app-hsplit.is-dragging::after { background: var(--nc-accent, #2b6cb0); }
+.app-hsplit:hover::after, .app-hsplit.is-dragging::after { background: var(--nc-accent, #2f6fed); opacity: 1; }
 /* 拖分隔線時 iframe／canvas 不要搶指標，也不要選到字 */
 .app.is-resizing { cursor: inherit; user-select: none; }
 .app.is-resizing canvas, .app.is-resizing textarea { pointer-events: none; }
@@ -163,8 +168,9 @@ html, body {
   min-height: 0;
   min-width: 0;
   background: var(--nc-bg, #fff);
-  border: 1px solid var(--nc-border, #d9dde3);
-  border-radius: 4px;
+  border: 1px solid var(--nc-border, #e5e8ee);
+  border-radius: var(--nc-r-pane, 10px);
+  box-shadow: var(--nc-shadow-sm, 0 1px 2px rgba(16, 24, 40, 0.06));
   overflow: hidden;
 }
 .app-pane--view   { flex: 1 1 auto; min-height: 220px; }
@@ -176,14 +182,14 @@ html, body {
   align-items: center;
   gap: 6px;
   height: var(--app-head-h);
-  padding: 0 8px;
-  background: var(--nc-bg-alt, #f6f7f9);
-  border-bottom: 1px solid var(--nc-border, #d9dde3);
-  font-size: 12px;
+  padding: 0 12px;
+  background: var(--nc-bg, #fff);
+  border-bottom: 1px solid var(--nc-border, #e5e8ee);
+  font-size: 12.5px;
 }
-.app-pane__title { font-weight: 600; }
+.app-pane__title { font-weight: 700; }
 .app-pane__sub {
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -221,10 +227,10 @@ html, body {
 /* 子頁最上面一行：這頁的資料是跟程式存還是整台機共用 */
 .app-ptab__note {
   font-size: 11px;
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   padding: 2px 0 5px;
   margin-bottom: 6px;
-  border-bottom: 1px dashed var(--nc-border, #d9dde3);
+  border-bottom: 1px dashed var(--nc-border, #e5e8ee);
 }
 
 /* 游標行摘要：貼在編輯器底下的一行，點了切到狀態條的「游標行」分頁 */
@@ -235,9 +241,9 @@ html, body {
   min-height: 22px;
   padding: 3px 8px;
   border: 0;
-  border-top: 1px solid var(--nc-border, #d9dde3);
-  background: var(--nc-bg-alt, #f6f7f9);
-  color: var(--nc-text, #1f2429);
+  border-top: 1px solid var(--nc-border, #e5e8ee);
+  background: var(--nc-bg-alt, #f7f8fa);
+  color: var(--nc-text, #1a2129);
   font: 11.5px var(--nc-mono, Consolas, monospace);
   text-align: left;
   white-space: nowrap;
@@ -245,13 +251,13 @@ html, body {
   text-overflow: ellipsis;
   cursor: pointer;
 }
-.app-mini-modal:hover { background: #eceff3; }
-.app-mini-modal__line { color: var(--nc-accent, #2b6cb0); font-weight: 700; }
+.app-mini-modal:hover { background: var(--nc-bg-alt2, #eef0f4); }
+.app-mini-modal__line { color: var(--nc-accent, #2f6fed); font-weight: 700; }
 .app-mini-modal__sep { color: var(--nc-border, #c3c9d2); margin: 0 5px; }
-.app-mini-modal__k { color: var(--nc-muted, #6b7480); }
-.app-mini-modal .nc-warn { color: var(--nc-warning, #b26a00); }
-.app-mini-modal .nc-active { color: var(--nc-accent, #2b6cb0); font-weight: 600; }
-.app-mini-modal.is-empty { color: var(--nc-muted, #6b7480); font-family: inherit; }
+.app-mini-modal__k { color: var(--nc-muted, #6f7a89); }
+.app-mini-modal .nc-warn { color: var(--nc-warning, #b54708); }
+.app-mini-modal .nc-active { color: var(--nc-accent, #2f6fed); font-weight: 600; }
+.app-mini-modal.is-empty { color: var(--nc-muted, #6f7a89); font-family: inherit; }
 
 /* ==================== 視圖工具列 ==================== */
 .app-view-tools {
@@ -259,9 +265,9 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 4px 8px;
-  background: var(--nc-bg-alt, #f6f7f9);
-  border-bottom: 1px solid var(--nc-border, #d9dde3);
+  padding: 5px 10px;
+  background: var(--nc-bg, #fff);
+  border-bottom: 1px solid var(--nc-border, #e5e8ee);
   font-size: 12px;
 }
 .app-view-tools__row {
@@ -271,7 +277,7 @@ html, body {
   min-height: 22px;
 }
 .app-view-tools__row--wrap { flex-wrap: wrap; row-gap: 2px; }
-.app-view-tools__label { color: var(--nc-muted, #6b7480); flex: none; }
+.app-view-tools__label { color: var(--nc-muted, #6f7a89); flex: none; }
 /* 刀具過濾自成一列：刀多的時候（樣本 A 有 15 把）「刀具」標籤才不會被留在上一行，
  * 讓人誤以為第二行的勾選框屬於「顯示」那一組。 */
 .app-view-tools__row--tools { align-items: flex-start; }
@@ -280,7 +286,7 @@ html, body {
   flex: none;
   width: 1px;
   height: 14px;
-  background: var(--nc-border, #d9dde3);
+  background: var(--nc-border, #e5e8ee);
 }
 /* 廢料顯示開關（#selScrap）：跟「快速 G0／切削／素材」那些勾選框排在同一列，
  * 所以要比表單裡的 .nc-select（panels.css，padding 2px 4px）矮一號，
@@ -293,26 +299,33 @@ html, body {
   line-height: 18px;
 }
 
+/* segmented：灰軌道＋白色浮起的選中鈕（取代實心藍） */
 .app-seg {
   display: inline-flex;
   flex: none;
-  border: 1px solid var(--nc-border, #d9dde3);
-  border-radius: 3px;
-  overflow: hidden;
-  background: #fff;
+  padding: 2px;
+  gap: 1px;
+  border-radius: 9px;
+  background: var(--nc-bg-alt2, #eef0f4);
 }
 .app-seg__btn {
   font: inherit;
-  padding: 2px 9px;
+  padding: 2px 11px;
   border: 0;
-  border-right: 1px solid var(--nc-border, #d9dde3);
-  background: #fff;
-  color: var(--nc-text, #1f2429);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--nc-text-2, #4a5462);
   cursor: pointer;
+  transition: background 0.12s, color 0.12s;
 }
-.app-seg__btn:last-child { border-right: 0; }
-.app-seg__btn:hover { background: var(--nc-bg-alt, #f6f7f9); }
-.app-seg__btn.is-on { background: var(--nc-accent, #2b6cb0); color: #fff; }
+.app-seg__btn:hover { color: var(--nc-text, #1a2129); }
+.app-seg__btn.is-on {
+  background: var(--nc-bg, #fff);
+  color: var(--nc-text, #1a2129);
+  font-weight: 650;
+  box-shadow: var(--nc-shadow-sm, 0 1px 2px rgba(16, 24, 40, 0.08));
+}
+.app-seg__btn:disabled { color: var(--nc-faint, #98a2b3); cursor: default; }
 
 .app-slider {
   display: inline-flex;
@@ -322,7 +335,7 @@ html, body {
   min-width: 0;
 }
 .app-slider--wide { flex: 1 1 100%; }
-.app-slider__label { color: var(--nc-muted, #6b7480); flex: none; }
+.app-slider__label { color: var(--nc-muted, #6f7a89); flex: none; }
 .app-slider input[type=range] { flex: 1 1 auto; min-width: 60px; margin: 0; }
 .app-slider input[type=range]:disabled { opacity: 0.45; }
 .app-slider__value {
@@ -330,7 +343,7 @@ html, body {
   min-width: 11ch;
   font-family: var(--nc-mono, Consolas, monospace);
   font-size: 11px;
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
 }
 
 .app-tool-filter {
@@ -379,13 +392,13 @@ html, body {
   flex: none;
   width: 7px;
   cursor: col-resize;
-  background: var(--nc-bg-alt, #f6f7f9);
-  border-left: 1px solid var(--nc-border, #d9dde3);
-  border-right: 1px solid var(--nc-border, #d9dde3);
+  background: var(--nc-bg-alt, #f7f8fa);
+  border-left: 1px solid var(--nc-border, #e5e8ee);
+  border-right: 1px solid var(--nc-border, #e5e8ee);
   touch-action: none;
 }
 .app-view-split.is-split > .app-view-split__bar:hover,
-.app-view-split.is-split > .app-view-split__bar.is-dragging { background: var(--nc-accent, #2b6cb0); }
+.app-view-split.is-split > .app-view-split__bar.is-dragging { background: var(--nc-accent, #2f6fed); }
 
 .app-view-foot {
   flex: none;
@@ -393,10 +406,10 @@ html, body {
   align-items: center;
   gap: 12px;
   padding: 2px 8px;
-  border-top: 1px solid var(--nc-border, #d9dde3);
-  background: var(--nc-bg-alt, #f6f7f9);
+  border-top: 1px solid var(--nc-border, #e5e8ee);
+  background: var(--nc-bg-alt, #f7f8fa);
   font-size: 11px;
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -404,48 +417,49 @@ html, body {
 .app-view-foot__hint--touch { display: none; }
 
 /* ==================== 分頁（左欄 Project 子頁與下方狀態條共用） ==================== */
+/* 分頁：去掉格子感，改下底線式（選中＝加粗＋主色底線） */
 .app-tabs {
   flex: none;
   display: flex;
   align-items: stretch;
   height: var(--app-head-h);
-  background: var(--nc-bg-alt, #f6f7f9);
-  border-bottom: 1px solid var(--nc-border, #d9dde3);
+  padding: 0 4px;
+  background: var(--nc-bg, #fff);
+  border-bottom: 1px solid var(--nc-border, #e5e8ee);
 }
 .app-tab {
   font: inherit;
-  font-size: 12px;
-  padding: 0 12px;
+  font-size: 12.5px;
+  padding: 0 11px;
   border: 0;
-  border-right: 1px solid var(--nc-border, #d9dde3);
   background: transparent;
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+  transition: color 0.12s;
 }
-.app-tab:hover { background: #eceff3; }
+.app-tab:hover { color: var(--nc-text, #1a2129); }
 .app-tab.is-on {
-  background: var(--nc-bg, #fff);
-  color: var(--nc-text, #1f2429);
-  font-weight: 600;
-  box-shadow: inset 0 -2px 0 var(--nc-accent, #2b6cb0);
+  color: var(--nc-text, #1a2129);
+  font-weight: 650;
+  box-shadow: inset 0 -2px 0 var(--nc-accent, #2f6fed);
 }
-.app-tab__sub { color: var(--nc-muted, #6b7480); font-weight: 400; font-size: 11px; }
+.app-tab__sub { color: var(--nc-faint, #98a2b3); font-weight: 400; font-size: 11px; }
 .app-tab__badge {
   display: inline-block;
-  min-width: 1.6em;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--nc-error, #c62828);
+  min-width: 1.7em;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--nc-error, #d92d20);
   color: #fff;
   font-size: 10px;
   font-weight: 700;
   text-align: center;
 }
-.app-tab__badge.is-warn { background: var(--nc-warning, #b26a00); }
+.app-tab__badge.is-warn { background: var(--nc-warning, #b54708); }
 /* 狀態條的分頁列：右欄只有一半寬，分頁＋徽章擠不下時徽章折到第二行（靠右） */
 .app-pane--status .app-tabs { flex-wrap: wrap; height: auto; min-height: var(--app-head-h); }
 .app-pane--status .app-tab { min-height: var(--app-head-h); }
@@ -483,10 +497,10 @@ html, body {
 .app.is-dropping .app-drop { display: flex; }
 .app-drop__box {
   padding: 22px 40px;
-  border: 3px dashed var(--nc-accent, #2b6cb0);
-  border-radius: 10px;
+  border: 3px dashed var(--nc-accent, #2f6fed);
+  border-radius: 14px;
   background: #fff;
-  color: var(--nc-accent, #2b6cb0);
+  color: var(--nc-accent, #2f6fed);
   font-size: 18px;
   font-weight: 700;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
@@ -495,14 +509,14 @@ html, body {
 /* ==================== 其他 ==================== */
 .app-empty {
   padding: 18px 12px;
-  color: var(--nc-muted, #6b7480);
+  color: var(--nc-muted, #6f7a89);
   text-align: center;
   line-height: 1.9;
 }
 .app-empty kbd {
   font: 12px var(--nc-mono, Consolas, monospace);
   padding: 1px 5px;
-  border: 1px solid var(--nc-border, #d9dde3);
+  border: 1px solid var(--nc-border, #e5e8ee);
   border-bottom-width: 2px;
   border-radius: 3px;
   background: #fff;
@@ -515,9 +529,16 @@ html, body {
 
 /* 同步分析（還沒跑模擬）時的狀態列註記 */
 .nc-pill-pending {
-  background: #eef0f3;
-  color: #5b6472;
-  border: 1px dashed #c3c9d2;
+  background: var(--nc-bg-alt2, #eef0f4);
+  color: var(--nc-text-2, #4a5462);
+  border: 1px dashed var(--nc-border-strong, #cfd5de);
+}
+
+/* 鍵盤操作的 focus 環：滑鼠點擊不出現（:focus-visible） */
+.app button:focus-visible,
+.app select:focus-visible {
+  outline: 2px solid var(--nc-accent-border, #bcd2f7);
+  outline-offset: 1px;
 }
 
 
@@ -561,9 +582,9 @@ html, body {
   }
   .app-bar__more.is-on,
   .app-view-tools__more.is-on {
-    background: var(--nc-selected, #e8f1fb);
-    border-color: var(--nc-accent, #2b6cb0);
-    color: var(--nc-accent, #2b6cb0);
+    background: var(--nc-selected, #eaf1fe);
+    border-color: var(--nc-accent, #2f6fed);
+    color: var(--nc-accent, #2f6fed);
   }
   .app-bar__status {
     flex: 1 1 auto;
@@ -609,7 +630,7 @@ html, body {
     display: flex;
     flex: none;
     background: var(--nc-bg, #fff);
-    border-top: 1px solid var(--nc-border, #d9dde3);
+    border-top: 1px solid var(--nc-border, #e5e8ee);
     padding-bottom: env(safe-area-inset-bottom, 0px);   /* iPhone 底部手勢條 */
   }
   .app-mnav__btn {
@@ -618,9 +639,9 @@ html, body {
     flex: 1 1 0;
     min-height: 44px;
     border: 0;
-    border-right: 1px solid var(--nc-border, #d9dde3);
+    border-right: 1px solid var(--nc-border, #e5e8ee);
     background: transparent;
-    color: var(--nc-muted, #6b7480);
+    color: var(--nc-muted, #6f7a89);
     cursor: pointer;
     display: inline-flex;
     align-items: center;
@@ -629,9 +650,9 @@ html, body {
   }
   .app-mnav__btn:last-child { border-right: 0; }
   .app-mnav__btn.is-on {
-    color: var(--nc-accent, #2b6cb0);
-    background: var(--nc-selected, #e8f1fb);
-    box-shadow: inset 0 2px 0 var(--nc-accent, #2b6cb0);
+    color: var(--nc-accent, #2f6fed);
+    background: var(--nc-selected, #eaf1fe);
+    box-shadow: inset 0 2px 0 var(--nc-accent, #2f6fed);
   }
 
   /* ---- 視圖工具列：預設只留「模式切換＋全覽＋選項」，其餘收在「選項」後面 ----

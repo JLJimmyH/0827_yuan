@@ -11,11 +11,11 @@
   --nc-editor-info-w: 30ch;        /* 右側行旁資訊欄寬度 */
   --nc-editor-bg: #ffffff;
   --nc-editor-fg: #1f2328;
-  --nc-editor-gutter-bg: #f4f5f7;
-  --nc-editor-gutter-fg: #8b949e;
+  --nc-editor-gutter-bg: #f7f8fa;
+  --nc-editor-gutter-fg: #98a2b3;
   --nc-editor-info-bg: #fafbfc;
   --nc-editor-info-fg: #57606a;
-  --nc-editor-border: #d0d7de;
+  --nc-editor-border: #e3e7ed;
   --nc-editor-hl: rgba(255, 213, 79, 0.28);      /* 目前行底色 */
   --nc-editor-error: #d1242f;
   --nc-editor-warning: #bf8700;
@@ -155,12 +155,12 @@
   position: absolute;
   z-index: 5;
   max-width: min(520px, 80%);
-  padding: 6px 8px;
+  padding: 6px 9px;
   border: 1px solid var(--nc-editor-border);
-  border-radius: 4px;
+  border-radius: 8px;
   background: #fffdf5;
   color: var(--nc-editor-fg);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 6px 20px rgba(16, 24, 40, 0.14);
   font: 12px/1.45 system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif;
   white-space: normal;
   pointer-events: none;
