@@ -66,6 +66,13 @@
     'G54.1': { sev: 'warning', msg: 'G54.1 附加工件座標系（P__）的偏置本工具不套用，路徑以 G54 原點顯示' },
     G52:     { sev: 'warning', msg: 'G52 局部座標系本工具不模擬：之後的座標會整體平移，路徑與實機不同', blocksMotion: true },
     'G07.1': { sev: 'warning', msg: 'G07.1 圓筒插補本工具不模擬：這一段是繞著旋轉軸展開的路徑，預演畫不出來', blocksMotion: true },
+    // G60 是 00 群（非模態）的單方向定位：以快速移動到終點，但從參數 5440 指定的方向
+    // 接近（先過衝再回頭）以消除背隙。鑽孔程式常每個孔位都寫 G60。預演當 G0 到終點；
+    // 不進 01 群（不能取消固定循環、也不能改掉 G1 模態），一支程式只提示一次。
+    G60:     { sev: 'info', msg: 'G60 單方向定位：預演視為 G0 快速定位到終點（實機會依參數 5440 的方向先過衝再回頭，那一小段不模擬）',
+               skipMotion: 'G0', once: true,
+               detail: 'G60 用來消除反向間隙，讓定位永遠從同一個方向到位；鑽孔程式每個孔位寫 G60 是正常寫法。'
+                 + '預演的終點與實機相同，只差過衝那一小段路徑（量由參數 5440 決定，通常幾 mm）。此提示整支程式只出現一次。' },
     G31:     { sev: 'warning', msg: 'G31 跳躍機能：實機會在收到訊號（碰觸感測器）時提早停止，預演一律畫到程式終點', skipMotion: 'G1' },
     'G84.2': { sev: 'warning', msg: 'G84.2 剛性攻牙（另一種格式）本工具不展開成孔動作', blocksMotion: true },
     'G84.3': { sev: 'warning', msg: 'G84.3 剛性左螺紋攻牙（另一種格式）本工具不展開成孔動作', blocksMotion: true },
@@ -336,9 +343,14 @@
       if (grp === undefined) {
         const known = UNSUPPORTED_G[name];
         if (known) {
-          // 合法但本工具不模擬 → warning／info，絕不報 PS0010
-          diags.push(U.diag('R02', line, known.sev, known.msg,
-            { detail: UNSUPPORTED_DETAIL + (known.blocksMotion ? '\n這一節的座標字是這個指令的參數（不是移動終點），預演不會產生移動。' : '') }));
+          // 合法但本工具不模擬（或只部分模擬）→ warning／info，絕不報 PS0010。
+          // once 的碼（G60 這種每個孔位都寫的）整支程式只提示一次，不然 434 個孔位就是 434 則 info。
+          const muted = known.once && ctx.onceCodes && ctx.onceCodes.has(name);
+          if (!muted) {
+            if (known.once) (ctx.onceCodes = ctx.onceCodes || new Set()).add(name);
+            diags.push(U.diag('R02', line, known.sev, known.msg,
+              { detail: (known.detail || UNSUPPORTED_DETAIL) + (known.blocksMotion ? '\n這一節的座標字是這個指令的參數（不是移動終點），預演不會產生移動。' : '') }));
+          }
           if (known.blocksMotion) blocksMotion = true;
           if (known.skipMotion) forcedMotion = known.skipMotion;
           if (name === 'G16') ctx.polar = true;

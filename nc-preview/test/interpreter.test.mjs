@@ -779,6 +779,28 @@ test('G65 巨集呼叫：warning「該段未預演」，引數不當座標', () 
   assert.equal(p.at(1).actions.length, 0);
 });
 
+test('G60 單方向定位：當節視為 G0、不改 G1 模態、循環中照鑽、整支只提示一次', () => {
+  // 現場實際程式（O0008）：G81 生效中 434 個孔位每節都寫 G60，
+  // 之前被當「查不到的 G 碼」整節不動 → 434 個孔全部消失、素材推估也錯。
+  // 非循環：G60 節快速到終點；下一節沒寫 G 的維持原本的 G1 模態（G60 是 00 群非模態）
+  const p = prog('G0G90X0.Y0.\nG1Z-5.F100\nG60X10.Y5.\nX20.');
+  assert.equal(byRule(p.run, 'R02', 'error').length, 0, 'G60 不是查無此碼');
+  assert.equal(acts(p.at(3), 'rapid').length, 1, 'G60 節是快速定位');
+  near(acts(p.at(3), 'rapid')[0].to.x, 10);
+  assert.equal(acts(p.at(4), 'linear').length, 1, 'G60 不進 01 群，下一節回到 G1');
+  // 固定循環：G81 生效中每個 G60X..Y.. 節都要鑽一個孔，循環不能被取消
+  const q = prog('G0G90G54G60X-37.5Y140.G43H1Z20.\nG98R0.5G81Z-1.25F60\nG60Y125.\nG60X-22.5\nG60Y140.\nG80');
+  assert.equal(byRule(q.run, 'R02', 'error').length, 0);
+  assert.equal(byRule(q.run, 'R18').length, 0, 'G60 不可以觸發「循環被 01 群取消」');
+  assert.equal(acts(q.at(3), 'hole').length, 1, 'L3 鑽一孔');
+  assert.equal(acts(q.at(4), 'hole').length, 1, 'L4 鑽一孔');
+  assert.equal(acts(q.at(5), 'hole').length, 1, 'L5 鑽一孔');
+  near(acts(q.at(4), 'hole')[0].x, -22.5);
+  near(acts(q.at(4), 'hole')[0].y, 125);
+  // 整支程式只提示一次（不然 434 個孔位就是 434 則）
+  assert.equal(byRule(q.run, 'R02', 'info').filter((d) => /G60/.test(d.message)).length, 1);
+});
+
 test('真的查無此碼 → 仍是 error PS0010，但不產生幽靈路徑', () => {
   const p = prog('G100X10.');
   const e = byRule(p.run, 'R02', 'error');

@@ -42,7 +42,7 @@
 - `on`：`skipLevel` 在 `settings.skipLevelsOn` 內的節 → `skipped=true`（不執行，`after=before`）。多斜線節依 `settings.multiSlash`：`asSingle` → 視同 `/`；`ignoreBlock` → `ignored=true`；`alarm` → 執行但由 rules 報 error（interpreter 不管）。
 - `multiIgnored`：`slashes>=2` → `ignored=true` 永遠不執行；`slashes==1` 執行（相當於開關關）。
 
-G 碼群組（同節同群組兩個以上 → R03 warning，後者有效）：01 `G0 G1 G2 G3`；02 `G17 G18 G19`；03 `G90 G91`；05 `G94 G95`；06 `G20 G21`；07 `G40 G41 G42`；08 `G43 G44 G49`；09 `G73 G74 G76 G80–G89`；10 `G98 G99`；12 `G54–G59`；00（單節）`G4 G28 G30 G53 G05.1 G10 G92`。群組 01 的 G0–G3 會取消群組 09 的循環（同節同時有 → 循環取消，warning R18）。
+G 碼群組（同節同群組兩個以上 → R03 warning，後者有效）：01 `G0 G1 G2 G3`；02 `G17 G18 G19`；03 `G90 G91`；05 `G94 G95`；06 `G20 G21`；07 `G40 G41 G42`；08 `G43 G44 G49`；09 `G73 G74 G76 G80–G89`；10 `G98 G99`；12 `G54–G59`；00（單節）`G4 G28 G30 G53 G05.1 G10 G92`。群組 01 的 G0–G3 會取消群組 09 的循環（同節同時有 → 循環取消，warning R18）。**G60 單方向定位**（消除反向間隙、鑽孔程式常每個孔位都寫）不進任何群組：當節視為 G0 快速到終點、不改 01 群模態（Fanuc 標準是 00 群非模態）、固定循環中不取消循環照鑽孔，過衝那一小段不模擬；整支程式只出一則 R02 info（`UNSUPPORTED_G` 的 `once`）。
 
 每節處理順序（Fanuc 慣例）：
 1. 套用所有非移動模態字（G 群組、F、S、T、H、D、M 的狀態部分）。
