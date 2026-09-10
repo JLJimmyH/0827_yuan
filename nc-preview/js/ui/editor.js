@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 程式編輯器（CONTRACT §8 editor）
+ * 銑床預演台 — 程式編輯器（CONTRACT §8 editor）
  * NC.ui.createEditor(container, opts?) → Editor
  *
  * 版面：左 gutter（行號 + 診斷色點，hover 顯示訊息）｜中 textarea｜右 行旁資訊欄（setLineInfo(fn) 提供字串）。

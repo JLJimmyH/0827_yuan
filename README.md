@@ -1,4 +1,4 @@
-# NC 預演台
+# 銑床預演台
 
 Fanuc 加工中心 G-code 的預演與檢錯工具。把 NC 程式丟進去，看到刀具路徑、素材被切成什麼樣子，以及程式裡可能出事的地方。純前端，程式檔不離開瀏覽器。
 
@@ -13,6 +13,8 @@ Fanuc 加工中心 G-code 的預演與檢錯工具。把 NC 程式丟進去，�
 **完整說明**（操作、廢料判定、四軸、網址參數、檔案結構、已知限制）看 [nc-preview/README.md](nc-preview/README.md)。
 
 ## 限制
+
+只吃**銑床／加工中心**的 G-code，車床不支援（G 代碼體系不同）。
 
 不是機台模擬器：刀長補正（H）視為 0、G54–G59 當成同一原點、只支援 G17 平面、不模擬加減速與前瞻。**上機前的 dry run 照做。**
 
@@ -33,3 +35,9 @@ node tools/check-samples.mjs         # 示範程式不能有 error
 [GPL-3.0](LICENSE)。可以自由使用、修改、散布；但把修改過的版本散布出去時，必須同樣以 GPL-3.0 公開原始碼。
 
 Copyright (C) 2026 Jimmy
+
+## 贊助
+
+贊助一杯咖啡讓工程師可以繼續熬夜改 code：[buymeacoffee.com/chenggg0605](https://buymeacoffee.com/chenggg0605)
+
+問題回報看工具裡的「關於」（點頂列標題），信裡請附上版本號。

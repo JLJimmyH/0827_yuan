@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — tokenizer.js
+ * 銑床預演台 — tokenizer.js
  * NC.tokenize(text) → TokenizeResult
  * 只做詞法：切行、剝註解、節首斜線、字組切分；不做任何語意判斷（那是 interpreter 的事）。
  * 詳見 docs/CONTRACT.md §1。

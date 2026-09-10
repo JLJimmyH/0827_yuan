@@ -1,12 +1,14 @@
 /*
- * NC 預演台 — 共用命名空間、型別定義（JSDoc）與小工具。
+ * 銑床預演台 — 共用命名空間、型別定義（JSDoc）與小工具。
  * 所有模組都掛在 globalThis.NC 底下；瀏覽器用 <script src> 依序載入，Node 測試用 test/load.mjs 依序 eval。
  * 這個檔案是「契約」：其他模組不得修改這裡的 typedef；需要新增欄位請在 docs/CONTRACT.md 提案。
  */
 (function (root) {
   'use strict';
   const NC = (root.NC = root.NC || {});
-  NC.VERSION = '0.1.0';
+  // 版本號＝發佈日期。現場回報問題時報這個號碼，就知道他手上是哪一版、修過的有沒有進去。
+  // 「關於」對話框與問題回報信件的模板都會帶上它。要更新跑 tools/bump-version.mjs。
+  NC.VERSION = '2026.09.10';
 
   // ---------------------------------------------------------------------------
   // 基本型別

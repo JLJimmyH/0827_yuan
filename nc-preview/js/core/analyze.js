@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — analyze.js
+ * 銑床預演台 — analyze.js
  * 把各模組串成一次完整分析：tokenize → interpret（每個情境）→ 刀具表 → buildSegments → 素材推估
  * → rules（無 sim）→ 模擬（每個情境）→ rules（sim/cross 階段）→ 診斷合併去重排序。
  *

@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 3D 成品視圖（原生 WebGL1，帶 WebGL2 偵測；不使用任何外部函式庫）。
+ * 銑床預演台 — 3D 成品視圖（原生 WebGL1，帶 WebGL2 偵測；不使用任何外部函式庫）。
  *
  *   NC.ui.createView3D(canvas, options?) → View3D | null   （建立失敗回 null，呼叫端可退回 2D）
  *   NC.ui.view3d.isSupported()                             → 這個環境能不能開 WebGL

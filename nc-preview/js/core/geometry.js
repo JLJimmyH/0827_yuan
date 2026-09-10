@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — geometry.js
+ * 銑床預演台 — geometry.js
  * 把 interpreter 產生的 Run（ExecutedBlock/Action）轉成 Segment 清單：
  *   - rapid/linear/arc → programmed 段；refReturn → 兩段 rapid；hole → 固定循環展開
  *   - ,C / ,R 倒角／圓角展開

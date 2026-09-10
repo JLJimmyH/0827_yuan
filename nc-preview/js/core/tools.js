@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — tools.js：刀具推測、補正、素材推估、刀具表儲存與 CSV 匯入匯出。
+ * 銑床預演台 — tools.js：刀具推測、補正、素材推估、刀具表儲存與 CSV 匯入匯出。
  * 依 docs/CONTRACT.md §4 實作，掛在 NC.tools。
  * 核心模組不碰 DOM；只有 save/load 會碰 localStorage，而且一律 try/catch（Node 下沒有 localStorage 也安全）。
  */

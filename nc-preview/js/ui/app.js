@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 應用程式主控（CONTRACT §8 app）
+ * 銑床預演台 — 應用程式主控（CONTRACT §8 app）
  *
  * 責任：
  *   1. 開檔（按鈕 + 整頁拖放，UTF-8 → big5 解碼）、存檔（Blob 下載）、複製、載入內建範例、URL hash #sample=…
@@ -46,6 +46,8 @@
   // 存包絡盒的話改天改了換算規則，舊資料就跟新規則對不起來。
   // 項目長相：{ spec?, fixtures?, scrap? }；scrap 是預設值就不寫（loadStock 只看 spec，不受影響）。
   const STOCK_KEY = 'ncPreview.stock.v1';
+  // 問題回報信箱。拆成兩段再接起來，公開網頁上的爬蟲抓不到完整位址。
+  const REPORT_MAIL = 'chenggg0601' + '@' + 'gmail.com';
   // 廢料的顯示方式（視圖工具列 #selScrap）。預設「標示」不「隱藏」：一料多件的程式
   // 「工件」不只一塊，隱藏會把真正要的零件藏掉；標示錯了至少看得到、點一下就能改。
   const SCRAP_MODES = ['off', 'mark', 'hide'];
@@ -345,6 +347,8 @@
       btnLayers: $('btnLayers'), popLayers: $('popLayers'),
       btnToolsPop: $('btnToolsPop'), popTools: $('popTools'), toolPopCount: $('toolPopCount'),
       popBackdrop: $('popBackdrop'), kbdHelp: $('kbdHelp'),
+      btnAbout: $('btnAbout'), btnAboutTitle: $('btnAboutTitle'), btnAboutClose: $('btnAboutClose'),
+      aboutBox: $('aboutBox'), aboutVer: $('aboutVer'), aboutMail: $('aboutMail'),
       tabTools: $('tabTools'), tabDiag: $('tabDiag'), tabOps: $('tabOps'),
       stockHost: $('stockHost'), settingsHost: $('settingsHost'), magHost: $('magHost'),
       tabOverview: $('tabOverview'), projectChips: $('projectChips'), miniModal: $('miniModal'),
@@ -2321,6 +2325,45 @@
       if (el.kbdHelp) el.kbdHelp.classList.toggle('nc-hidden', !on);
     }
     if (el.kbdHelp) el.kbdHelp.addEventListener('click', () => showKbdHelp(false));
+
+    // ---- 關於（點頂列標題開，點任何地方或 Esc 關）----
+    // 信箱不寫在 HTML 裡、在這裡組出來：線上版是公開的 GitHub Pages，
+    // 明碼的 mailto 會被爬蟲抓去寄垃圾信。畫面與掃碼的效果一樣，爬蟲抓不到。
+    function reportMailto() {
+      const ver = NC.VERSION || '（不明）';
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '（不明）';
+      const body = `發生什麼事：
+
+怎麼重現（哪一支程式、按了什麼、第幾行）：
+
+版本：${ver}
+瀏覽器：${ua}
+
+—— 不用附整支加工程式，貼出出問題的那幾行就好。
+`;
+      return 'mailto:' + REPORT_MAIL + '?subject=' + encodeURIComponent('銑床預演台 問題回報 · ' + ver)
+        + '&body=' + encodeURIComponent(body);
+    }
+    function showAbout(on) {
+      if (!el.aboutBox) return;
+      if (on) {
+        if (el.aboutVer) el.aboutVer.textContent = '版本 ' + (NC.VERSION || '—');
+        if (el.aboutMail) {
+          el.aboutMail.textContent = REPORT_MAIL;
+          el.aboutMail.href = reportMailto();
+        }
+      }
+      el.aboutBox.classList.toggle('nc-hidden', !on);
+    }
+    for (const b of [el.btnAbout, el.btnAboutTitle]) {
+      if (b) b.addEventListener('click', () => showAbout(true));
+    }
+    if (el.btnAboutClose) el.btnAboutClose.addEventListener('click', () => showAbout(false));
+    if (el.aboutBox) {
+      // 只有點到遮罩本身（方框外面）才關。點方框裡面不關——信箱、網址這些
+      // 是要讓人選取複製的，點一下就收起來會很難用。
+      el.aboutBox.addEventListener('click', (ev) => { if (ev.target === el.aboutBox) showAbout(false); });
+    }
     document.addEventListener('keydown', (ev) => {
       if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey) {
         const k = ev.key.toLowerCase();
@@ -2329,7 +2372,7 @@
         return;
       }
       if (ev.ctrlKey || ev.altKey || ev.metaKey || isTyping(ev)) return;
-      if (ev.key === 'Escape') { showKbdHelp(false); return; }
+      if (ev.key === 'Escape') { showKbdHelp(false); showAbout(false); return; }
       if (VIEW_MODE_KEYS[ev.key]) {
         const b = document.querySelector(`.app-seg__btn[data-mode="${VIEW_MODE_KEYS[ev.key]}"]`);
         if (b && !b.disabled) b.click();
@@ -2485,7 +2528,7 @@
       try {
         ui.app = createApp();
       } catch (e) {
-        console.error('NC 預演台啟動失敗：', e);
+        console.error('銑床預演台啟動失敗：', e);
         const host = document.getElementById('editorHost');
         if (host) host.innerHTML = '<div class="app-empty">啟動失敗：' + String(e && e.message ? e.message : e) + '</div>';
       }

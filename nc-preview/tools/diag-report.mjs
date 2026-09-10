@@ -36,7 +36,7 @@ const ruleTitle = (id) => {
 function pad(s, n) { s = String(s); return s + ' '.repeat(Math.max(0, n - s.length)); }
 function ms(t0) { return Math.round((Number(process.hrtime.bigint() - t0) / 1e6) * 10) / 10; }
 
-console.log(`NC 預演台 診斷總表　模擬：${useSim ? `開（cell ${cell} mm）` : '關'}　rules.js：${NC.rules ? '已載入' : '未載入'}`);
+console.log(`銑床預演台 診斷總表　模擬：${useSim ? `開（cell ${cell} mm）` : '關'}　rules.js：${NC.rules ? '已載入' : '未載入'}`);
 
 const grand = {};
 for (const f of targets) {

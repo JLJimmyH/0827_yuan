@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — interpreter.js
+ * 銑床預演台 — interpreter.js
  * NC.interpret(blocks, settings, scenario) → Run
  * 逐節執行 Fanuc 模態、產生 Action、切分 Operation，並負責 CONTRACT §2 列出的診斷：
  * R02 R03 R04 R08 R09 R13 R16 R17 R18 R21 R22(部分) R23 R32。

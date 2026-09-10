@@ -1,4 +1,4 @@
-/* NC 預演台 — 2D 視圖（view2d.js）樣式。
+/* 銑床預演台 — 2D 視圖（view2d.js）樣式。
  * 容器給 .nc-view2d，canvas 以 CSS 撐滿容器；像素尺寸由 view2d.js 依 devicePixelRatio 同步。 */
 .nc-view2d {
   position: relative;

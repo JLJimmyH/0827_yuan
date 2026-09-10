@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 編輯器樣式（js/ui/editor.js）
+ * 銑床預演台 — 編輯器樣式（js/ui/editor.js）
  * 結構：.nc-editor > [.nc-editor__gutter | .nc-editor__main(目前行底色 + 上色鏡像 + textarea) | .nc-editor__info] + .nc-editor__tip
  * 三欄共用同一個行高（--nc-editor-lh），左右欄以 transform 跟隨 textarea 的 scrollTop。
  */

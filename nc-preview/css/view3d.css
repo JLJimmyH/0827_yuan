@@ -1,4 +1,4 @@
-/* NC 預演台 — 3D 成品視圖（view3d.js）樣式。
+/* 銑床預演台 — 3D 成品視圖（view3d.js）樣式。
  * 容器給 .nc-view3d（position:relative），canvas 以 CSS 撐滿容器；
  * 像素尺寸由 view3d.js 依 devicePixelRatio 同步。HUD 覆蓋層由 view3d.js 建立在 canvas 的父節點下。 */
 .nc-view3d {

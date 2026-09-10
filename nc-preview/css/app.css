@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 整體版面（index.html / js/ui/app.js）
+ * 銑床預演台 — 整體版面（index.html / js/ui/app.js）
  * 色彩沿用 panels.css 的 CSS 變數（--nc-*），這裡只補版面與工具列自己的樣式。
  * 版面：頂列工具列 ─ 左 Project（程式｜素材｜刀具表｜刀庫｜機台，整欄全高）
  *      ｜右：視圖（上）＋狀態條（下 30%：總覽｜游標行｜作業摘要｜錯誤清單，右端 Project 徽章）。
@@ -698,6 +698,75 @@ html, body {
   background: var(--nc-bg-alt, #f7f8fa);
 }
 .app-kbd__hint { margin-top: 12px; color: var(--nc-faint, #98a2b3); font-size: 11.5px; text-align: center; }
+
+/* ---- 關於（點頂列標題開；與快捷鍵面板同一種浮層） ---- */
+.app-about {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 24, 40, 0.32);
+}
+.app-about__box {
+  position: relative;
+  min-width: 320px;
+  max-width: min(92vw, 460px);
+  padding: 18px 22px 12px;
+  background: var(--nc-bg, #fff);
+  border: 1px solid var(--nc-border, #e5e8ee);
+  border-radius: 12px;
+  box-shadow: var(--nc-shadow-md, 0 6px 20px rgba(16, 24, 40, 0.14));
+}
+.app-about__close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--nc-faint, #98a2b3);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+.app-about__close:hover { background: var(--nc-bg-alt, #f7f8fa); color: var(--nc-text, #1a2129); }
+.app-about__title { font-weight: 700; font-size: 15px; padding-right: 28px; }
+.app-about__ver { font: 12px var(--nc-mono, Consolas, monospace); color: var(--nc-muted, #6f7a89); font-weight: 400; }
+.app-about__sub { margin-top: 3px; color: var(--nc-text-2, #4a5462); font-size: 12.5px; }
+.app-about__rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+.app-about__rows dt { color: var(--nc-muted, #6f7a89); }
+.app-about__rows dd { margin: 0; }
+.app-about__note { display: block; color: var(--nc-faint, #98a2b3); font-size: 11.5px; }
+.app-about__bmc {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;      /* 手機寬度不夠時讓文字掉到 QR 下面，不要擠成一條 */
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--nc-border, #e5e8ee);
+  font-size: 13px;
+}
+/* QR 是本機檔案（tools/make-qr.mjs 產的），file:// 離線開一樣看得到 */
+.app-about__qr { flex: none; display: block; border: 1px solid var(--nc-border, #e5e8ee); border-radius: 6px; }
+.app-about__bmc-title { font-weight: 600; margin-bottom: 2px; }
+.app-about__hint { margin-top: 14px; color: var(--nc-faint, #98a2b3); font-size: 11.5px; text-align: center; }
+
+/* 頂列標題是「關於」的入口：外觀維持原樣，只多一個游標與 ⓘ */
+.app-bar__title { cursor: pointer; background: none; border: 0; font: inherit; color: inherit; }
+.app-bar__info { margin-left: 6px; color: var(--nc-faint, #98a2b3); font-size: 12px; }
+.app-bar__title:hover .app-bar__info { color: var(--nc-accent, #2f6fed); }
 
 /* 頂列的嚴重度徽章可以點（開錯誤清單並只看該類） */
 .app-status__counts button.nc-pill { font: inherit; font-size: 11px; cursor: pointer; }

@@ -71,7 +71,7 @@ const samples = NAMES.map((name) => ({ name: name.replace(/\.nc$/i, ''), text: r
 
 const lines = [];
 lines.push('/*');
-lines.push(' * NC 預演台 — 內建範例程式（由 tools/make-samples.mjs 從 samples/ 產生，請勿手動編輯）。');
+lines.push(' * 銑床預演台 — 內建範例程式（由 tools/make-samples.mjs 從 samples/ 產生，請勿手動編輯）。');
 lines.push(' * 重新產生：在 nc-preview 目錄下執行 node tools/make-samples.mjs（輸出固定，內容變了才會有差異）。');
 lines.push(' */');
 lines.push('(function (NC) {');

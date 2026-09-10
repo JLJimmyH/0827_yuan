@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 2D 視圖（Canvas 2D）。
+ * 銑床預演台 — 2D 視圖（Canvas 2D）。
  * NC.ui.createView2D(canvas) → View
  *   setData({segments, sim, stock, toolTable, scenario})
  *   setMode('top'|'sectionX'|'sectionY')   setSection(v)   setSnapshot(i|null)

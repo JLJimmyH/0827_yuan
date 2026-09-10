@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — 面板（NC.ui.panels）
+ * 銑床預演台 — 面板（NC.ui.panels）
  * 刀具表、錯誤清單、模態、作業摘要、素材、設定六個面板，全部用原生 DOM 建立。
  * 純邏輯（不碰 DOM）集中在 NC.ui.panels.logic，方便在 Node 下測試；DOM 部分只在呼叫面板函式時才碰 document。
  *

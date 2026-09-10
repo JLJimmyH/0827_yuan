@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — rules.js：跨模組檢查規則（CONTRACT §6）
+ * 銑床預演台 — rules.js：跨模組檢查規則（CONTRACT §6）
  *
  * NC.rules.registry : Rule[]  每條規則 {id, title, severity, phase, check(ctx) → Diagnostic[]}
  * NC.rules.run(ctx, opts?)    跑規則，回傳 Diagnostic[]

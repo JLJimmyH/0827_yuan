@@ -1,5 +1,5 @@
 /*
- * NC 預演台 — simulation.js：heightmap 材料模擬（NC.sim）
+ * 銑床預演台 — simulation.js：heightmap 材料模擬（NC.sim）
  *
  * 模型：素材以固定格距（cell）的高度圖（Float32Array）表示，每格記錄「該點目前的材料頂面 Z」。
  * 治具以「不可切的材料」寫進高度圖，並用 mask 記錄格子所屬治具。
