@@ -50,5 +50,3 @@ node tools/shot.mjs [範例[:hash]]  # headless 截圖，順便抓 console 錯�
 ## 授權
 
 [GPL-3.0](../LICENSE)。修改過的版本要散布出去時，必須同樣以 GPL-3.0 公開原始碼。
-
-贊助一杯咖啡讓工程師可以繼續熬夜改 code：[buymeacoffee.com/chenggg0605](https://buymeacoffee.com/chenggg0605)（「關於」裡有 QR 可以掃）。
