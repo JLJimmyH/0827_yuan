@@ -713,7 +713,7 @@ html, body {
   position: relative;
   min-width: 320px;
   max-width: min(92vw, 520px);   /* 放得下 160px 的 QR 加旁邊那行字；手機仍會折行 */
-  padding: 18px 22px 12px;
+  padding: 18px 22px 18px;
   background: var(--nc-bg, #fff);
   border: 1px solid var(--nc-border, #e5e8ee);
   border-radius: 12px;
@@ -761,7 +761,6 @@ html, body {
 /* QR 是本機檔案（tools/make-qr.mjs 產的），file:// 離線開一樣看得到 */
 .app-about__qr { flex: none; display: block; border: 1px solid var(--nc-border, #e5e8ee); border-radius: 6px; }
 .app-about__bmc-title { font-weight: 600; margin-bottom: 2px; }
-.app-about__hint { margin-top: 14px; color: var(--nc-faint, #98a2b3); font-size: 11.5px; text-align: center; }
 
 /* 頂列標題是「關於」的入口：外觀維持原樣，只多一個游標與 ⓘ */
 .app-bar__title { cursor: pointer; background: none; border: 0; font: inherit; color: inherit; }
