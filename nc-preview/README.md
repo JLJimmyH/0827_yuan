@@ -47,8 +47,6 @@ node tools/shot.mjs [範例[:hash]]  # headless 截圖，順便抓 console 錯�
 
 `js/core/*` 是不碰 DOM 的核心（Node 可測），`js/ui/*` 才碰 DOM，載入順序固定寫在 `index.html`。
 
-**改核心模組前先讀 [`docs/CONTRACT.md`](docs/CONTRACT.md)**，尤其最後一節「整合決議」—— 那些是踩過坑之後定下來的規則。其餘腳本、檔案結構與效能基準見 [`docs/USAGE.md`](docs/USAGE.md#開發附錄)。
-
 ## 授權
 
 [GPL-3.0](../LICENSE)。修改過的版本要散布出去時，必須同樣以 GPL-3.0 公開原始碼。
