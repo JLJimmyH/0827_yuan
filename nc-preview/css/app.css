@@ -712,7 +712,7 @@ html, body {
 .app-about__box {
   position: relative;
   min-width: 320px;
-  max-width: min(92vw, 460px);
+  max-width: min(92vw, 520px);   /* 放得下 160px 的 QR 加旁邊那行字；手機仍會折行 */
   padding: 18px 22px 12px;
   background: var(--nc-bg, #fff);
   border: 1px solid var(--nc-border, #e5e8ee);

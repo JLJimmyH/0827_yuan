@@ -143,7 +143,7 @@ nc-preview/
 │  ├─ rules.js         跨模組的檢查規則（其餘由各模組就地發出）
 │  └─ analyze.js       串起整條流程，合併去重排序診斷
 ├─ js/ui/              editor｜panels｜view2d｜view3d｜samples｜app
-├─ img/bmc-qr.svg      贊助頁的 QR（tools/make-qr.mjs 產的本機檔，不連外）
+├─ img/bmc-qr.png      贊助頁的 QR（Buy Me a Coffee 官方產的，縮成 320px 存本機、不連外）
 ├─ samples/            示範程式（進版控）
 ├─ test/               node:test 測試
 ├─ tools/              開發腳本
