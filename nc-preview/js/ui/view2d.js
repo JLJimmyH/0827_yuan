@@ -113,7 +113,7 @@
    *   airZ       （預設 zBottom）「沒料」的門檻。模擬把切穿夾在 floorZ，正常情況 zBottom 就是 floorZ；
    *              素材底比 floorZ 還低的怪情況由呼叫端直接給 floorZ。
    *   labels     Int32Array，每格所屬的塊號（0 = 沒歸類）；scrapByLabel[label] = 1 表示那塊是廢料。
-   *   mode       'off' 照舊；'mark' 廢料格混橘（SCRAP_MIX）、alpha 190；'hide' 廢料格畫成跟切穿一樣的棋盤（alpha 255）。
+   *   mode       'off' 保留（當一般材料）；'mark' 廢料格混橘（SCRAP_MIX）、alpha 190；'hide' 廢料格畫成跟切穿一樣的棋盤（alpha 255）。
    *              以前 hide 是 alpha 0，透出來的素材灰底跟工件頂面幾乎同色，看起來像「還有一整塊沒切的料」；
    *              「不見了」就該長得像空氣。判定在 core 做，這裡只負責上色，所以沒有 labels 就跟 'off' 一樣。
    * @returns {{width:number,height:number,data:Uint8ClampedArray}}
@@ -527,7 +527,7 @@
       chunks: null,             // ChunkResult（supported 且有 labels 才存）
       chunkByLabel: null,       // Map<label, chunk>，hover／getChunkAt 用
       scrapByLabel: null,       // Uint8Array：label → 是不是廢料（影像與剖面每格都要查）
-      scrapMode: 'off',         // 'off' 照舊｜'mark' 混橘｜'hide' 畫成棋盤（跟切穿一樣）
+      scrapMode: 'off',         // 'off' 保留（當一般材料）｜'mark' 混橘｜'hide' 畫成棋盤（跟切穿一樣）
       marks: [],                // 使用者點的記號 [{x, y, kind}]，只負責畫
       markMode: null,           // 'part'｜'scrap'：下一次點擊是在放記號，不是挑路徑
       markCb: null,
@@ -838,7 +838,7 @@
       }
       const z = heightAt(sim, S.heightArr, wx, wy);
       if (z != null) t += `  Z面 ${fmt(z)}（深 ${fmt(zTop - z)}）`;
-      // 廢料：滑到那塊就直說，不用靠顏色猜；「照舊」模式下使用者不想看到這件事，就不加
+      // 廢料：滑到那塊就直說，不用靠顏色猜；「保留」模式下使用者不想看到這件事，就不加
       if (S.scrapMode !== 'off') {
         const ch = chunkAt(wx, wy);
         if (ch && !ch.part) t += '　廢料（跟工件不相連）' + (ch.touchesFixture ? '，碰到夾具' : '');
