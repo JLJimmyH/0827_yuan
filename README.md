@@ -2,12 +2,12 @@
 
 Fanuc 立式綜合加工機（VMC）的 G-code 預演與檢錯工具。丟一支 NC 程式進去，看到刀具路徑、材料被切成什麼樣子，以及這支程式裡可能出事的地方。
 
-[![test](https://github.com/JLJimmyH/0827_yuan/actions/workflows/test.yml/badge.svg)](https://github.com/JLJimmyH/0827_yuan/actions/workflows/test.yml)
-[![版本](https://img.shields.io/github/v/tag/JLJimmyH/0827_yuan?label=%E7%89%88%E6%9C%AC&color=brightgreen)](https://github.com/JLJimmyH/0827_yuan/tags)
+[![test](https://github.com/JLJimmyH/mill-preview/actions/workflows/test.yml/badge.svg)](https://github.com/JLJimmyH/mill-preview/actions/workflows/test.yml)
+[![版本](https://img.shields.io/github/v/tag/JLJimmyH/mill-preview?label=%E7%89%88%E6%9C%AC&color=brightgreen)](https://github.com/JLJimmyH/mill-preview/tags)
 [![授權](https://img.shields.io/badge/%E6%8E%88%E6%AC%8A-GPL--3.0-blue)](LICENSE)
 [![相依套件](https://img.shields.io/badge/%E7%9B%B8%E4%BE%9D%E5%A5%97%E4%BB%B6-0-success)](#開發)
 
-**▶ 線上使用：https://jljimmyh.github.io/0827_yuan/** —— 開啟即用，不必安裝、不必註冊。
+**▶ 線上使用：https://jljimmyh.github.io/mill-preview/** —— 開啟即用，不必安裝、不必註冊。
 
 ![主畫面：左邊編輯器，右邊 2D 俯視與 3D 成品並排](docs/screenshots/main.png)
 
@@ -22,7 +22,7 @@ Fanuc 立式綜合加工機（VMC）的 G-code 預演與檢錯工具。丟一支
 
 ## 快速開始
 
-1. 開 [線上版](https://jljimmyh.github.io/0827_yuan/)，或下載後用瀏覽器直接開 `nc-preview/index.html`（`file://` 也可以）。
+1. 開 [線上版](https://jljimmyh.github.io/mill-preview/)，或下載後用瀏覽器直接開 `nc-preview/index.html`（`file://` 也可以）。
 2. 選內建範例，或把 NC 檔**拖進視窗**。編碼自動判斷（UTF-8 → Big5），沒有副檔名也可以。
 3. 用到 G41／G42 的程式，到「刀具表」填 **D 值**；到「素材」填**真實尺寸**。這兩項直接決定成品圖與檢查結果準不準。
 4. 右下「錯誤清單」看結果。點路徑或點錯誤，都會跳到對應的那一行。

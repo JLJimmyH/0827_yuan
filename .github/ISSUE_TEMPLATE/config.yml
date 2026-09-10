@@ -2,8 +2,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: 不用 GitHub 帳號，直接寄信
-    url: https://jljimmyh.github.io/0827_yuan/
+    url: https://jljimmyh.github.io/mill-preview/
     about: 打開工具，頂列點「ⓘ 關於」裡面有回報信箱（信件會自動帶上版本號與瀏覽器）
   - name: 想加功能、或想討論怎麼用
-    url: https://github.com/JLJimmyH/0827_yuan/issues/new?labels=enhancement
+    url: https://github.com/JLJimmyH/mill-preview/issues/new?labels=enhancement
     about: 開一個 issue 說明你的加工情境

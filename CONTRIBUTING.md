@@ -4,7 +4,7 @@
 
 工具頂列點「ⓘ 關於」看版本號，**回報時附上它** —— 才知道你手上是哪一版、修過的有沒有進去。
 
-- 有 GitHub 帳號 → [開 issue](https://github.com/JLJimmyH/0827_yuan/issues/new/choose)
+- 有 GitHub 帳號 → [開 issue](https://github.com/JLJimmyH/mill-preview/issues/new/choose)
 - 沒有 → 「關於」裡有信箱，信件模板會自動帶上版本號與瀏覽器
 
 **不要貼完整的加工程式**，那通常是公司機密；貼出問題的那幾行就夠了。
