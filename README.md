@@ -61,8 +61,6 @@ node --test "test/*.test.mjs"        # 全部測試
 node tools/check-samples.mjs         # 示範程式不能有 error
 ```
 
-回報問題請附上版本號（工具頂列點「ⓘ 關於」看得到），詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
 ## 授權
 
 [GPL-3.0](LICENSE)。可以自由使用、修改、散布；把修改過的版本散布出去時，必須同樣以 GPL-3.0 公開原始碼。
@@ -71,8 +69,10 @@ Copyright (C) 2026 Jimmy
 
 ## 贊助
 
-贊助一杯咖啡讓工程師可以繼續熬夜改 code：
+贊助一杯咖啡讓工程師可以繼續熬夜改 code 🥹：
 
 <a href="https://buymeacoffee.com/chenggg0605"><img src="nc-preview/img/bmc-qr.png" alt="Buy Me a Coffee QR code" width="180"></a>
 
 [buymeacoffee.com/chenggg0605](https://buymeacoffee.com/chenggg0605)
+
+問題回報看工具裡的「關於」（點頂列標題），或是直接從 issue 給我 ~
