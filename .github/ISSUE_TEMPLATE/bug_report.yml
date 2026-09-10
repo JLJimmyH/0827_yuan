@@ -1,0 +1,59 @@
+name: 回報問題
+description: 畫面不對、檢查結果有疑問、或工具當掉
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **請不要貼上完整的加工程式。** 那通常是公司的機密，貼出問題的那幾行就夠了。
+        （這個工具本身不會把你的程式傳出去，但 GitHub 上的 issue 是公開的。）
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 在工具頂列點「ⓘ 關於」就看得到，例如 2026.09.10
+      placeholder: 2026.09.10
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: 瀏覽器
+      placeholder: Chrome 141 / Edge / 手機 Safari
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 發生什麼事
+      description: 你看到的結果，以及你原本預期的結果
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 怎麼重現
+      description: 哪一支程式（內建範例的話寫名字）、按了什麼、第幾行
+      placeholder: |
+        1. 載入 demo-cutout
+        2. 切到「剖面 X」，滑桿拉到 -20
+        3. 斷面畫成…
+    validations:
+      required: true
+
+  - type: textarea
+    id: snippet
+    attributes:
+      label: 相關的程式片段（選填）
+      description: 只貼出問題的那幾節就好
+      render: gcode
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: 素材與刀具（選填）
+      description: 素材尺寸有沒有填、用到 G41／G42 的話 D 值填了沒 —— 這兩項會直接改變檢查結果

@@ -1,0 +1,39 @@
+# 測試：push 到 main 與所有 PR 都跑一次。
+#
+# 這個專案沒有 package.json、沒有任何 npm 相依，所以不必 npm ci —— checkout 完
+# 裝好 Node 就能直接跑。golden test 要用的 test/fixtures/（實際生產程式）不進版控，
+# CI 上沒有那個目錄，那組會自動 skip，其餘照跑。
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 單元測試
+        working-directory: nc-preview
+        run: node --test "test/*.test.mjs"
+
+      - name: 示範程式不能有 error
+        working-directory: nc-preview
+        run: node tools/check-samples.mjs
+
+      - name: samples.js 與 samples/ 必須同步
+        working-directory: nc-preview
+        run: |
+          node tools/make-samples.mjs
+          git diff --exit-code js/ui/samples.js \
+            || (echo "::error::samples/ 改過但沒重新產生 js/ui/samples.js，請跑 node tools/make-samples.mjs" && exit 1)

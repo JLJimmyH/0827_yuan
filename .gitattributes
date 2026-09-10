@@ -13,3 +13,7 @@ nc-preview/test/fixtures/**  -text
 *.csv     text eol=lf
 
 *.png     binary
+
+# .nc 是 NC 加工程式，但 GitHub 的 Linguist 會把它認成一個叫 nesC 的嵌入式語言，
+# repo 首頁的語言條就會冒出沒人聽過的東西。排除掉，只讓 JS/HTML/CSS 參與統計。
+*.nc linguist-detectable=false
