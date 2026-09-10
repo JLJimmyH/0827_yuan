@@ -38,10 +38,10 @@ Copyright (C) 2026 Jimmy
 
 ## 贊助
 
-贊助一杯咖啡讓工程師可以繼續熬夜改 code：
+贊助一杯咖啡讓工程師可以繼續熬夜改 code 🥹：
 
 <a href="https://buymeacoffee.com/chenggg0605"><img src="nc-preview/img/bmc-qr.png" alt="Buy Me a Coffee QR code" width="180"></a>
 
 [buymeacoffee.com/chenggg0605](https://buymeacoffee.com/chenggg0605)
 
-問題回報看工具裡的「關於」（點頂列標題），信裡請附上版本號。
+問題回報看工具裡的「關於」（點頂列標題），或是直接從 issue 給我 ~
